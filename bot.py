@@ -25,8 +25,6 @@ TG_LIMIT = 4096
 HELP = (
     "Send me a YouTube or TikTok link and I'll reply with the title, an answer to any clickbait, "
     "and a summary.\n\n"
-    "/frames <url> - also look at video frames (on-screen tables, text)\n"
-    "/noframes <url> - transcript only, skip frames\n"
     "/again <url> - ignore the cache and summarize again\n"
     "/transcript <url> - send the raw transcript as a file"
 )
@@ -38,7 +36,6 @@ class Job:
     url: str
     chat_id: int
     status_id: int
-    force_frames: bool | None = None
     use_cache: bool = True
     transcript_only: bool = False
 
@@ -133,6 +130,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info("admin %s: %s", q.from_user.id, done)
     await q.answer(done[:200])
     await q.edit_message_text(done)
+    await sync_commands(ctx.bot, uid)
     if action == "allow":
         try:
             await ctx.bot.send_message(uid, "✅ You now have access. Send me a YouTube or TikTok link.\n\n" + HELP)
@@ -154,9 +152,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, ctx):
         return
     text = update.message.text or update.message.caption or ""
-    words = text.lower().split()
-    force = True if "frames" in words else False if "noframes" in words else None
-    await enqueue(update, find_url(text), force_frames=force)
+    await enqueue(update, find_url(text))
 
 
 def command(**opts):
@@ -280,8 +276,7 @@ async def worker(app: Application) -> None:
             progress = Progress(app, loop, job)
             try:
                 result = await asyncio.to_thread(
-                    pipeline.run, job.url, progress, force_frames=job.force_frames,
-                    use_cache=job.use_cache, transcript_only=job.transcript_only)
+                    pipeline.run, job.url, progress, use_cache=job.use_cache, transcript_only=job.transcript_only)
             finally:
                 await progress.close()
             if job.transcript_only:
@@ -312,25 +307,36 @@ async def _fail(app: Application, job: Job, msg: str) -> None:
         await app.bot.send_message(job.chat_id, f"⚠️ {msg}")
 
 
-COMMANDS = [
+# The chat's "Menu" button and "/" autocomplete, per user: strangers only see /start, approved users the
+# normal commands, admins also /users.
+STRANGER_COMMANDS = [BotCommand("start", "Request access to this bot")]
+USER_COMMANDS = [
     BotCommand("help", "How to use the bot"),
-    BotCommand("frames", "Summarize and look at video frames: /frames <url>"),
-    BotCommand("noframes", "Summarize from the transcript only: /noframes <url>"),
     BotCommand("again", "Summarize again, ignoring the cache: /again <url>"),
     BotCommand("transcript", "Get the raw transcript as a file: /transcript <url>"),
-    BotCommand("start", "Start / request access"),
 ]
-ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock")]
+ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock")] + USER_COMMANDS
+
+
+async def sync_commands(bot, uid: int) -> None:
+    """Set the command menu for one user's chat to match their access."""
+    st = access.state(uid)
+    scope = BotCommandScopeChat(uid)
+    try:
+        if st == "admin":
+            await bot.set_my_commands(ADMIN_COMMANDS, scope=scope)
+        elif st == "allowed":
+            await bot.set_my_commands(USER_COMMANDS, scope=scope)
+        else:
+            await bot.delete_my_commands(scope=scope)  # back to the default (stranger) menu
+    except (BadRequest, Forbidden) as e:  # user hasn't opened a chat with the bot
+        log.warning("couldn't set commands for %s: %s", uid, e)
 
 
 async def post_init(app: Application) -> None:
-    # The chat's "Menu" button and "/" autocomplete. Admins get /users on top.
-    await app.bot.set_my_commands(COMMANDS, scope=BotCommandScopeDefault())
-    for admin in access.ADMINS:
-        try:
-            await app.bot.set_my_commands(ADMIN_COMMANDS + COMMANDS, scope=BotCommandScopeChat(admin))
-        except BadRequest as e:  # admin hasn't opened a chat with the bot yet
-            log.warning("couldn't set admin commands for %s: %s", admin, e)
+    await app.bot.set_my_commands(STRANGER_COMMANDS, scope=BotCommandScopeDefault())
+    for uid in [*access.ADMINS, *map(int, access.all_users()["allowed"])]:
+        await sync_commands(app.bot, uid)
     app.bot_data["worker"] = asyncio.create_task(worker(app))
     log.info("bot ready; admins: %s, allowed users: %d", sorted(access.ADMINS) or "NONE (setup mode)",
              len(access.all_users()["allowed"]))
@@ -352,8 +358,6 @@ def main() -> None:
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("help", on_help))
-    app.add_handler(CommandHandler("frames", command(force_frames=True)))
-    app.add_handler(CommandHandler("noframes", command(force_frames=False)))
     app.add_handler(CommandHandler("again", command(use_cache=False)))
     app.add_handler(CommandHandler("transcript", command(transcript_only=True)))
     app.add_handler(CommandHandler("users", on_users))

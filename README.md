@@ -14,8 +14,10 @@ Summary:          overview + key points, sized to fit a Telegram message
 2. `yt-dlp` metadata probe. SQLite cache in `data/` keyed by (platform, id): a video is never fetched twice.
 3. Transcript: YouTube captions -> audio + faster-whisper. TikTok: audio + whisper -> TikTok captions.
    Photo carousels: the slide images are the content.
-4. Frame heuristic (no speech, "as you can see…", numbers in the title missing from speech):
-   downloads the video, grabs targeted + evenly spaced frames, drops near-duplicates.
+4. Frames, decided automatically: short videos (≤ `SHORT_VIDEO_SEC`, default 3 min) and speechless ones
+   are always sampled densely; for longer videos the LLM reads the timestamped transcript and names the
+   moments where something is shown rather than said ("this book"), backed up by phrase matching.
+   Near-duplicate frames are dropped, max `MAX_FRAMES`.
 5. The LLM gets metadata, thumbnail, transcript and frames and returns structured JSON (see below).
 6. Reply in Telegram (HTML, split at 4096 chars). Downloaded media is deleted after each job.
 
@@ -56,9 +58,8 @@ Long polling needs the bot to have no webhook set (`deleteWebhook`).
 Run it permanently with the systemd user unit in `deploy/` (instructions inside).
 
 ## Commands
-`/frames <url>` force frames · `/noframes <url>` skip frames · `/again <url>` re-summarize ignoring
-the cached summary · `/transcript <url>` raw transcript as .txt. Adding `frames` / `noframes` after a
-link in a normal message works too.
+`/again <url>` re-summarize ignoring the cached summary · `/transcript <url>` raw transcript as .txt ·
+`/users` (admins). The Telegram command menu is per user: strangers only see `/start`.
 
 ## GPU later
 Set `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16`, `WHISPER_MODEL=medium`, install

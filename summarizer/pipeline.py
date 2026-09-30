@@ -76,13 +76,13 @@ class Status:
         self.done.append(line)
 
 
-def run(url: str, progress: Callable[..., None], *, force_frames: bool | None = None,
-        use_cache: bool = True, transcript_only: bool = False) -> Result:
+def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
+        transcript_only: bool = False) -> Result:
     t0 = time.time()
     video = classify(url)
 
     cached = cache.get(video.platform, video.video_id)
-    if cached and use_cache and (cached["result"] or transcript_only) and force_frames is None:
+    if cached and use_cache and (cached["result"] or transcript_only):
         return Result(video.platform, video.video_id, video.url, cached["meta"], cached["transcript"],
                       cached["transcript_source"], cached["language"], cached["result"],
                       cached["frames_used"], cached=True)
@@ -128,19 +128,7 @@ def run(url: str, progress: Callable[..., None], *, force_frames: bool | None = 
             return _finish(video, meta, transcript, source, lang, None, False, notes, t0)
 
         if not is_carousel:
-            use, reasons = frames.decide(meta, cues, force_frames)
-            log.info("frames=%s reasons=%s", use, reasons)
-            if use:
-                st.show(f"🎞 Pulling video frames ({'; '.join(reasons)})…",
-                        _eta_frames(dur) + _eta_llm(len(transcript), config.MAX_FRAMES))
-                try:
-                    vid = media.download_video(video, workdir)
-                    images = frames.extract(vid, cues, dur, workdir)
-                    vid.unlink(missing_ok=True)
-                    st.ok(f"✅ {len(images)} frames selected")
-                except media.MediaError as e:
-                    notes.append(f"frames unavailable: {e}")
-                    st.ok("⚠️ Couldn't get frames, continuing without")
+            images = _frames(video, meta, cues, transcript, workdir, st, notes, llm)
 
         n_img = len(images) + 1  # + thumbnail
         st.show(f"🧠 Summarizing with {llm}…", _eta_llm(len(transcript), n_img))
@@ -165,6 +153,41 @@ def _finish(video, meta, transcript, source, lang, summary, frames_used, notes, 
              lang, frames_used, time.time() - t0)
     return Result(video.platform, video.video_id, video.url, meta, transcript, source, lang, summary,
                   frames_used, notes=notes)
+
+
+def _frames(video, meta, cues, transcript, workdir, st: Status, notes, llm) -> list[tuple]:
+    """Decide which moments to look at, then grab frames there. Returns [(path, label)]."""
+    dur = meta["duration"] or 0
+    short = frames.is_short(meta)
+    no_speech = frames.speech_wpm(meta, cues) < 15
+    moments = frames.regex_moments(cues)
+    if short or no_speech:
+        why = "short video" if short else "little or no speech"
+    else:
+        st.show(f"🔍 Asking {llm} which moments show something on screen…",
+                _eta_llm(len(transcript), 0) * 2 + _eta_frames(dur))
+        try:
+            tri = summarize.triage(meta, cues)
+            log.info("triage: %s", tri)
+            moments += [float(m["t"]) for m in tri["moments"] if 0 <= float(m["t"]) < dur]
+        except (summarize.SummaryError, KeyError, TypeError, ValueError) as e:
+            log.warning("triage failed, using phrase matching only: %s", e)
+        if not moments:
+            st.ok("✅ Nothing important shown on screen, skipping frames")
+            return []
+        why = f"{len(moments)} on-screen moments"
+    st.show(f"🎞 Looking at the video ({why})…",
+            _eta_frames(dur) + _eta_llm(len(transcript), config.MAX_FRAMES))
+    try:
+        vid = media.download_video(video, workdir)
+        images = frames.extract(vid, dur, moments, workdir, sweep=short or no_speech)
+        vid.unlink(missing_ok=True)
+    except media.MediaError as e:
+        notes.append(f"frames unavailable: {e}")
+        st.ok("⚠️ Couldn't get video frames, continuing without")
+        return []
+    st.ok(f"✅ {len(images)} frames selected ({why})")
+    return images
 
 
 def _whisper(video, meta, workdir, st: Status, notes, why: str, rest: float) -> tuple[list, str, str] | None:
