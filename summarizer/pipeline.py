@@ -89,9 +89,16 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
                       cached["frames_used"], cached=True)
 
     st = Status(progress)
+    timings: list[tuple[str, float]] = []  # (step, seconds), shown under the summary
+
+    def took(label: str, since: float) -> None:
+        timings.append((label, time.monotonic() - since))
+
     st.show("🔎 Looking up the video…")
+    t = time.monotonic()
     try:
         meta = media.probe(video)
+        took("lookup", t)
     except media.MediaError as e:
         raise PipelineError(f"Couldn't load the video: {e}")
     dur = meta["duration"] or 0
@@ -113,12 +120,14 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         if is_carousel:
             # Photo post: the slides are the content; the audio is usually just a music track.
             st.show("🖼 Photo post: downloading the slides…", 10 + _eta_llm(0, 10))
+            t = time.monotonic()
             slides = media.download_carousel(video, workdir)
             if not slides:
                 raise PipelineError("This photo post has no downloadable images (deleted, private, "
                                     "or region-locked).")
             images = [(media.to_jpeg(p, p.with_suffix(".conv.jpg")), f"slide {i}/{len(slides)}")
                       for i, p in enumerate(slides[:config.MAX_SLIDES], 1)]
+            took(f"{len(images)} slides", t)
             st.ok(f"✅ Photo post: {len(images)} slides")
         elif cached and cached["transcript_source"] != "none":
             # Reuse a cached transcript when re-running (/again): never fetch captions twice.
@@ -126,7 +135,9 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
             source, lang = cached["transcript_source"], cached["language"]
             st.ok(f"✅ Transcript: from cache ({source})")
         else:
+            t = time.monotonic()
             cues, source, lang = _transcript(video, meta, workdir, st, notes, transcript_only)
+            took({"captions": "captions", "tiktok-webvtt": "Whisper + captions"}.get(source, "Whisper"), t)
 
         transcript = summarize.format_transcript(cues) if len(cues) > 1 else (cues[0][1] if cues else "")
         if transcript_only:
@@ -135,7 +146,9 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         # No (or hardly any) speech: the picture is the content, so look right away instead of
         # waiting for the LLM to ask. Saves the second LLM turn.
         if not is_carousel and _speechless(meta, transcript):
+            t = time.monotonic()
             images = _frames(video, meta, cues, [], workdir, st, notes, why="no speech, looking at the video")
+            took(f"{len(images)} frames", t)
 
         thumb = media.download_thumbnail(meta, workdir)
         first_images = ([(thumb, "thumbnail")] if thumb else []) + images  # slides or frames, if any
@@ -144,18 +157,23 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
             st.show(f"🧠 Summarizing with {llm}…", _eta_llm(len(transcript), len(first_images)))
             t_llm = time.monotonic()
             answer = conv.start(meta, video.platform, transcript, source, lang, first_images)
+            took(llm, t_llm)
             stats.record(f"llm:{config.LLM_BACKEND}",
                          (time.monotonic() - t_llm) / _llm_load(len(transcript), len(first_images)))
             summary = {k: answer[k] for k in summarize.SCHEMA["required"]}
             log.info("needs_frames=%s moments=%s", answer.get("needs_frames"), answer.get("frame_moments"))
             if answer.get("needs_frames") and not images:  # it already has slides/frames otherwise
                 st.ok("✅ First summary written")
+                t = time.monotonic()
                 frames_ = _frames(video, meta, cues, answer.get("frame_moments") or [], workdir, st, notes)
+                took(f"{len(frames_)} frames", t)
                 if frames_:
                     st.show(f"🧠 {llm} is updating the summary with {len(frames_)} frames…",
                             _eta_llm(0, len(frames_)))
                     try:
+                        t = time.monotonic()
                         summary = conv.add_frames(frames_)
+                        took(f"{llm} with frames", t)
                         images = frames_
                     except summarize.SummaryError as e:  # keep the transcript-only summary
                         log.warning("frames follow-up failed: %s", e)
@@ -164,6 +182,7 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
             raise PipelineError(str(e))
         finally:
             conv.close()
+        summary["_stats"] = {"steps": timings, "total": time.time() - t0}  # cached along with the summary
         return _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media

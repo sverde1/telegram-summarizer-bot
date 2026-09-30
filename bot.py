@@ -38,6 +38,7 @@ class Job:
     status_id: int
     use_cache: bool = True
     transcript_only: bool = False
+    queued_at: float = 0.0
 
 
 queue: asyncio.Queue[Job] = asyncio.Queue()
@@ -145,7 +146,7 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
     ahead = queue.qsize()
     status = await update.message.reply_text(
         "⏳ Got it" + (f", queued (position {ahead + 1})" if ahead else ", working…"))
-    await queue.put(Job(url, update.effective_chat.id, status.message_id, **opts))
+    await queue.put(Job(url, update.effective_chat.id, status.message_id, queued_at=time.monotonic(), **opts))
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -174,16 +175,43 @@ async def on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ---------- output ----------
 
-def render(r: pipeline.Result) -> list[str]:
+def _secs(sec: float) -> str:
+    sec = round(sec)
+    return f"{sec} s" if sec < 60 else f"{sec // 60}:{sec % 60:02d}"
+
+
+def details(r: pipeline.Result, waited: float = 0) -> str:
+    """Footer: how long each step took and what was used."""
+    stats = (r.summary or {}).get("_stats") or {}
+    if r.cached:
+        timing = "⚡ from cache" + (f" (first run took {_secs(stats['total'])})" if stats else "")
+    elif stats:
+        steps = " · ".join(f"{name} {_secs(sec)}" for name, sec in stats["steps"])
+        timing = f"⏱ {_secs(stats['total'])} total: {steps}"
+        if waited >= 5:
+            timing += f" (+ {_secs(waited)} waiting in queue)"
+    else:
+        timing = ""
+    source = {"captions": "YouTube captions", "tiktok-webvtt": "TikTok captions", "none": "none"}.get(
+        r.transcript_source, r.transcript_source.replace("whisper-", "Whisper "))
+    if r.transcript_source == "none":
+        used = "📝 no speech found" if not r.meta.get("is_carousel") else "📝 photo post, no transcript"
+    else:
+        used = f"📝 transcript: {source}" + (f" ({r.language})" if r.language else "")
+    if r.frames_used:
+        used += " · 🖼 slides" if r.meta.get("is_carousel") else " · 🎞 video frames"
+    used += f" · 🧠 {pipeline.BACKEND_NAMES.get(config.LLM_BACKEND, config.LLM_BACKEND)}"
+    return "\n".join(filter(None, [timing, used]))
+
+
+def render(r: pipeline.Result, waited: float = 0) -> list[str]:
     """Build the reply in the Title / Clickbait answer / Summary layout, split to fit Telegram."""
     s = r.summary
     e = html.escape
     head = f"<b>Title:</b>\n{e(s['title'] or r.meta['title'])}\n\n<b>Clickbait answer:</b>\n"
     head += e(s["clickbait_answer"]) if s["is_clickbait"] and s["clickbait_answer"] else "✅ Not clickbait - the title matches the content."
     head += "\n\n<b>Summary:</b>\n"
-    source = r.transcript_source + (f", {r.language}" if r.language else "")
-    foot = f"\n\n<i>{e(r.url)} · transcript: {e(source)}" + (" · frames used" if r.frames_used else "") \
-           + (" · cached" if r.cached else "") + "</i>"
+    foot = "\n\n<i>" + e(details(r, waited)) + f"\n{e(r.url)}</i>"
 
     body = e(s["summary"])
     if len(head) + len(body) + len(foot) <= TG_LIMIT:
@@ -272,6 +300,7 @@ async def worker(app: Application) -> None:
     loop = asyncio.get_running_loop()
     while True:
         job = await queue.get()
+        waited = time.monotonic() - job.queued_at
         try:
             progress = Progress(app, loop, job)
             try:
@@ -287,7 +316,7 @@ async def worker(app: Application) -> None:
                     await app.bot.send_document(job.chat_id, doc, filename=f"{result.video_id}.txt",
                                                 caption=f"Transcript ({result.transcript_source})")
             else:
-                for chunk in render(result):
+                for chunk in render(result, waited):
                     await app.bot.send_message(job.chat_id, chunk, parse_mode=ParseMode.HTML,
                                                disable_web_page_preview=True)
             await app.bot.delete_message(job.chat_id, job.status_id)
