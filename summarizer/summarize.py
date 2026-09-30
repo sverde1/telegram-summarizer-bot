@@ -151,8 +151,23 @@ def conversation() -> "Conversation":
     return cls()
 
 
+BACKEND_NAMES = {"codex": "Codex", "claude-code": "Claude Code", "api": "Claude API"}
+
+
+def llm_label(model: str = "") -> str:
+    """E.g. "Codex (gpt-6-astra)". Without a model: the configured one, else the last one seen."""
+    from . import stats
+    model = model or {"codex": config.CODEX_MODEL, "claude-code": "",
+                      "api": config.CLAUDE_MODEL}.get(config.LLM_BACKEND) or stats.recall(
+        f"model:{config.LLM_BACKEND}")
+    name = BACKEND_NAMES.get(config.LLM_BACKEND, config.LLM_BACKEND)
+    return f"{name} ({model})" if model else name
+
+
 class Conversation:
     """start() = turn 1 (summary + frame request); add_frames() = turn 2 in the same conversation."""
+
+    model = ""  # the model that actually answered, once known
 
     def start(self, meta: dict, platform: str, transcript: str, source: str, language: str,
               images: list[tuple[Path, str]]) -> dict:
@@ -244,7 +259,21 @@ class CodexConversation(Conversation):
                 raise SummaryError(f"Codex failed: {tail[-300:]}")
             if first and not self.session:
                 log.warning("codex: no session id in output; a frames follow-up won't be possible")
+            if first and self.session:
+                self.model = self._session_model()
             return _parse(out.read_text(), schema)
+
+    def _session_model(self) -> str:
+        """Codex doesn't print the model; its session file records it (turn_context.model)."""
+        for f in (config.CODEX_HOME / "sessions").rglob(f"*{self.session}*.jsonl"):
+            for line in f.read_text(errors="replace").splitlines():
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "turn_context" and isinstance(d.get("payload"), dict):
+                    return d["payload"].get("model") or ""
+        return config.CODEX_MODEL
 
     def add_frames(self, frames):
         if not self.session:
@@ -303,6 +332,8 @@ class ClaudeCodeConversation(Conversation):
                 continue
             if ev.get("type") == "result":
                 res = ev
+            elif ev.get("type") == "system" and ev.get("subtype") == "init" and ev.get("model"):
+                self.model = ev["model"]
         if res is None:
             raise SummaryError(f"Claude Code failed: {(p.stderr or p.stdout).strip()[-300:]}")
         if res.get("is_error"):
@@ -368,5 +399,6 @@ class ApiConversation(Conversation):
             raise SummaryError("Claude declined to summarize this video.")
         if msg.stop_reason == "max_tokens":
             raise SummaryError("Claude's answer was cut off (max_tokens).")
+        self.model = msg.model
         self.messages.append({"role": "assistant", "content": msg.content})  # unchanged, thinking included
         return _parse("".join(b.text for b in msg.content if b.type == "text"), schema)

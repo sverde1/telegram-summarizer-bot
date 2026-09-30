@@ -14,7 +14,7 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Con
                           filters)
 
 import access
-from summarizer import config, db, pipeline
+from summarizer import config, db, pipeline, summarize
 from summarizer.urls import UnsupportedURL, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -234,7 +234,7 @@ def details(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) ->
         used = f"📝 transcript: {source}" + (f" ({r.language})" if r.language else "")
     if r.frames_used:
         used += " · 🖼 slides" if r.meta.get("is_carousel") else " · 🎞 video frames"
-    used += f" · 🧠 {pipeline.BACKEND_NAMES.get(config.LLM_BACKEND, config.LLM_BACKEND)}"
+    used += f" · 🧠 {stats.get('llm') or summarize.llm_label()}"
     return "\n".join(filter(None, [timing, used]))
 
 

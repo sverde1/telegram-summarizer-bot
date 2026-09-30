@@ -20,6 +20,18 @@ def get(key: str, default: float) -> float:
         return float(_load().get(key, default))
 
 
+def recall(key: str) -> str:
+    with _lock:
+        return str(_load().get(key, ""))
+
+
+def remember(key: str, value: str) -> None:
+    with _lock:
+        d = _load()
+        d[key] = value
+        _FILE.write_text(json.dumps(d, indent=1))
+
+
 def record(key: str, value: float, alpha: float = 0.3) -> None:
     with _lock:
         d = _load()

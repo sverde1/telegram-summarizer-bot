@@ -15,9 +15,6 @@ from .urls import classify
 
 log = logging.getLogger(__name__)
 
-BACKEND_NAMES = {"codex": "Codex (ChatGPT)", "claude-code": "Claude Code", "api": "Claude API"}
-
-
 @dataclass
 class Result:
     platform: str
@@ -126,7 +123,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
     workdir = config.DATA_DIR / "work" / f"{video.platform}_{video.video_id}"
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True)
-    llm = BACKEND_NAMES.get(config.LLM_BACKEND, config.LLM_BACKEND)
+    llm = summarize.llm_label()  # configured or last-seen model; replaced by the actual one below
     try:
         cues, source, lang, images, notes = [], "none", "", [], []
         is_carousel = video.kind == "photo" or bool(meta.get("is_carousel"))
@@ -173,7 +170,10 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             st.show(f"🧠 Summarizing with {llm}…", _eta_llm(len(transcript), len(first_images)))
             t_llm = time.monotonic()
             answer = conv.start(meta, video.platform, transcript, source, lang, first_images)
-            took(llm, t_llm)
+            if conv.model:
+                llm = summarize.llm_label(conv.model)
+                stats.remember(f"model:{config.LLM_BACKEND}", conv.model)
+            took("summary", t_llm)
             stats.record(f"llm:{config.LLM_BACKEND}",
                          (time.monotonic() - t_llm) / _llm_load(len(transcript), len(first_images)))
             summary = {k: answer[k] for k in summarize.SCHEMA["required"]}
@@ -189,7 +189,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
                     try:
                         t = time.monotonic()
                         summary = conv.add_frames(frames_)
-                        took(f"{llm} with frames", t)
+                        took("update with frames", t)
                         images = frames_
                     except summarize.SummaryError as e:  # keep the transcript-only summary
                         log.warning("frames follow-up failed: %s", e)
@@ -198,7 +198,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             raise PipelineError(str(e))
         finally:
             conv.close()
-        summary["_stats"] = {"steps": timings, "total": time.time() - t0}  # cached along with the summary
+        summary["_stats"] = {"steps": timings, "total": time.time() - t0, "llm": llm}  # cached with the summary
         return _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media
