@@ -16,13 +16,29 @@ Summary:          overview + key points, sized to fit a Telegram message
    Photo carousels: the slide images are the content.
 4. Frame heuristic (no speech, "as you can see…", numbers in the title missing from speech):
    downloads the video, grabs targeted + evenly spaced frames, drops near-duplicates.
-5. Claude (`claude-opus-5-5`) gets metadata, thumbnail, transcript and frames; returns structured JSON.
+5. The LLM gets metadata, thumbnail, transcript and frames and returns structured JSON (see below).
 6. Reply in Telegram (HTML, split at 4096 chars). Downloaded media is deleted after each job.
+
+## LLM backends and sandboxing
+Titles, descriptions, transcripts and on-screen text are untrusted, so the model gets no capabilities
+beyond returning its JSON answer:
+
+| `LLM_BACKEND` | Billing | Isolation |
+|---|---|---|
+| `codex` (default) | ChatGPT subscription | `codex exec` runs inside `bwrap`: read-only `/usr` + certs, the bot's own `CODEX_HOME`, and this job's images. No `/home`, no `.env`, no repo. Browser/computer-use/apps/web search disabled, Codex sandbox read-only, `--ephemeral`. |
+| `claude-code` | Claude subscription | `claude -p --tools ""`: no tools at all, no MCP servers; images are sent inline. |
+| `api` | Anthropic API key | Plain Messages call, no tools. |
+
+The Codex backend uses its own login in `data/codex-home` (separate from `~/.codex`, so your
+sessions and history stay invisible to it). Log in once:
+```bash
+CODEX_HOME=$PWD/data/codex-home codex login --device-auth
+```
 
 ## Setup
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env   # fill in TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY
+cp .env.example .env   # fill in TELEGRAM_BOT_TOKEN (+ backend settings)
 .venv/bin/python bot.py
 ```
 With `ALLOWED_USER_IDS` empty the bot replies with your user id; put it in `.env` and restart.

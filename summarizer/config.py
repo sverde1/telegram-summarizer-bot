@@ -17,10 +17,16 @@ def _env(name: str, default: str = "") -> str:
 TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_IDS = {int(x) for x in _env("ALLOWED_USER_IDS").replace(" ", "").split(",") if x}
 
-# Claude
+# LLM
+LLM_BACKEND = _env("LLM_BACKEND", "codex")  # codex | claude-code | api
+SUMMARY_LANGUAGE = _env("SUMMARY_LANGUAGE", "English")
+# codex: ChatGPT subscription. Empty model = Codex's default.
+CODEX_MODEL = _env("CODEX_MODEL")
+CODEX_EFFORT = _env("CODEX_EFFORT", "medium")
+# claude-code: Claude subscription. api: Anthropic API key.
+CLAUDE_CODE_MODEL = _env("CLAUDE_CODE_MODEL", "opus")
 CLAUDE_MODEL = _env("CLAUDE_MODEL", "claude-opus-5-5")
 CLAUDE_EFFORT = _env("CLAUDE_EFFORT", "medium")
-SUMMARY_LANGUAGE = _env("SUMMARY_LANGUAGE", "English")
 
 # Whisper (speech-to-text). CPU by default; set WHISPER_DEVICE=cuda once a GPU is installed.
 WHISPER_DEVICE = _env("WHISPER_DEVICE", "cpu")  # cpu | cuda | auto
@@ -34,6 +40,9 @@ MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
 
 DATA_DIR = Path(_env("DATA_DIR", str(ROOT / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+# The bot's own Codex login, separate from ~/.codex so the sandbox never sees your sessions/history.
+CODEX_HOME = Path(_env("CODEX_HOME", str(DATA_DIR / "codex-home")))
+CODEX_HOME.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 # Resolve CLI tools next to the interpreter so a stale system yt-dlp never shadows the venv one,
 # and so yt-dlp finds the venv's deno (YouTube JS runtime).
