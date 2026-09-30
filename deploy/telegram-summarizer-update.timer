@@ -1,0 +1,11 @@
+# Weekly; Persistent=true runs a missed update after boot if the machine was off at that time.
+[Unit]
+Description=Weekly yt-dlp / gallery-dl upgrade for the Telegram summarizer bot
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

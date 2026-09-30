@@ -60,4 +60,11 @@ Set `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16`, `WHISPER_MODEL=medium
 runs a 1-second test inference at model load and falls back to CPU if CUDA is broken.
 
 ## Maintenance
-Platforms break extractors often: `.venv/bin/pip install -U "yt-dlp[default,curl-cffi]" gallery-dl`.
+Platforms break extractors often. A weekly systemd user timer runs `deploy/update-extractors.sh`
+(upgrades yt-dlp, its YouTube JS helpers, gallery-dl, deno); no bot restart needed. Install:
+```bash
+cp deploy/telegram-summarizer-update.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now telegram-summarizer-update.timer
+journalctl --user -u telegram-summarizer-update   # what changed
+```
+For start-at-boot without logging in: `loginctl enable-linger $USER`.

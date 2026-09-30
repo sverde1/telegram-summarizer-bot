@@ -1,0 +1,8 @@
+[Unit]
+Description=Upgrade yt-dlp / gallery-dl for the Telegram summarizer bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/scripts/telegram-summarizer-bot/deploy/update-extractors.sh
