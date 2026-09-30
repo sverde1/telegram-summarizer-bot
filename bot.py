@@ -59,6 +59,7 @@ async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = 
         return False
     st = access.state(user.id)
     if st in ("admin", "allowed"):
+        db.touch_user(user.id, user.full_name, user.username)
         return True
     msg = update.effective_message
     if not access.ADMINS:  # setup mode: tell the owner their id
@@ -97,10 +98,18 @@ async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not access.is_admin(update.effective_user.id):
         return
     users = access.all_users()
-    if not any(users.values()):
-        await update.message.reply_text("No users besides you yet. When someone messages the bot, "
-                                        "you'll get an access request here.")
-        return
+
+    def llm(u: dict) -> str:
+        if not u.get("backend") and not u.get("model"):
+            return "default AI"
+        return f"{summarize.BACKEND_NAMES.get(u['backend'], u['backend'] or '')} · {u['model'] or 'default'}"
+
+    admins = "\n".join(f"• {access.label(u['id'], u)}: {llm(u)}" for u in users["admin"])
+    others = sum(len(users[st]) for st in access.STATES)
+    await update.message.reply_text(
+        f"👑 Admins (set in .env)\n{admins}"
+        + ("" if others else "\n\nNo other users yet. When someone sends the bot /start, "
+                             "you'll get an access request here."))
     actions = {"allowed": [("🗑 Remove", "remove")], "pending": [("✅ Allow", "allow"), ("❌ Deny", "block")],
                "blocked": [("↩️ Unblock", "remove")]}
     titles = {"allowed": "✅ Allowed", "pending": "⏳ Pending", "blocked": "⛔ Blocked"}
@@ -109,7 +118,8 @@ async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             continue
         rows = [[InlineKeyboardButton(f"{text}: {u['name'] or u['id']}", callback_data=f"{act}:{u['id']}")
                  for text, act in actions[st]] for u in users[st]]
-        lines = "\n".join(f"• {access.label(u['id'], u)}" for u in users[st])
+        lines = "\n".join(f"• {access.label(u['id'], u)}" + (f": {llm(u)}" if st == "allowed" else "")
+                          for u in users[st])
         await update.message.reply_text(f"{titles[st]}\n{lines}", reply_markup=InlineKeyboardMarkup(rows))
 
 

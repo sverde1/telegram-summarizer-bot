@@ -153,6 +153,13 @@ def set_user(uid: int, status: str | None, name: str | None = None, username: st
     return dict(row)
 
 
+def touch_user(uid: int, name: str | None, username: str | None) -> None:
+    """Keep an existing user's name/username current (Telegram names change)."""
+    with _db() as c:
+        c.execute("UPDATE users SET name=?, username=? WHERE id=? AND (name IS NOT ? OR username IS NOT ?)",
+                  (name, username, uid, name, username))
+
+
 def users_by_status() -> dict[str, list[dict]]:
     out = {"admin": [], "allowed": [], "pending": [], "blocked": []}
     with _db() as c:
