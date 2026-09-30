@@ -19,7 +19,7 @@ Summary:          overview + key points, sized to fit a Telegram message
    moments (plus an even sweep for short or speechless videos), sends them in the same conversation, and
    the LLM revises the summary. Codex continues by the exact session id from turn 1 (never `--last`);
    Claude Code by a per-video UUID. Session files are deleted after each job.
-6. Reply in Telegram (HTML, split at 4096 chars). Downloaded media is deleted after each job.
+5. Reply in Telegram (HTML, split at 4096 chars). Downloaded media is deleted after each job.
 
 ## LLM backends and sandboxing
 Titles, descriptions, transcripts and on-screen text are untrusted, so the model gets no capabilities
