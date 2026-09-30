@@ -153,7 +153,7 @@ BACKEND_NAMES = {k: v[0] for k, v in BACKENDS.items()}
 
 # Claude Code takes full model ids (it has no model-list command).
 CLAUDE_CODE_MODELS = [
-    {"id": "claude-opus-5-5", "name": "Claude Opus 5.5", "description": "Most capable Opus; the default."},
+    {"id": "claude-opus-5-5", "name": "Claude Opus 5.5", "description": "Most capable Opus."},
     {"id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5", "description": "Fast and capable, lighter on limits."},
     {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "description": "Fastest, lightest on limits."},
 ]

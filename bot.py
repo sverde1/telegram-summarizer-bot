@@ -131,7 +131,8 @@ def _llm_home(uid: int) -> tuple[str, InlineKeyboardMarkup]:
     for backend in summarize.available_backends():
         name, billing = summarize.BACKENDS[backend]
         mark = "✓ " if backend == b else ""
-        rows.append([InlineKeyboardButton(f"{mark}{name} ({billing})", callback_data=f"llm:b:{backend}")])
+        tag = " (default)" if backend == config.LLM_BACKEND else ""
+        rows.append([InlineKeyboardButton(f"{mark}{name} ({billing}){tag}", callback_data=f"llm:b:{backend}")])
     if not is_default:
         rows.append([InlineKeyboardButton("↩️ Back to default", callback_data="llm:default")])
     return text, InlineKeyboardMarkup(rows)
@@ -149,9 +150,9 @@ def _llm_models(uid: int, backend: str) -> tuple[str, InlineKeyboardMarkup]:
     rows = []
     for model in models:
         mark = "✓ " if (backend, model["id"]) == (b, m) else ""
-        tag = " · default" if model["id"] == default else ""
+        tag = " (default)" if model["id"] == default else ""
         lines.append(f"{mark}{model['id']}{tag}" + (f": {model['description']}" if model["description"] else ""))
-        rows.append([InlineKeyboardButton(f"{mark}{model['name'] or model['id']}",
+        rows.append([InlineKeyboardButton(f"{mark}{model['name'] or model['id']}{tag}",
                                           callback_data=f"llm:m:{backend}:{model['id']}"[:64])])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="llm:home")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
