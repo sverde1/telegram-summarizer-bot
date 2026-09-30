@@ -174,7 +174,7 @@ def _set_llm(uid: int, backend: str | None, model: str | None) -> str:
         return f"Unknown {summarize.BACKEND_NAMES[backend]} model “{model}”. Available: {', '.join(ids)}"
     db.set_user_llm(uid, backend, model)
     return (f"✅ Your summaries now use {summarize.BACKEND_NAMES[backend]} · {model}. "
-            "Videos summarized earlier with another model get a fresh summary.")
+            "Already summarized videos come from the cache; use /again to redo one with this model.")
 
 
 async def on_models(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

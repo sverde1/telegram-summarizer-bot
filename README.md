@@ -80,8 +80,8 @@ per user: strangers only see `/start`.
 The AI is chosen per user with `/models`: first the provider (Codex on ChatGPT, Claude Code on Claude,
 Claude API if `ANTHROPIC_API_KEY` is set; only installed ones are shown), then one of its models
 (Codex: the models Codex itself lists; Claude Code: Opus 5.5, Sonnet 5.5, Haiku 4.5). The default is `LLM_BACKEND` (Codex) with its default
-model. A cached summary is reused only if it was made by the provider and model the user gets;
-otherwise the video is summarized again (transcript reused) and that summary replaces it.
+model. Cached summaries are reused whichever model wrote them (the footer names it); `/again`
+rewrites one with the user's current model.
 
 ## GPU later
 Set `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16`, `WHISPER_MODEL=medium`, install

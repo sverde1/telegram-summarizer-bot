@@ -77,9 +77,9 @@ class Status:
 def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         transcript_only: bool = False, request_id: int | None = None, backend: str | None = None,
         model: str | None = None) -> Result:
-    """backend/model: the user's LLM choice (None = defaults). A cached summary made by a different
-    backend/model isn't reused; the video is summarized again (reusing the saved transcript) and the
-    new summary replaces it."""
+    """backend/model: the user's LLM choice (None = defaults), used when a summary has to be written.
+    A cached summary is reused whichever model wrote it (the footer says which); /again (use_cache=False)
+    rewrites it with the user's model."""
     backend = backend or config.LLM_BACKEND
     t0 = time.time()
     video = classify(url)
@@ -88,14 +88,8 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         db.update_request(request_id, platform=video.platform, video_id=video.video_id, status="processing")
 
     cached = db.get_video(video.platform, video.video_id)
-    # Reuse a summary only if it came from the model this user gets (their choice, else the default).
-    # Summaries from before per-user models have no model recorded; they count as the default's.
-    made = ((cached or {}).get("result") or {}).get("_stats", {})
-    made_backend = made.get("backend") or config.LLM_BACKEND
-    same_model = made_backend == backend and (
-        (made.get("model") or summarize.default_model(backend)) == (model or summarize.default_model(backend)))
     if cached and use_cache and cached["meta"] and (
-            (cached["result"] and same_model) or (transcript_only and cached["transcript_source"])):
+            cached["result"] or (transcript_only and cached["transcript_source"])):
         return Result(video.platform, video.video_id, video.url, cached["meta"], cached["transcript"] or "",
                       cached["transcript_source"] or "none", cached["language"] or "", cached["result"],
                       cached["frames_used"], cached=True)
