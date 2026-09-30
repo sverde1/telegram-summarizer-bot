@@ -7,14 +7,14 @@ import time
 from dataclasses import dataclass
 
 from telegram import (BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InlineKeyboardButton,
-                      InlineKeyboardMarkup, Update, User)
+                      InlineKeyboardMarkup, Update)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
                           filters)
 
 import access
-from summarizer import config, pipeline
+from summarizer import config, db, pipeline
 from summarizer.urls import UnsupportedURL, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -26,9 +26,11 @@ HELP = (
     "Send me a YouTube or TikTok link and I'll reply with the title, an answer to any clickbait, "
     "and a summary.\n\n"
     "/again <url> - ignore the cache and summarize again\n"
-    "/transcript <url> - send the raw transcript as a file"
+    "/transcript <url> - send the raw transcript as a file\n"
+    "/history - your recent requests"
 )
-ADMIN_HELP = "\n\nAdmin:\n/users - list users; allow, remove, or unblock them"
+ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n"
+              "/history - recent requests from all users (who sent what, cache hits)")
 
 
 @dataclass
@@ -39,13 +41,11 @@ class Job:
     use_cache: bool = True
     transcript_only: bool = False
     queued_at: float = 0.0
+    user_id: int = 0
+    request_id: int = 0
 
 
 queue: asyncio.Queue[Job] = asyncio.Queue()
-
-
-def _info(user: User) -> dict:
-    return {"name": user.full_name, "username": user.username}
 
 
 async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = False) -> bool:
@@ -74,7 +74,7 @@ async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = 
         if msg:
             await msg.reply_text("🔒 This is a private bot. Send /start to request access.")
         return False
-    info = access.set_state(user.id, "pending", _info(user))
+    info = access.set_state(user.id, "pending", user.full_name, user.username)
     log.warning("access request from %s", access.label(user.id, info))
     buttons = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Allow", callback_data=f"allow:{user.id}"),
                                      InlineKeyboardButton("❌ Deny", callback_data=f"block:{user.id}")]])
@@ -104,10 +104,38 @@ async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     for st in access.STATES:
         if not users[st]:
             continue
-        rows = [[InlineKeyboardButton(f"{text}: {info.get('name') or uid}", callback_data=f"{act}:{uid}")
-                 for text, act in actions[st]] for uid, info in users[st].items()]
-        lines = "\n".join(f"• {access.label(uid, info)}" for uid, info in users[st].items())
+        rows = [[InlineKeyboardButton(f"{text}: {u['name'] or u['id']}", callback_data=f"{act}:{u['id']}")
+                 for text, act in actions[st]] for u in users[st]]
+        lines = "\n".join(f"• {access.label(u['id'], u)}" for u in users[st])
         await update.message.reply_text(f"{titles[st]}\n{lines}", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Recent requests: admins see everyone's (with who sent them), users only their own."""
+    if not await guard(update, ctx):
+        return
+    uid = update.effective_user.id
+    admin = access.is_admin(uid)
+    rows = db.recent_requests(None if admin else uid, limit=20)
+    if not rows:
+        await update.message.reply_text("No requests yet.")
+        return
+    icons = {"done": "✅", "failed": "⚠️", "queued": "⏳", "processing": "⏳"}
+    lines = []
+    for r in rows:
+        when = time.strftime("%d.%m. %H:%M", time.localtime(r["created_at"]))
+        line = f"{icons.get(r['status'], '•')} {when} "
+        if admin:
+            who = "you" if r["user_id"] == uid else (r["user_name"] or str(r["user_id"]))
+            line += f"[{who}] "
+        line += (r["title"] or r["url"])[:70]
+        if r["kind"] != "summary":
+            line += f" ({r['kind']})"
+        if admin and r["cached"]:
+            line += " ⚡"
+        lines.append(line)
+    head = "Recent requests (all users; ⚡ = from cache)" if admin else "Your recent requests"
+    await update.message.reply_text(head + "\n\n" + "\n".join(lines), disable_web_page_preview=True)
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -146,7 +174,11 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
     ahead = queue.qsize()
     status = await update.message.reply_text(
         "⏳ Got it" + (f", queued (position {ahead + 1})" if ahead else ", working…"))
-    await queue.put(Job(url, update.effective_chat.id, status.message_id, queued_at=time.monotonic(), **opts))
+    kind = "transcript" if opts.get("transcript_only") else "again" if opts.get("use_cache") is False else "summary"
+    uid = update.effective_user.id
+    req = db.add_request(uid, url, kind)  # logged the moment the link arrives
+    await queue.put(Job(url, update.effective_chat.id, status.message_id, queued_at=time.monotonic(),
+                        user_id=uid, request_id=req, **opts))
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -180,10 +212,12 @@ def _secs(sec: float) -> str:
     return f"{sec} s" if sec < 60 else f"{sec // 60}:{sec % 60:02d}"
 
 
-def details(r: pipeline.Result, waited: float = 0) -> str:
+def details(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> str:
     """Footer: how long each step took and what was used."""
     stats = (r.summary or {}).get("_stats") or {}
-    if r.cached:
+    if r.cached and not reveal_cache:
+        timing = ""
+    elif r.cached:
         timing = "⚡ from cache" + (f" (first run took {_secs(stats['total'])})" if stats else "")
     elif stats:
         steps = " · ".join(f"{name} {_secs(sec)}" for name, sec in stats["steps"])
@@ -204,14 +238,14 @@ def details(r: pipeline.Result, waited: float = 0) -> str:
     return "\n".join(filter(None, [timing, used]))
 
 
-def render(r: pipeline.Result, waited: float = 0) -> list[str]:
+def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> list[str]:
     """Build the reply in the Title / Clickbait answer / Summary layout, split to fit Telegram."""
     s = r.summary
     e = html.escape
     head = f"<b>Title:</b>\n{e(s['title'] or r.meta['title'])}\n\n<b>Clickbait answer:</b>\n"
     head += e(s["clickbait_answer"]) if s["is_clickbait"] and s["clickbait_answer"] else "✅ Not clickbait - the title matches the content."
     head += "\n\n<b>Summary:</b>\n"
-    foot = "\n\n<i>" + e(details(r, waited)) + f"\n{e(r.url)}</i>"
+    foot = "\n\n<i>" + e(details(r, waited, reveal_cache)) + f"\n{e(r.url)}</i>"
 
     body = e(s["summary"])
     if len(head) + len(body) + len(foot) <= TG_LIMIT:
@@ -305,7 +339,7 @@ async def worker(app: Application) -> None:
             progress = Progress(app, loop, job)
             try:
                 result = await asyncio.to_thread(
-                    pipeline.run, job.url, progress, use_cache=job.use_cache, transcript_only=job.transcript_only)
+                    pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id, transcript_only=job.transcript_only)
             finally:
                 await progress.close()
             if job.transcript_only:
@@ -316,14 +350,21 @@ async def worker(app: Application) -> None:
                     await app.bot.send_document(job.chat_id, doc, filename=f"{result.video_id}.txt",
                                                 caption=f"Transcript ({result.transcript_source})")
             else:
-                for chunk in render(result, waited):
+                # Only admins, or the user who asked for this video before, may learn it was cached:
+                # otherwise it would reveal what other users submit.
+                reveal = access.is_admin(job.user_id) or db.user_saw_video(
+                    job.user_id, result.platform, result.video_id, job.request_id)
+                for chunk in render(result, waited, reveal_cache=reveal):
                     await app.bot.send_message(job.chat_id, chunk, parse_mode=ParseMode.HTML,
                                                disable_web_page_preview=True)
+            db.update_request(job.request_id, status="done", cached=int(result.cached))
             await app.bot.delete_message(job.chat_id, job.status_id)
         except (pipeline.PipelineError, UnsupportedURL) as e:
+            db.update_request(job.request_id, status="failed", error=str(e)[:500])
             await _fail(app, job, str(e))
         except Exception as e:  # report, don't crash the worker
             log.exception("job failed: %s", job.url)
+            db.update_request(job.request_id, status="failed", error=f"unexpected: {e}"[:500])
             await _fail(app, job, f"Unexpected error: {e}")
         finally:
             queue.task_done()
@@ -343,8 +384,11 @@ USER_COMMANDS = [
     BotCommand("help", "How to use the bot"),
     BotCommand("again", "Summarize again, ignoring the cache: /again <url>"),
     BotCommand("transcript", "Get the raw transcript as a file: /transcript <url>"),
+    BotCommand("history", "Your recent requests"),
 ]
-ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock")] + USER_COMMANDS
+ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock"),
+                  BotCommand("history", "Recent requests from all users")] + [
+    c for c in USER_COMMANDS if c.command != "history"]
 
 
 async def sync_commands(bot, uid: int) -> None:
@@ -364,7 +408,7 @@ async def sync_commands(bot, uid: int) -> None:
 
 async def post_init(app: Application) -> None:
     await app.bot.set_my_commands(STRANGER_COMMANDS, scope=BotCommandScopeDefault())
-    for uid in [*access.ADMINS, *map(int, access.all_users()["allowed"])]:
+    for uid in [*access.ADMINS, *(u["id"] for u in access.all_users()["allowed"])]:
         await sync_commands(app.bot, uid)
     app.bot_data["worker"] = asyncio.create_task(worker(app))
     log.info("bot ready; admins: %s, allowed users: %d", sorted(access.ADMINS) or "NONE (setup mode)",
@@ -390,6 +434,7 @@ def main() -> None:
     app.add_handler(CommandHandler("again", command(use_cache=False)))
     app.add_handler(CommandHandler("transcript", command(transcript_only=True)))
     app.add_handler(CommandHandler("users", on_users))
+    app.add_handler(CommandHandler("history", on_history))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)

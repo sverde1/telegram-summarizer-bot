@@ -11,7 +11,8 @@ Summary:          overview + key points, sized to fit a Telegram message
 
 ## Pipeline
 1. Classify/normalise the URL (YouTube watch/shorts/youtu.be, TikTok video/photo/short links).
-2. `yt-dlp` metadata probe. SQLite cache in `data/` keyed by (platform, id): a video is never fetched twice.
+2. `yt-dlp` metadata probe. Results are stored in `data/bot.sqlite3` keyed by (platform, id): a video is
+   never fetched twice.
 3. Transcript: YouTube captions -> audio + faster-whisper. TikTok: audio + whisper -> TikTok captions.
    TikTok photo carousels (`/photo/` links, or `/video/` links where yt-dlp finds no video formats):
    gallery-dl fetches the slides, which are the content; the background music isn't transcribed.
@@ -51,7 +52,18 @@ With `ADMIN_USER_IDS` empty the bot replies with your user id; put it in `.env` 
 Admins (`ADMIN_USER_IDS`) approve everyone else from Telegram. When an unknown user starts the bot by
 sending `/start`, the admins get an access request with **Allow / Deny** buttons; denied users are blocked and ignored
 silently. `/users` lists allowed, pending and blocked users with Remove / Allow / Unblock buttons.
-The list lives in `data/users.json`. All users share the admin's LLM subscription limits.
+All users share the admin's LLM subscription limits.
+
+## Database (`data/bot.sqlite3`)
+- `users`: everyone except the `.env` admins, with status allowed / pending / blocked.
+- `videos`: one row per video, created when processing starts (`processing`) and filled in as metadata,
+  transcript and summary arrive; ends `done` or `failed` (with the error). Doubles as the cache.
+- `requests`: one row per link a user sends, written immediately: who, URL, kind (summary / again /
+  transcript), status, whether it was served from cache, timestamps.
+
+Privacy: who submitted what is only visible to admins (`/history` shows admins everyone's requests,
+users only their own). A user is only told a result came from the cache if they requested that video
+themselves before; the reply is still instant, though, so speed alone can hint at a cache hit.
 No system packages are needed: ffmpeg comes from `imageio-ffmpeg` (a system ffmpeg is preferred if
 present) and deno (yt-dlp's YouTube JS runtime) from pip.
 

@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from . import cache, config, frames, media, stats, summarize, transcribe
+from . import config, db, frames, media, stats, summarize, transcribe
 from .urls import classify
 
 log = logging.getLogger(__name__)
@@ -78,16 +78,29 @@ class Status:
 
 
 def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
-        transcript_only: bool = False) -> Result:
+        transcript_only: bool = False, request_id: int | None = None) -> Result:
     t0 = time.time()
     video = classify(url)
 
-    cached = cache.get(video.platform, video.video_id)
-    if cached and use_cache and (cached["result"] or transcript_only):
-        return Result(video.platform, video.video_id, video.url, cached["meta"], cached["transcript"],
-                      cached["transcript_source"], cached["language"], cached["result"],
+    if request_id:
+        db.update_request(request_id, platform=video.platform, video_id=video.video_id, status="processing")
+
+    cached = db.get_video(video.platform, video.video_id)
+    if cached and use_cache and cached["meta"] and (
+            cached["result"] or (transcript_only and cached["transcript_source"])):
+        return Result(video.platform, video.video_id, video.url, cached["meta"], cached["transcript"] or "",
+                      cached["transcript_source"] or "none", cached["language"] or "", cached["result"],
                       cached["frames_used"], cached=True)
 
+    db.start_video(video.platform, video.video_id, video.url)
+    try:
+        return _process(video, progress, cached, transcript_only, t0)
+    except Exception as e:
+        db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
+        raise
+
+
+def _process(video, progress, cached: dict | None, transcript_only: bool, t0: float) -> Result:
     st = Status(progress)
     timings: list[tuple[str, float]] = []  # (step, seconds), shown under the summary
 
@@ -99,6 +112,7 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
     try:
         meta = media.probe(video)
         took("lookup", t)
+        db.update_video(video.platform, video.video_id, meta=meta, title=meta["title"][:300])
     except media.MediaError as e:
         raise PipelineError(f"Couldn't load the video: {e}")
     dur = meta["duration"] or 0
@@ -129,7 +143,7 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
                       for i, p in enumerate(slides[:config.MAX_SLIDES], 1)]
             took(f"{len(images)} slides", t)
             st.ok(f"✅ Photo post: {len(images)} slides")
-        elif cached and cached["transcript_source"] != "none":
+        elif cached and cached["transcript_source"] not in (None, "none"):
             # Reuse a cached transcript when re-running (/again): never fetch captions twice.
             cues = [(0.0, cached["transcript"])]
             source, lang = cached["transcript_source"], cached["language"]
@@ -140,6 +154,8 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
             took({"captions": "captions", "tiktok-webvtt": "Whisper + captions"}.get(source, "Whisper"), t)
 
         transcript = summarize.format_transcript(cues) if len(cues) > 1 else (cues[0][1] if cues else "")
+        db.update_video(video.platform, video.video_id, transcript=transcript, transcript_source=source,
+                        language=lang)
         if transcript_only:
             return _finish(video, meta, transcript, source, lang, None, False, notes, t0)
 
@@ -189,9 +205,10 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
 
 
 def _finish(video, meta, transcript, source, lang, summary, frames_used, notes, t0) -> Result:
-    old = cache.get(video.platform, video.video_id)
-    cache.put(video.platform, video.video_id, meta=meta, transcript=transcript, transcript_source=source,
-              language=lang, result=summary or (old or {}).get("result"), frames_used=frames_used)
+    fields = {"status": "done", "error": None}
+    if summary:  # a /transcript run keeps the earlier summary
+        fields.update(result=summary, frames_used=frames_used)
+    db.update_video(video.platform, video.video_id, **fields)
     log.info("done %s/%s source=%s lang=%s frames=%s in %.0fs", video.platform, video.video_id, source,
              lang, frames_used, time.time() - t0)
     return Result(video.platform, video.video_id, video.url, meta, transcript, source, lang, summary,
