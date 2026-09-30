@@ -56,7 +56,7 @@ All users share the admin's LLM subscription limits.
 
 ## Database (`data/bot.sqlite3`)
 - `users`: everyone, with status admin (synced from `.env` at startup) / allowed / pending / blocked,
-  and their chosen LLM `model` (NULL = the backend's default, i.e. Codex's default model).
+  and their chosen LLM `backend` + `model` (NULL = default: Codex with its default model).
 - `videos`: one row per video, created when processing starts (`processing`) and filled in as metadata,
   transcript and summary arrive; ends `done` or `failed` (with the error). Doubles as the cache.
 - `requests`: one row per link a user sends, written immediately: who, URL, kind (summary / again /
@@ -78,9 +78,12 @@ Run it permanently with the systemd user unit in `deploy/` (instructions inside)
 `/model <name>` switch (`/model default` to reset) · `/users` (admins). The Telegram command menu is
 per user: strangers only see `/start`.
 
-Model choice is per user. `/models` lists what the active backend offers (Codex: the models Codex
-itself lists, from its model cache). A cached summary is reused only if it was made with the model the
-user gets; otherwise the video is summarized again (transcript reused) and that summary replaces it.
+The AI is chosen per user with `/models`: first the provider (Codex on ChatGPT, Claude Code on Claude,
+Claude API if `ANTHROPIC_API_KEY` is set; only installed ones are shown), then one of its models
+(Codex: the models Codex itself lists; Claude Code: Opus 5.5, Sonnet 5.5, Haiku 4.5). `/model <name>`
+or `/model <provider>:<name>` switches directly. The default is `LLM_BACKEND` (Codex) with its default
+model. A cached summary is reused only if it was made by the provider and model the user gets;
+otherwise the video is summarized again (transcript reused) and that summary replaces it.
 
 ## GPU later
 Set `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16`, `WHISPER_MODEL=medium`, install

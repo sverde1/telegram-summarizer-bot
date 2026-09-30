@@ -28,7 +28,7 @@ HELP = (
     "/again <url> - ignore the cache and summarize again\n"
     "/transcript <url> - send the raw transcript as a file\n"
     "/history - your recent requests\n"
-    "/models - AI models you can choose from; /model <name> to switch"
+    "/models - choose the AI (Codex or Claude) and model; /model shows yours"
 )
 ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n"
               "/history - recent requests from all users (who sent what, cache hits)")
@@ -44,7 +44,8 @@ class Job:
     queued_at: float = 0.0
     user_id: int = 0
     request_id: int = 0
-    model: str | None = None  # the user's chosen LLM model; None = default
+    backend: str | None = None  # the user's chosen LLM backend/model; None = default
+    model: str | None = None
 
 
 queue: asyncio.Queue[Job] = asyncio.Queue()
@@ -112,70 +113,118 @@ async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"{titles[st]}\n{lines}", reply_markup=InlineKeyboardMarkup(rows))
 
 
-def _models_view(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
-    """Text + tap-to-choose buttons for /models."""
-    try:
-        models = summarize.list_models()
-    except summarize.SummaryError as e:
-        return f"⚠️ {e}", None
-    mine, default = db.get_user_model(uid), summarize.default_model()
-    current = mine or default
-    lines = [f"🧠 Models for {summarize.BACKEND_NAMES.get(config.LLM_BACKEND, config.LLM_BACKEND)}. "
-             f"Yours: {current}" + (" (default)" if not mine else ""), ""]
+def _current_llm(uid: int) -> tuple[str, str, bool]:
+    """(backend, model, is_default) this user's summaries use."""
+    backend, model = db.get_user_llm(uid)
+    if backend not in summarize.available_backends():
+        backend, model = None, None  # their choice was uninstalled: fall back
+    b = backend or config.LLM_BACKEND
+    return b, model or summarize.default_model(b), not backend and not model
+
+
+def _llm_home(uid: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Step 1 of /models: pick a provider."""
+    b, m, is_default = _current_llm(uid)
+    text = (f"🧠 You're using {summarize.BACKEND_NAMES[b]} · {m}" + (" (default)" if is_default else "")
+            + "\n\nChoose a provider:")
     rows = []
-    for m in models:
-        mark = "✓ " if m["id"] == current else ""
-        tag = " · default" if m["id"] == default else ""
-        lines.append(f"{mark}{m['id']}{tag}" + (f": {m['description']}" if m["description"] else ""))
-        rows.append([InlineKeyboardButton(f"{mark}{m['name'] or m['id']}", callback_data=f"model:{m['id']}")])
-    if mine:
-        rows.append([InlineKeyboardButton("↩️ Back to default", callback_data="model:default")])
-    lines += ["", "Tap one to switch, or send /model <name>."]
+    for backend in summarize.available_backends():
+        name, billing = summarize.BACKENDS[backend]
+        mark = "✓ " if backend == b else ""
+        rows.append([InlineKeyboardButton(f"{mark}{name} ({billing})", callback_data=f"llm:b:{backend}")])
+    if not is_default:
+        rows.append([InlineKeyboardButton("↩️ Back to default", callback_data="llm:default")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _llm_models(uid: int, backend: str) -> tuple[str, InlineKeyboardMarkup]:
+    """Step 2 of /models: pick a model of one provider."""
+    b, m, _ = _current_llm(uid)
+    try:
+        models = summarize.list_models(backend)
+    except summarize.SummaryError as e:
+        return f"⚠️ {e}", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="llm:home")]])
+    default = summarize.default_model(backend)
+    lines = [f"🧠 {summarize.BACKEND_NAMES[backend]} models:", ""]
+    rows = []
+    for model in models:
+        mark = "✓ " if (backend, model["id"]) == (b, m) else ""
+        tag = " · default" if model["id"] == default else ""
+        lines.append(f"{mark}{model['id']}{tag}" + (f": {model['description']}" if model["description"] else ""))
+        rows.append([InlineKeyboardButton(f"{mark}{model['name'] or model['id']}",
+                                          callback_data=f"llm:m:{backend}:{model['id']}"[:64])])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="llm:home")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
-def _set_model(uid: int, wanted: str) -> str:
-    """Validate and store a user's model choice; returns the reply text."""
-    if wanted in ("default", "reset"):
-        db.set_user_model(uid, None)
-        return f"✅ Back to the default model ({summarize.default_model()})."
+def _set_llm(uid: int, backend: str | None, model: str | None) -> str:
+    """Validate and store a user's choice; returns the confirmation text."""
+    if backend is None:
+        db.set_user_llm(uid, None, None)
+        b = config.LLM_BACKEND
+        return f"✅ Back to the default: {summarize.BACKEND_NAMES[b]} · {summarize.default_model(b)}"
+    if backend not in summarize.available_backends():
+        return f"⚠️ {backend} isn't available on this bot."
     try:
-        ids = [m["id"] for m in summarize.list_models()]
+        ids = [m["id"] for m in summarize.list_models(backend)]
     except summarize.SummaryError as e:
         return f"⚠️ {e}"
-    if wanted not in ids:
-        return f"Unknown model “{wanted}”. Available: {', '.join(ids)}"
-    db.set_user_model(uid, wanted)
-    return f"✅ Your summaries now use {wanted}. Videos summarized earlier with another model get a fresh summary."
+    if model not in ids:
+        return f"Unknown {summarize.BACKEND_NAMES[backend]} model “{model}”. Available: {', '.join(ids)}"
+    db.set_user_llm(uid, backend, model)
+    return (f"✅ Your summaries now use {summarize.BACKEND_NAMES[backend]} · {model}. "
+            "Videos summarized earlier with another model get a fresh summary.")
 
 
 async def on_models(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if await guard(update, ctx):
-        text, buttons = _models_view(update.effective_user.id)
+        text, buttons = _llm_home(update.effective_user.id)
         await update.message.reply_text(text, reply_markup=buttons)
 
 
 async def on_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/model: show; /model <name> or <provider>:<name>: switch; /model default: reset."""
     if not await guard(update, ctx):
         return
     uid = update.effective_user.id
     if not ctx.args:
-        mine = db.get_user_model(uid)
-        await update.message.reply_text(
-            f"🧠 Your model: {mine or summarize.default_model()}" + ("" if mine else " (default)")
-            + "\nSee /models to choose another.")
+        b, m, is_default = _current_llm(uid)
+        await update.message.reply_text(f"🧠 {summarize.BACKEND_NAMES[b]} · {m}" + (" (default)" if is_default else "")
+                                        + "\nSee /models to choose another.")
         return
-    await update.message.reply_text(_set_model(uid, ctx.args[0].strip()))
+    arg = ctx.args[0].strip()
+    if arg in ("default", "reset"):
+        await update.message.reply_text(_set_llm(uid, None, None))
+        return
+    backend, _, name = arg.rpartition(":")
+    if not backend:  # plain model name: find the provider that has it
+        for b in summarize.available_backends():
+            try:
+                if any(m["id"] == name for m in summarize.list_models(b)):
+                    backend = b
+                    break
+            except summarize.SummaryError:
+                continue
+    await update.message.reply_text(_set_llm(uid, backend or config.LLM_BACKEND, name))
 
 
-async def on_model_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    if access.state(q.from_user.id) not in ("admin", "allowed"):
+    uid = q.from_user.id
+    if access.state(uid) not in ("admin", "allowed"):
         await q.answer()
         return
-    reply = _set_model(q.from_user.id, (q.data or "").removeprefix("model:"))
-    await q.answer(reply[:200])
-    text, buttons = _models_view(q.from_user.id)
+    parts = (q.data or "").split(":", 3)  # llm:home | llm:default | llm:b:<backend> | llm:m:<backend>:<model>
+    if parts[1] == "b":
+        text, buttons = _llm_models(uid, parts[2])
+        await q.answer()
+    elif parts[1] in ("m", "default"):
+        reply = _set_llm(uid, parts[2], parts[3]) if parts[1] == "m" else _set_llm(uid, None, None)
+        await q.answer(reply[:200])
+        text, buttons = _llm_models(uid, parts[2]) if parts[1] == "m" else _llm_home(uid)
+    else:
+        text, buttons = _llm_home(uid)
+        await q.answer()
     try:
         await q.edit_message_text(text, reply_markup=buttons)
     except BadRequest:  # unchanged
@@ -249,8 +298,10 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
     kind = "transcript" if opts.get("transcript_only") else "again" if opts.get("use_cache") is False else "summary"
     uid = update.effective_user.id
     req = db.add_request(uid, url, kind)  # logged the moment the link arrives
+    b, m, is_default = _current_llm(uid)
+    b, m = (None, None) if is_default else (b, m)
     await queue.put(Job(url, update.effective_chat.id, status.message_id, queued_at=time.monotonic(),
-                        user_id=uid, request_id=req, model=db.get_user_model(uid), **opts))
+                        user_id=uid, request_id=req, backend=b, model=m, **opts))
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -412,7 +463,7 @@ async def worker(app: Application) -> None:
             try:
                 result = await asyncio.to_thread(
                     pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
-                    model=job.model, transcript_only=job.transcript_only)
+                    backend=job.backend, model=job.model, transcript_only=job.transcript_only)
             finally:
                 await progress.close()
             if job.transcript_only:
@@ -458,8 +509,8 @@ USER_COMMANDS = [
     BotCommand("again", "Summarize again, ignoring the cache: /again <url>"),
     BotCommand("transcript", "Get the raw transcript as a file: /transcript <url>"),
     BotCommand("history", "Your recent requests"),
-    BotCommand("models", "List the AI models you can choose from"),
-    BotCommand("model", "Show or switch your model: /model <name>"),
+    BotCommand("models", "Choose the AI: Codex or Claude, then the model"),
+    BotCommand("model", "Show your model, or switch: /model <name>"),
 ]
 ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock"),
                   BotCommand("history", "Recent requests from all users")] + [
@@ -512,7 +563,7 @@ def main() -> None:
     app.add_handler(CommandHandler("history", on_history))
     app.add_handler(CommandHandler("models", on_models))
     app.add_handler(CommandHandler("model", on_model))
-    app.add_handler(CallbackQueryHandler(on_model_button, pattern=r"^model:"))
+    app.add_handler(CallbackQueryHandler(on_llm_button, pattern=r"^llm:"))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)

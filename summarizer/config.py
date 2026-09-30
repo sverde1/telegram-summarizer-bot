@@ -23,7 +23,7 @@ SUMMARY_LANGUAGE = _env("SUMMARY_LANGUAGE", "English")
 CODEX_MODEL = _env("CODEX_MODEL")
 CODEX_EFFORT = _env("CODEX_EFFORT", "medium")
 # claude-code: Claude subscription. api: Anthropic API key.
-CLAUDE_CODE_MODEL = _env("CLAUDE_CODE_MODEL", "opus")
+CLAUDE_CODE_MODEL = _env("CLAUDE_CODE_MODEL", "claude-opus-5-5")
 CLAUDE_MODEL = _env("CLAUDE_MODEL", "claude-opus-5-5")
 CLAUDE_EFFORT = _env("CLAUDE_EFFORT", "medium")
 

@@ -20,6 +20,7 @@ gives the model any capability beyond returning the JSON answer.
 import base64
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -143,45 +144,69 @@ def _legend(images: list[tuple[Path, str]]) -> str:
     return "\n".join(f"Image {i}: {label}" for i, (_, label) in enumerate(images, 1)) or "(none)"
 
 
-def conversation(model: str | None = None) -> "Conversation":
-    """model: a specific model for this video (a user's choice); None = the backend's default."""
-    cls = {"codex": CodexConversation, "claude-code": ClaudeCodeConversation,
-           "api": ApiConversation}.get(config.LLM_BACKEND)
-    if not cls:
-        raise SummaryError(f"Unknown LLM_BACKEND={config.LLM_BACKEND!r} (codex | claude-code | api)")
-    conv = cls()
-    conv.requested = model or ""
-    return conv
+BACKENDS = {  # id -> (display name, whose subscription/billing)
+    "codex": ("Codex", "ChatGPT"),
+    "claude-code": ("Claude Code", "Claude"),
+    "api": ("Claude API", "Anthropic API key"),
+}
+BACKEND_NAMES = {k: v[0] for k, v in BACKENDS.items()}
 
-
-def default_model() -> str:
-    """What runs when nobody picked a model: the configured one, else the last one the backend used."""
-    from . import stats
-    return ({"codex": config.CODEX_MODEL, "claude-code": config.CLAUDE_CODE_MODEL,
-             "api": config.CLAUDE_MODEL}.get(config.LLM_BACKEND) or stats.recall(f"model:{config.LLM_BACKEND}"))
-
-
-# Claude Code accepts these aliases (they follow the latest model of each family).
+# Claude Code takes full model ids (it has no model-list command).
 CLAUDE_CODE_MODELS = [
-    {"id": "opus", "name": "Claude Opus (latest)", "description": "Most capable Opus model."},
-    {"id": "sonnet", "name": "Claude Sonnet (latest)", "description": "Fast and capable, lighter on limits."},
-    {"id": "haiku", "name": "Claude Haiku (latest)", "description": "Fastest and cheapest."},
+    {"id": "claude-opus-5-5", "name": "Claude Opus 5.5", "description": "Most capable Opus; the default."},
+    {"id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5", "description": "Fast and capable, lighter on limits."},
+    {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "description": "Fastest, lightest on limits."},
 ]
 
 
-def list_models() -> list[dict]:
-    """Models the current backend can use, best first: [{id, name, description}]."""
-    if config.LLM_BACKEND == "codex":
+def available_backends() -> list[str]:
+    """Backends set up on this machine, default first."""
+    ok = {
+        "codex": (config.CODEX_HOME / "auth.json").exists(),
+        "claude-code": shutil.which("claude") is not None,
+        "api": bool(os.environ.get("ANTHROPIC_API_KEY")),
+    }
+    order = [config.LLM_BACKEND] + [b for b in BACKENDS if b != config.LLM_BACKEND]
+    return [b for b in order if ok.get(b)]
+
+
+def _backend(backend: str | None) -> str:
+    backend = backend or config.LLM_BACKEND
+    if backend not in BACKENDS:
+        raise SummaryError(f"Unknown LLM backend {backend!r} (codex | claude-code | api)")
+    return backend
+
+
+def conversation(backend: str | None = None, model: str | None = None) -> "Conversation":
+    """A user's backend/model choice; None = the defaults (LLM_BACKEND, and that backend's default model)."""
+    backend = _backend(backend)
+    conv = {"codex": CodexConversation, "claude-code": ClaudeCodeConversation, "api": ApiConversation}[backend]()
+    conv.backend, conv.requested = backend, model or ""
+    return conv
+
+
+def default_model(backend: str | None = None) -> str:
+    """What runs when nobody picked a model: the configured one, else the last one the backend used."""
+    from . import stats
+    backend = _backend(backend)
+    return ({"codex": config.CODEX_MODEL, "claude-code": config.CLAUDE_CODE_MODEL,
+             "api": config.CLAUDE_MODEL}.get(backend) or stats.recall(f"model:{backend}"))
+
+
+def list_models(backend: str | None = None) -> list[dict]:
+    """Models a backend can use, best first: [{id, name, description}]."""
+    backend = _backend(backend)
+    if backend == "codex":
         try:
             data = json.loads((config.CODEX_HOME / "models_cache.json").read_text())
         except (OSError, ValueError):
-            return [{"id": config.CODEX_MODEL or default_model(), "name": "", "description": ""}]
+            return [{"id": config.CODEX_MODEL or default_model("codex"), "name": "", "description": ""}]
         models = [m for m in data.get("models", []) if m.get("visibility") == "list"
                   and "image" in (m.get("input_modalities") or ["image"])]
         models.sort(key=lambda m: m.get("priority", 99))
         return [{"id": m["slug"], "name": m.get("display_name") or m["slug"],
                  "description": m.get("description") or ""} for m in models]
-    if config.LLM_BACKEND == "claude-code":
+    if backend == "claude-code":
         return CLAUDE_CODE_MODELS
     import anthropic
     try:
@@ -191,19 +216,17 @@ def list_models() -> list[dict]:
         raise SummaryError(f"Couldn't list Claude API models: {e}")
 
 
-BACKEND_NAMES = {"codex": "Codex", "claude-code": "Claude Code", "api": "Claude API"}
-
-
-def llm_label(model: str = "") -> str:
-    """E.g. "Codex (gpt-6-astra)". Without a model: the default one."""
-    model = model or default_model()
-    name = BACKEND_NAMES.get(config.LLM_BACKEND, config.LLM_BACKEND)
-    return f"{name} ({model})" if model else name
+def llm_label(backend: str | None = None, model: str = "") -> str:
+    """E.g. "Codex (gpt-6-astra)". Without a model: the backend's default one."""
+    backend = _backend(backend)
+    model = model or default_model(backend)
+    return f"{BACKEND_NAMES[backend]} ({model})" if model else BACKEND_NAMES[backend]
 
 
 class Conversation:
     """start() = turn 1 (summary + frame request); add_frames() = turn 2 in the same conversation."""
 
+    backend = ""    # codex | claude-code | api
     model = ""      # the model that actually answered, once known
     requested = ""  # the model asked for ("" = backend default)
 

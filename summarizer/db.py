@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS users (
     name        TEXT,
     username    TEXT,
     status      TEXT NOT NULL,                 -- admin (from .env) | allowed | pending | blocked
-    model       TEXT,                          -- chosen LLM model; NULL = the backend's default (Codex's)
+    backend     TEXT,                          -- chosen LLM backend (codex | claude-code | api); NULL = default
+    model       TEXT,                          -- chosen model of that backend; NULL = its default
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL
 );
@@ -84,8 +85,9 @@ def init() -> None:
     with _db() as c:
         c.executescript(SCHEMA)
         cols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
-        if "model" not in cols:  # databases created before per-user models
-            c.execute("ALTER TABLE users ADD COLUMN model TEXT")
+        for col in ("backend", "model"):  # databases created before per-user models
+            if col not in cols:
+                c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
         if c.execute("SELECT 1 FROM sqlite_master WHERE name='user_settings'").fetchone():
             for r in c.execute("SELECT user_id, model FROM user_settings").fetchall():
                 c.execute("UPDATE users SET model=? WHERE id=?", (r["model"], r["user_id"]))
@@ -139,16 +141,18 @@ def users_by_status() -> dict[str, list[dict]]:
     return out
 
 
-def get_user_model(uid: int) -> str | None:
+def get_user_llm(uid: int) -> tuple[str | None, str | None]:
+    """(backend, model) the user chose; None = default."""
     with _db() as c:
-        row = c.execute("SELECT model FROM users WHERE id=?", (uid,)).fetchone()
-    return row["model"] if row else None
+        row = c.execute("SELECT backend, model FROM users WHERE id=?", (uid,)).fetchone()
+    return (row["backend"], row["model"]) if row else (None, None)
 
 
-def set_user_model(uid: int, model: str | None) -> None:
-    """None = back to the default model."""
+def set_user_llm(uid: int, backend: str | None, model: str | None) -> None:
+    """(None, None) = back to the defaults."""
     with _db() as c:
-        c.execute("UPDATE users SET model=?, updated_at=? WHERE id=?", (model, time.time(), uid))
+        c.execute("UPDATE users SET backend=?, model=?, updated_at=? WHERE id=?",
+                  (backend, model, time.time(), uid))
 
 
 # ---------- videos ----------
