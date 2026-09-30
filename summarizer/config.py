@@ -36,7 +36,8 @@ WHISPER_CPU_THREADS = int(_env("WHISPER_CPU_THREADS", "0"))  # 0 = ctranslate2 d
 # Limits
 MAX_DURATION_MIN = int(_env("MAX_DURATION_MIN", "180"))
 MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
-SHORT_VIDEO_SEC = int(_env("SHORT_VIDEO_SEC", "180"))  # up to this long: always look at frames
+SHORT_VIDEO_SEC = int(_env("SHORT_VIDEO_SEC", "180"))  # up to this long: denser frame sampling
+MAX_SLIDES = int(_env("MAX_SLIDES", "35"))  # TikTok carousels allow up to 35 images
 
 DATA_DIR = Path(_env("DATA_DIR", str(ROOT / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)

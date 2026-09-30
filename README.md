@@ -13,7 +13,9 @@ Summary:          overview + key points, sized to fit a Telegram message
 1. Classify/normalise the URL (YouTube watch/shorts/youtu.be, TikTok video/photo/short links).
 2. `yt-dlp` metadata probe. SQLite cache in `data/` keyed by (platform, id): a video is never fetched twice.
 3. Transcript: YouTube captions -> audio + faster-whisper. TikTok: audio + whisper -> TikTok captions.
-   Photo carousels: the slide images are the content.
+   TikTok photo carousels (`/photo/` links, or `/video/` links where yt-dlp finds no video formats):
+   gallery-dl fetches the slides, which are the content; the background music isn't transcribed.
+   Videos with no or hardly any speech get frames right away, sent with the first LLM request.
 4. One LLM conversation per video. Turn 1: metadata + thumbnail + timestamped transcript -> summary, plus
    `needs_frames` and the moments to look at. Turn 2 (only if it asked): the bot grabs frames at those
    moments (plus an even sweep for short or speechless videos), sends them in the same conversation, and

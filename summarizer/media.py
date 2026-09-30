@@ -39,7 +39,9 @@ def _ytdlp(*args: str, timeout: int = 900) -> subprocess.CompletedProcess:
 
 def probe(video: Video) -> dict:
     """One cheap request: title, uploader, duration, thumbnail, available captions."""
-    d = json.loads(_ytdlp("--skip-download", "-J", video.url, timeout=120).stdout)
+    # A TikTok carousel without music has no formats at all; still return its metadata.
+    extra = ["--ignore-no-formats-error"] if video.platform == "tiktok" else []
+    d = json.loads(_ytdlp("--skip-download", "-J", *extra, video.url, timeout=120).stdout)
     title = d.get("title") or ""
     if video.platform == "tiktok":
         # TikTok "title" is a truncated description; the full caption is more useful.
@@ -55,7 +57,10 @@ def probe(video: Video) -> dict:
         "thumbnail": d.get("thumbnail") or "",
         "subtitles": {k: v for k, v in (d.get("subtitles") or {}).items() if k != "live_chat"},
         "auto_captions": sorted((d.get("automatic_captions") or {}).keys()),
-        "image_post": bool(d.get("_type") == "playlist" or video.kind == "photo"),
+        # TikTok photo carousel: yt-dlp only sees the background music (no video formats).
+        "is_carousel": video.platform == "tiktok" and (video.kind == "photo" or all(
+            (f.get("vcodec") or "none") == "none" for f in d.get("formats") or [])),
+        "music": d.get("track") or "",
     }
 
 
@@ -196,7 +201,7 @@ def download_carousel(video: Video, workdir: Path) -> list[Path]:
     out.mkdir(exist_ok=True)
     try:
         _run([config.GALLERY_DL, "--sleep-request", "1", "-D", str(out),
-              "-f", "{num:>02}.{extension}", video.url], timeout=300)
+              "-f", "{num:>02}.{extension}", video.url], timeout=300)  # also fetches the music; dropped below
     except MediaError as e:
         log.warning("gallery-dl failed: %s", e)
     imgs = sorted(p for p in out.iterdir() if p.suffix.lower() in IMAGE_EXTS)

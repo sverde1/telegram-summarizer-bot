@@ -4,6 +4,7 @@
 seconds until the summary is ready (None when unknown).
 """
 import logging
+import re
 import shutil
 import time
 from collections.abc import Callable
@@ -94,7 +95,10 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
     except media.MediaError as e:
         raise PipelineError(f"Couldn't load the video: {e}")
     dur = meta["duration"] or 0
-    st.head = f"🎬 {meta['title'][:80]} ({_fmt_duration(dur)})"
+    if video.kind == "photo" or meta.get("is_carousel"):
+        st.head = f"🖼 {meta['title'][:80]} (photo post)"  # "duration" would be the music's
+    else:
+        st.head = f"🎬 {meta['title'][:80]} ({_fmt_duration(dur)})"
     if dur > config.MAX_DURATION_MIN * 60:
         raise PipelineError(f"Video is longer than {config.MAX_DURATION_MIN} min; skipping.")
 
@@ -104,22 +108,23 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
     llm = BACKEND_NAMES.get(config.LLM_BACKEND, config.LLM_BACKEND)
     try:
         cues, source, lang, images, notes = [], "none", "", [], []
-        is_carousel = video.kind == "photo"
+        is_carousel = video.kind == "photo" or bool(meta.get("is_carousel"))
 
-        # Reuse a cached transcript when re-running (/again, /frames): never fetch captions twice.
-        if cached and cached["transcript_source"] != "none" and not is_carousel:
-            cues = [(0.0, cached["transcript"])]
-            source, lang = cached["transcript_source"], cached["language"]
-            st.ok(f"✅ Transcript: from cache ({source})")
-        elif is_carousel:
-            st.show("🖼 Photo post: downloading slides…", 10 + _eta_llm(0, 10))
+        if is_carousel:
+            # Photo post: the slides are the content; the audio is usually just a music track.
+            st.show("🖼 Photo post: downloading the slides…", 10 + _eta_llm(0, 10))
             slides = media.download_carousel(video, workdir)
             if not slides:
                 raise PipelineError("This photo post has no downloadable images (deleted, private, "
                                     "or region-locked).")
             images = [(media.to_jpeg(p, p.with_suffix(".conv.jpg")), f"slide {i}/{len(slides)}")
-                      for i, p in enumerate(slides[:config.MAX_FRAMES], 1)]
-            st.ok(f"✅ {len(images)} slides downloaded")
+                      for i, p in enumerate(slides[:config.MAX_SLIDES], 1)]
+            st.ok(f"✅ Photo post: {len(images)} slides")
+        elif cached and cached["transcript_source"] != "none":
+            # Reuse a cached transcript when re-running (/again): never fetch captions twice.
+            cues = [(0.0, cached["transcript"])]
+            source, lang = cached["transcript_source"], cached["language"]
+            st.ok(f"✅ Transcript: from cache ({source})")
         else:
             cues, source, lang = _transcript(video, meta, workdir, st, notes, transcript_only)
 
@@ -127,8 +132,13 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         if transcript_only:
             return _finish(video, meta, transcript, source, lang, None, False, notes, t0)
 
+        # No (or hardly any) speech: the picture is the content, so look right away instead of
+        # waiting for the LLM to ask. Saves the second LLM turn.
+        if not is_carousel and _speechless(meta, transcript):
+            images = _frames(video, meta, cues, [], workdir, st, notes, why="no speech, looking at the video")
+
         thumb = media.download_thumbnail(meta, workdir)
-        first_images = ([(thumb, "thumbnail")] if thumb else []) + images  # images = slides, if any
+        first_images = ([(thumb, "thumbnail")] if thumb else []) + images  # slides or frames, if any
         conv = summarize.conversation()
         try:
             st.show(f"🧠 Summarizing with {llm}…", _eta_llm(len(transcript), len(first_images)))
@@ -138,7 +148,7 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
                          (time.monotonic() - t_llm) / _llm_load(len(transcript), len(first_images)))
             summary = {k: answer[k] for k in summarize.SCHEMA["required"]}
             log.info("needs_frames=%s moments=%s", answer.get("needs_frames"), answer.get("frame_moments"))
-            if answer.get("needs_frames") and not is_carousel:
+            if answer.get("needs_frames") and not images:  # it already has slides/frames otherwise
                 st.ok("✅ First summary written")
                 frames_ = _frames(video, meta, cues, answer.get("frame_moments") or [], workdir, st, notes)
                 if frames_:
@@ -169,15 +179,20 @@ def _finish(video, meta, transcript, source, lang, summary, frames_used, notes, 
                   frames_used, notes=notes)
 
 
-def _frames(video, meta, cues, moments: list[dict], workdir, st: Status, notes) -> list[tuple]:
-    """Grab the frames the LLM asked for. Returns [(path, label)]."""
+def _speechless(meta: dict, transcript: str) -> bool:
+    words = len(re.sub(r"\[\d+:\d\d\]", "", transcript).split())
+    return words < 5 or words / max((meta.get("duration") or 0) / 60, 0.25) < 15
+
+
+def _frames(video, meta, cues, moments: list[dict], workdir, st: Status, notes, why: str = "") -> list[tuple]:
+    """Grab frames at the moments the LLM asked for (or sample the video). Returns [(path, label)]."""
     dur = meta["duration"] or 0
     times = sorted({float(m["t"]) for m in moments if 0 <= float(m.get("t", -1)) < max(dur, 1)})
     reasons = "; ".join(dict.fromkeys(str(m.get("why", "")) for m in moments if m.get("why")))[:120]
     # Dense sampling too when the LLM wants the whole video, or the video is short (cheap, catches
     # things shown briefly between the moments it named).
     sweep = not times or frames.is_short(meta)
-    st.show(f"🎞 Grabbing frames: {reasons or 'LLM wants to see the video'}…",
+    st.show(f"🎞 Grabbing frames: {why or reasons or 'LLM wants to see the video'}…",
             _eta_frames(dur) + _eta_llm(0, config.MAX_FRAMES))
     try:
         vid = media.download_video(video, workdir)

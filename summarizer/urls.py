@@ -17,8 +17,8 @@ _TT_SHORT = re.compile(r"(?:vm|vt)\.tiktok\.com/|tiktok\.com/t/")
 class Video:
     platform: str  # youtube | tiktok
     video_id: str
-    url: str       # canonical URL
-    kind: str = "video"  # video | photo (TikTok carousel)
+    url: str       # canonical URL (TikTok: always the /video/ form, which yt-dlp understands)
+    kind: str = "video"  # video | photo (TikTok carousel; also detected later from the probe)
 
 
 class UnsupportedURL(ValueError):
@@ -47,6 +47,7 @@ def classify(url: str) -> Video:
         url = _resolve_redirect(url)
     if m := _TT_POST.search(url):
         user, kind, vid = m.groups()
-        return Video("tiktok", vid, f"https://www.tiktok.com/@{user}/{kind}/{vid}", kind)
+        # Carousels are served under /video/ too; yt-dlp rejects the /photo/ form, gallery-dl takes both.
+        return Video("tiktok", vid, f"https://www.tiktok.com/@{user}/video/{vid}", kind)
 
     raise UnsupportedURL("That doesn't look like a YouTube or TikTok video link.")
