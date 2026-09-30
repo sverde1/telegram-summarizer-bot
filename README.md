@@ -55,7 +55,8 @@ silently. `/users` lists allowed, pending and blocked users with Remove / Allow 
 All users share the admin's LLM subscription limits.
 
 ## Database (`data/bot.sqlite3`)
-- `users`: everyone except the `.env` admins, with status allowed / pending / blocked.
+- `users`: everyone, with status admin (synced from `.env` at startup) / allowed / pending / blocked,
+  and their chosen LLM `model` (NULL = the backend's default, i.e. Codex's default model).
 - `videos`: one row per video, created when processing starts (`processing`) and filled in as metadata,
   transcript and summary arrive; ends `done` or `failed` (with the error). Doubles as the cache.
 - `requests`: one row per link a user sends, written immediately: who, URL, kind (summary / again /
@@ -73,7 +74,13 @@ Run it permanently with the systemd user unit in `deploy/` (instructions inside)
 
 ## Commands
 `/again <url>` re-summarize ignoring the cached summary · `/transcript <url>` raw transcript as .txt ·
-`/users` (admins). The Telegram command menu is per user: strangers only see `/start`.
+`/history` recent requests (admins: everyone's) · `/models` list models, tap to choose ·
+`/model <name>` switch (`/model default` to reset) · `/users` (admins). The Telegram command menu is
+per user: strangers only see `/start`.
+
+Model choice is per user. `/models` lists what the active backend offers (Codex: the models Codex
+itself lists, from its model cache). A cached summary is reused only if it was made with the model the
+user gets; otherwise the video is summarized again (transcript reused) and that summary replaces it.
 
 ## GPU later
 Set `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16`, `WHISPER_MODEL=medium`, install

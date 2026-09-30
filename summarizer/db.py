@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS users (
     id          INTEGER PRIMARY KEY,           -- Telegram user id
     name        TEXT,
     username    TEXT,
-    status      TEXT NOT NULL,                 -- allowed | pending | blocked
+    status      TEXT NOT NULL,                 -- admin (from .env) | allowed | pending | blocked
+    model       TEXT,                          -- chosen LLM model; NULL = the backend's default (Codex's)
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL
 );
@@ -82,7 +83,26 @@ def _db():
 def init() -> None:
     with _db() as c:
         c.executescript(SCHEMA)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
+        if "model" not in cols:  # databases created before per-user models
+            c.execute("ALTER TABLE users ADD COLUMN model TEXT")
+        if c.execute("SELECT 1 FROM sqlite_master WHERE name='user_settings'").fetchone():
+            for r in c.execute("SELECT user_id, model FROM user_settings").fetchall():
+                c.execute("UPDATE users SET model=? WHERE id=?", (r["model"], r["user_id"]))
+            c.execute("DROP TABLE user_settings")
     _migrate_old_files()
+
+
+def sync_admins(admin_ids: set[int]) -> None:
+    """Admins come from .env; give them a users row too (status 'admin') so their settings live there.
+    Someone removed from ADMIN_USER_IDS loses the admin row (their settings go with it)."""
+    now = time.time()
+    with _db() as c:
+        for uid in admin_ids:
+            c.execute("""INSERT INTO users (id, status, created_at, updated_at) VALUES (?, 'admin', ?, ?)
+                         ON CONFLICT(id) DO UPDATE SET status='admin'""", (uid, now, now))
+        placeholders = ",".join("?" * len(admin_ids)) or "NULL"
+        c.execute(f"DELETE FROM users WHERE status='admin' AND id NOT IN ({placeholders})", tuple(admin_ids))
 
 
 # ---------- users ----------
@@ -112,11 +132,23 @@ def set_user(uid: int, status: str | None, name: str | None = None, username: st
 
 
 def users_by_status() -> dict[str, list[dict]]:
-    out = {"allowed": [], "pending": [], "blocked": []}
+    out = {"admin": [], "allowed": [], "pending": [], "blocked": []}
     with _db() as c:
         for row in c.execute("SELECT * FROM users ORDER BY created_at"):
             out.setdefault(row["status"], []).append(dict(row))
     return out
+
+
+def get_user_model(uid: int) -> str | None:
+    with _db() as c:
+        row = c.execute("SELECT model FROM users WHERE id=?", (uid,)).fetchone()
+    return row["model"] if row else None
+
+
+def set_user_model(uid: int, model: str | None) -> None:
+    """None = back to the default model."""
+    with _db() as c:
+        c.execute("UPDATE users SET model=?, updated_at=? WHERE id=?", (model, time.time(), uid))
 
 
 # ---------- videos ----------

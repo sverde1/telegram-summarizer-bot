@@ -143,23 +143,60 @@ def _legend(images: list[tuple[Path, str]]) -> str:
     return "\n".join(f"Image {i}: {label}" for i, (_, label) in enumerate(images, 1)) or "(none)"
 
 
-def conversation() -> "Conversation":
+def conversation(model: str | None = None) -> "Conversation":
+    """model: a specific model for this video (a user's choice); None = the backend's default."""
     cls = {"codex": CodexConversation, "claude-code": ClaudeCodeConversation,
            "api": ApiConversation}.get(config.LLM_BACKEND)
     if not cls:
         raise SummaryError(f"Unknown LLM_BACKEND={config.LLM_BACKEND!r} (codex | claude-code | api)")
-    return cls()
+    conv = cls()
+    conv.requested = model or ""
+    return conv
+
+
+def default_model() -> str:
+    """What runs when nobody picked a model: the configured one, else the last one the backend used."""
+    from . import stats
+    return ({"codex": config.CODEX_MODEL, "claude-code": config.CLAUDE_CODE_MODEL,
+             "api": config.CLAUDE_MODEL}.get(config.LLM_BACKEND) or stats.recall(f"model:{config.LLM_BACKEND}"))
+
+
+# Claude Code accepts these aliases (they follow the latest model of each family).
+CLAUDE_CODE_MODELS = [
+    {"id": "opus", "name": "Claude Opus (latest)", "description": "Most capable Opus model."},
+    {"id": "sonnet", "name": "Claude Sonnet (latest)", "description": "Fast and capable, lighter on limits."},
+    {"id": "haiku", "name": "Claude Haiku (latest)", "description": "Fastest and cheapest."},
+]
+
+
+def list_models() -> list[dict]:
+    """Models the current backend can use, best first: [{id, name, description}]."""
+    if config.LLM_BACKEND == "codex":
+        try:
+            data = json.loads((config.CODEX_HOME / "models_cache.json").read_text())
+        except (OSError, ValueError):
+            return [{"id": config.CODEX_MODEL or default_model(), "name": "", "description": ""}]
+        models = [m for m in data.get("models", []) if m.get("visibility") == "list"
+                  and "image" in (m.get("input_modalities") or ["image"])]
+        models.sort(key=lambda m: m.get("priority", 99))
+        return [{"id": m["slug"], "name": m.get("display_name") or m["slug"],
+                 "description": m.get("description") or ""} for m in models]
+    if config.LLM_BACKEND == "claude-code":
+        return CLAUDE_CODE_MODELS
+    import anthropic
+    try:
+        return [{"id": m.id, "name": m.display_name, "description": ""}
+                for m in anthropic.Anthropic().models.list(limit=50)]
+    except anthropic.AnthropicError as e:
+        raise SummaryError(f"Couldn't list Claude API models: {e}")
 
 
 BACKEND_NAMES = {"codex": "Codex", "claude-code": "Claude Code", "api": "Claude API"}
 
 
 def llm_label(model: str = "") -> str:
-    """E.g. "Codex (gpt-6-astra)". Without a model: the configured one, else the last one seen."""
-    from . import stats
-    model = model or {"codex": config.CODEX_MODEL, "claude-code": "",
-                      "api": config.CLAUDE_MODEL}.get(config.LLM_BACKEND) or stats.recall(
-        f"model:{config.LLM_BACKEND}")
+    """E.g. "Codex (gpt-6-astra)". Without a model: the default one."""
+    model = model or default_model()
     name = BACKEND_NAMES.get(config.LLM_BACKEND, config.LLM_BACKEND)
     return f"{name} ({model})" if model else name
 
@@ -167,7 +204,8 @@ def llm_label(model: str = "") -> str:
 class Conversation:
     """start() = turn 1 (summary + frame request); add_frames() = turn 2 in the same conversation."""
 
-    model = ""  # the model that actually answered, once known
+    model = ""      # the model that actually answered, once known
+    requested = ""  # the model asked for ("" = backend default)
 
     def start(self, meta: dict, platform: str, transcript: str, source: str, language: str,
               images: list[tuple[Path, str]]) -> dict:
@@ -233,7 +271,7 @@ class CodexConversation(Conversation):
                       "--disable", "browser_use", "--disable", "computer_use", "--disable", "apps",
                       "-c", 'web_search="disabled"', "-c", 'sandbox_mode="read-only"',
                       "-c", f'model_reasoning_effort="{config.CODEX_EFFORT}"',
-                      *(["-m", config.CODEX_MODEL] if config.CODEX_MODEL else []),
+                      *(["-m", m] if (m := self.requested or config.CODEX_MODEL) else []),
                       "--output-schema", "/job/in/schema.json", "-o", "/job/out/result.json", *args]
             if first:
                 cmd = ["codex", "exec", "-C", "/job/in", *common, "-"]
@@ -273,7 +311,7 @@ class CodexConversation(Conversation):
                     continue
                 if d.get("type") == "turn_context" and isinstance(d.get("payload"), dict):
                     return d["payload"].get("model") or ""
-        return config.CODEX_MODEL
+        return self.requested or config.CODEX_MODEL
 
     def add_frames(self, frames):
         if not self.session:
@@ -315,7 +353,7 @@ class ClaudeCodeConversation(Conversation):
         cmd = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                "--tools", "",  # no tools at all: no Bash, Read, WebFetch, ...
                "--strict-mcp-config", "--disable-slash-commands",
-               "--model", config.CLAUDE_CODE_MODEL, "--effort", config.CLAUDE_EFFORT,
+               "--model", self.requested or config.CLAUDE_CODE_MODEL, "--effort", config.CLAUDE_EFFORT,
                "--json-schema", json.dumps(schema),
                *(["--session-id", self.session, "--system-prompt", system] if first
                  else ["--resume", self.session])]
@@ -367,7 +405,7 @@ class ApiConversation(Conversation):
         try:
             _client = _client or anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
             with _client.beta.messages.stream(
-                model=config.CLAUDE_MODEL,
+                model=self.requested or config.CLAUDE_MODEL,
                 max_tokens=16000,
                 system=self.system,
                 messages=self.messages,

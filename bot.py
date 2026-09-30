@@ -27,7 +27,8 @@ HELP = (
     "and a summary.\n\n"
     "/again <url> - ignore the cache and summarize again\n"
     "/transcript <url> - send the raw transcript as a file\n"
-    "/history - your recent requests"
+    "/history - your recent requests\n"
+    "/models - AI models you can choose from; /model <name> to switch"
 )
 ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n"
               "/history - recent requests from all users (who sent what, cache hits)")
@@ -43,6 +44,7 @@ class Job:
     queued_at: float = 0.0
     user_id: int = 0
     request_id: int = 0
+    model: str | None = None  # the user's chosen LLM model; None = default
 
 
 queue: asyncio.Queue[Job] = asyncio.Queue()
@@ -108,6 +110,76 @@ async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                  for text, act in actions[st]] for u in users[st]]
         lines = "\n".join(f"• {access.label(u['id'], u)}" for u in users[st])
         await update.message.reply_text(f"{titles[st]}\n{lines}", reply_markup=InlineKeyboardMarkup(rows))
+
+
+def _models_view(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Text + tap-to-choose buttons for /models."""
+    try:
+        models = summarize.list_models()
+    except summarize.SummaryError as e:
+        return f"⚠️ {e}", None
+    mine, default = db.get_user_model(uid), summarize.default_model()
+    current = mine or default
+    lines = [f"🧠 Models for {summarize.BACKEND_NAMES.get(config.LLM_BACKEND, config.LLM_BACKEND)}. "
+             f"Yours: {current}" + (" (default)" if not mine else ""), ""]
+    rows = []
+    for m in models:
+        mark = "✓ " if m["id"] == current else ""
+        tag = " · default" if m["id"] == default else ""
+        lines.append(f"{mark}{m['id']}{tag}" + (f": {m['description']}" if m["description"] else ""))
+        rows.append([InlineKeyboardButton(f"{mark}{m['name'] or m['id']}", callback_data=f"model:{m['id']}")])
+    if mine:
+        rows.append([InlineKeyboardButton("↩️ Back to default", callback_data="model:default")])
+    lines += ["", "Tap one to switch, or send /model <name>."]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _set_model(uid: int, wanted: str) -> str:
+    """Validate and store a user's model choice; returns the reply text."""
+    if wanted in ("default", "reset"):
+        db.set_user_model(uid, None)
+        return f"✅ Back to the default model ({summarize.default_model()})."
+    try:
+        ids = [m["id"] for m in summarize.list_models()]
+    except summarize.SummaryError as e:
+        return f"⚠️ {e}"
+    if wanted not in ids:
+        return f"Unknown model “{wanted}”. Available: {', '.join(ids)}"
+    db.set_user_model(uid, wanted)
+    return f"✅ Your summaries now use {wanted}. Videos summarized earlier with another model get a fresh summary."
+
+
+async def on_models(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if await guard(update, ctx):
+        text, buttons = _models_view(update.effective_user.id)
+        await update.message.reply_text(text, reply_markup=buttons)
+
+
+async def on_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await guard(update, ctx):
+        return
+    uid = update.effective_user.id
+    if not ctx.args:
+        mine = db.get_user_model(uid)
+        await update.message.reply_text(
+            f"🧠 Your model: {mine or summarize.default_model()}" + ("" if mine else " (default)")
+            + "\nSee /models to choose another.")
+        return
+    await update.message.reply_text(_set_model(uid, ctx.args[0].strip()))
+
+
+async def on_model_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if access.state(q.from_user.id) not in ("admin", "allowed"):
+        await q.answer()
+        return
+    reply = _set_model(q.from_user.id, (q.data or "").removeprefix("model:"))
+    await q.answer(reply[:200])
+    text, buttons = _models_view(q.from_user.id)
+    try:
+        await q.edit_message_text(text, reply_markup=buttons)
+    except BadRequest:  # unchanged
+        pass
 
 
 async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -178,7 +250,7 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
     uid = update.effective_user.id
     req = db.add_request(uid, url, kind)  # logged the moment the link arrives
     await queue.put(Job(url, update.effective_chat.id, status.message_id, queued_at=time.monotonic(),
-                        user_id=uid, request_id=req, **opts))
+                        user_id=uid, request_id=req, model=db.get_user_model(uid), **opts))
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -339,7 +411,8 @@ async def worker(app: Application) -> None:
             progress = Progress(app, loop, job)
             try:
                 result = await asyncio.to_thread(
-                    pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id, transcript_only=job.transcript_only)
+                    pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
+                    model=job.model, transcript_only=job.transcript_only)
             finally:
                 await progress.close()
             if job.transcript_only:
@@ -385,6 +458,8 @@ USER_COMMANDS = [
     BotCommand("again", "Summarize again, ignoring the cache: /again <url>"),
     BotCommand("transcript", "Get the raw transcript as a file: /transcript <url>"),
     BotCommand("history", "Your recent requests"),
+    BotCommand("models", "List the AI models you can choose from"),
+    BotCommand("model", "Show or switch your model: /model <name>"),
 ]
 ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock"),
                   BotCommand("history", "Recent requests from all users")] + [
@@ -435,6 +510,9 @@ def main() -> None:
     app.add_handler(CommandHandler("transcript", command(transcript_only=True)))
     app.add_handler(CommandHandler("users", on_users))
     app.add_handler(CommandHandler("history", on_history))
+    app.add_handler(CommandHandler("models", on_models))
+    app.add_handler(CommandHandler("model", on_model))
+    app.add_handler(CallbackQueryHandler(on_model_button, pattern=r"^model:"))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)

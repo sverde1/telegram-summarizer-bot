@@ -5,7 +5,8 @@ from summarizer import config, db  # noqa: F401  (config loads .env)
 
 ADMINS = {int(x) for x in (os.environ.get("ADMIN_USER_IDS") or os.environ.get("ALLOWED_USER_IDS") or "")
           .replace(" ", "").split(",") if x}
-STATES = ("allowed", "pending", "blocked")
+STATES = ("allowed", "pending", "blocked")  # what admins manage; admins themselves come from .env
+db.sync_admins(ADMINS)
 
 
 def is_admin(uid: int) -> bool:
@@ -21,7 +22,8 @@ def state(uid: int) -> str | None:
 
 
 def set_state(uid: int, new: str | None, name: str | None = None, username: str | None = None) -> dict | None:
-    """Move a user to `new` (None = forget). Returns their row, or None if unknown."""
+    """Move a user to `new` (None = forget). Returns their row, or None if unknown.
+    Removing a user also drops their settings (model choice)."""
     return db.set_user(uid, new, name, username)
 
 

@@ -75,7 +75,10 @@ class Status:
 
 
 def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
-        transcript_only: bool = False, request_id: int | None = None) -> Result:
+        transcript_only: bool = False, request_id: int | None = None, model: str | None = None) -> Result:
+    """model: the user's chosen LLM model (None = default). A cached summary made with a different
+    model isn't reused; the video is summarized again (reusing the saved transcript) and the new
+    summary replaces it."""
     t0 = time.time()
     video = classify(url)
 
@@ -83,21 +86,26 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         db.update_request(request_id, platform=video.platform, video_id=video.video_id, status="processing")
 
     cached = db.get_video(video.platform, video.video_id)
+    # Reuse a summary only if it came from the model this user gets (their choice, else the default).
+    # Summaries from before per-user models have no model recorded; they count as the default's.
+    made_by = ((cached or {}).get("result") or {}).get("_stats", {}).get("model")
+    same_model = (made_by or summarize.default_model()) == (model or summarize.default_model())
     if cached and use_cache and cached["meta"] and (
-            cached["result"] or (transcript_only and cached["transcript_source"])):
+            (cached["result"] and same_model) or (transcript_only and cached["transcript_source"])):
         return Result(video.platform, video.video_id, video.url, cached["meta"], cached["transcript"] or "",
                       cached["transcript_source"] or "none", cached["language"] or "", cached["result"],
                       cached["frames_used"], cached=True)
 
     db.start_video(video.platform, video.video_id, video.url)
     try:
-        return _process(video, progress, cached, transcript_only, t0)
+        return _process(video, progress, cached, transcript_only, t0, model)
     except Exception as e:
         db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
         raise
 
 
-def _process(video, progress, cached: dict | None, transcript_only: bool, t0: float) -> Result:
+def _process(video, progress, cached: dict | None, transcript_only: bool, t0: float,
+             model: str | None) -> Result:
     st = Status(progress)
     timings: list[tuple[str, float]] = []  # (step, seconds), shown under the summary
 
@@ -123,7 +131,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
     workdir = config.DATA_DIR / "work" / f"{video.platform}_{video.video_id}"
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True)
-    llm = summarize.llm_label()  # configured or last-seen model; replaced by the actual one below
+    llm = summarize.llm_label(model or "")  # replaced by the model that actually answers, below
     try:
         cues, source, lang, images, notes = [], "none", "", [], []
         is_carousel = video.kind == "photo" or bool(meta.get("is_carousel"))
@@ -165,14 +173,15 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
 
         thumb = media.download_thumbnail(meta, workdir)
         first_images = ([(thumb, "thumbnail")] if thumb else []) + images  # slides or frames, if any
-        conv = summarize.conversation()
+        conv = summarize.conversation(model)
         try:
             st.show(f"🧠 Summarizing with {llm}…", _eta_llm(len(transcript), len(first_images)))
             t_llm = time.monotonic()
             answer = conv.start(meta, video.platform, transcript, source, lang, first_images)
             if conv.model:
                 llm = summarize.llm_label(conv.model)
-                stats.remember(f"model:{config.LLM_BACKEND}", conv.model)
+                if not model:  # remember what the default resolves to, for labels and /models
+                    stats.remember(f"model:{config.LLM_BACKEND}", conv.model)
             took("summary", t_llm)
             stats.record(f"llm:{config.LLM_BACKEND}",
                          (time.monotonic() - t_llm) / _llm_load(len(transcript), len(first_images)))
@@ -198,7 +207,8 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             raise PipelineError(str(e))
         finally:
             conv.close()
-        summary["_stats"] = {"steps": timings, "total": time.time() - t0, "llm": llm}  # cached with the summary
+        summary["_stats"] = {"steps": timings, "total": time.time() - t0, "llm": llm,  # cached with the summary
+                             "model": model or conv.model}
         return _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media
