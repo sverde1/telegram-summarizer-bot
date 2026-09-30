@@ -11,7 +11,7 @@ from telegram import (BotCommand, BotCommandScopeChat, BotCommandScopeDefault, I
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
-                          filters)
+                          TypeHandler, filters)
 
 import access
 from summarizer import config, db, pipeline, stats, summarize, updates
@@ -59,7 +59,6 @@ async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = 
         return False
     st = access.state(user.id)
     if st in ("admin", "allowed"):
-        db.touch_user(user.id, user.full_name, user.username)
         return True
     msg = update.effective_message
     if not access.ADMINS:  # setup mode: tell the owner their id
@@ -92,6 +91,12 @@ async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = 
         await msg.reply_text("🔒 This is a private bot. I've asked the admin to give you access; "
                              "you'll get a message when it's approved.")
     return False
+
+
+async def remember_names(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs before every handler: keep known users' names/usernames current (they change)."""
+    if user := update.effective_user:
+        db.touch_user(user.id, user.full_name, user.username)  # no-op for unknown users
 
 
 async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -567,6 +572,7 @@ def main() -> None:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set (.env)")
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
     app.add_error_handler(on_error)
+    app.add_handler(TypeHandler(Update, remember_names), group=-1)  # before all other handlers
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("help", on_help))
     app.add_handler(CommandHandler("again", command(use_cache=False)))
