@@ -181,14 +181,24 @@ async def _fail(app: Application, job: Job, msg: str) -> None:
 
 
 async def post_init(app: Application) -> None:
-    app.create_task(worker(app))
+    app.bot_data["worker"] = asyncio.create_task(worker(app))
     log.info("bot ready; allowed users: %s", sorted(config.ALLOWED_USER_IDS) or "NONE (setup mode)")
+
+
+async def post_stop(app: Application) -> None:
+    if task := app.bot_data.get("worker"):
+        task.cancel()
+
+
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    log.error("update handling failed", exc_info=ctx.error)
 
 
 def main() -> None:
     if not config.TELEGRAM_BOT_TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set (.env)")
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
+    app.add_error_handler(on_error)
     app.add_handler(CommandHandler(["start", "help"], on_help))
     app.add_handler(CommandHandler("frames", command(force_frames=True)))
     app.add_handler(CommandHandler("noframes", command(force_frames=False)))
