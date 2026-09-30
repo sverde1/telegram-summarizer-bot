@@ -14,7 +14,7 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Con
                           filters)
 
 import access
-from summarizer import config, db, pipeline, summarize
+from summarizer import config, db, pipeline, stats, summarize, updates
 from summarizer.urls import UnsupportedURL, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -511,13 +511,41 @@ async def post_init(app: Application) -> None:
     for uid in [*access.ADMINS, *(u["id"] for u in access.all_users()["allowed"])]:
         await sync_commands(app.bot, uid)
     app.bot_data["worker"] = asyncio.create_task(worker(app))
+    app.bot_data["update_checker"] = asyncio.create_task(update_checker(app))
     log.info("bot ready; admins: %s, allowed users: %d", sorted(access.ADMINS) or "NONE (setup mode)",
              len(access.all_users()["allowed"]))
 
 
+UPDATE_CHECK_EVERY = 12 * 3600
+
+
+async def update_checker(app: Application) -> None:
+    """Tell the admins when a newer Codex / Claude Code is out (once per new version)."""
+    await asyncio.sleep(60)  # let startup finish
+    while True:
+        try:
+            for u in await asyncio.to_thread(updates.check):
+                key = f"update-notified:{u['tool']}"
+                if stats.recall(key) == u["latest"]:
+                    continue
+                text = (f"⬆️ {u['tool']} update available: {u['installed']} → {u['latest']}\n"
+                        f"New models may need it. On the bot's machine run:\n{u['command']}")
+                for admin in access.ADMINS:
+                    try:
+                        await app.bot.send_message(admin, text)
+                    except (BadRequest, Forbidden) as e:
+                        log.warning("couldn't notify admin %s: %s", admin, e)
+                stats.remember(key, u["latest"])
+                log.info("notified admins: %s %s -> %s", u["tool"], u["installed"], u["latest"])
+        except Exception:
+            log.exception("update check failed")
+        await asyncio.sleep(UPDATE_CHECK_EVERY)
+
+
 async def post_stop(app: Application) -> None:
-    if task := app.bot_data.get("worker"):
-        task.cancel()
+    for name in ("worker", "update_checker"):
+        if task := app.bot_data.get(name):
+            task.cancel()
 
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:

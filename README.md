@@ -99,3 +99,7 @@ systemctl --user daemon-reload && systemctl --user enable --now telegram-summari
 journalctl --user -u telegram-summarizer-update   # what changed
 ```
 For start-at-boot without logging in: `loginctl enable-linger $USER`.
+
+The Codex and Claude Code CLIs are installed outside the venv. Every 12 h the bot compares their
+versions with the latest releases on npm and messages the admins once per new version, with the
+update command (`sudo npm install -g @openai/codex`, `claude update`). New models may need them.
