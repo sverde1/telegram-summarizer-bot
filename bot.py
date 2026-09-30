@@ -28,7 +28,7 @@ HELP = (
     "/again <url> - ignore the cache and summarize again\n"
     "/transcript <url> - send the raw transcript as a file\n"
     "/history - your recent requests\n"
-    "/models - choose the AI (Codex or Claude) and model; /model shows yours"
+    "/models - show or choose the AI (Codex or Claude) and model"
 )
 ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n"
               "/history - recent requests from all users (who sent what, cache hits)")
@@ -181,32 +181,6 @@ async def on_models(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if await guard(update, ctx):
         text, buttons = _llm_home(update.effective_user.id)
         await update.message.reply_text(text, reply_markup=buttons)
-
-
-async def on_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/model: show; /model <name> or <provider>:<name>: switch; /model default: reset."""
-    if not await guard(update, ctx):
-        return
-    uid = update.effective_user.id
-    if not ctx.args:
-        b, m, is_default = _current_llm(uid)
-        await update.message.reply_text(f"🧠 {summarize.BACKEND_NAMES[b]} · {m}" + (" (default)" if is_default else "")
-                                        + "\nSee /models to choose another.")
-        return
-    arg = ctx.args[0].strip()
-    if arg in ("default", "reset"):
-        await update.message.reply_text(_set_llm(uid, None, None))
-        return
-    backend, _, name = arg.rpartition(":")
-    if not backend:  # plain model name: find the provider that has it
-        for b in summarize.available_backends():
-            try:
-                if any(m["id"] == name for m in summarize.list_models(b)):
-                    backend = b
-                    break
-            except summarize.SummaryError:
-                continue
-    await update.message.reply_text(_set_llm(uid, backend or config.LLM_BACKEND, name))
 
 
 async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -510,8 +484,7 @@ USER_COMMANDS = [
     BotCommand("again", "Summarize again, ignoring the cache: /again <url>"),
     BotCommand("transcript", "Get the raw transcript as a file: /transcript <url>"),
     BotCommand("history", "Your recent requests"),
-    BotCommand("models", "Choose the AI: Codex or Claude, then the model"),
-    BotCommand("model", "Show your model, or switch: /model <name>"),
+    BotCommand("models", "Show or choose the AI: Codex or Claude, then the model"),
 ]
 ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock"),
                   BotCommand("history", "Recent requests from all users")] + [
@@ -563,7 +536,6 @@ def main() -> None:
     app.add_handler(CommandHandler("users", on_users))
     app.add_handler(CommandHandler("history", on_history))
     app.add_handler(CommandHandler("models", on_models))
-    app.add_handler(CommandHandler("model", on_model))
     app.add_handler(CallbackQueryHandler(on_llm_button, pattern=r"^llm:"))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
