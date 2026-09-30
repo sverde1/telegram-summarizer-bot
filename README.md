@@ -44,8 +44,8 @@ cp .env.example .env   # fill in TELEGRAM_BOT_TOKEN (+ backend settings)
 With `ADMIN_USER_IDS` empty the bot replies with your user id; put it in `.env` and restart.
 
 ## Users
-Admins (`ADMIN_USER_IDS`) approve everyone else from Telegram. When an unknown user messages the bot,
-the admins get an access request with **Allow / Deny** buttons; denied users are blocked and ignored
+Admins (`ADMIN_USER_IDS`) approve everyone else from Telegram. When an unknown user starts the bot by
+sending `/start`, the admins get an access request with **Allow / Deny** buttons; denied users are blocked and ignored
 silently. `/users` lists allowed, pending and blocked users with Remove / Allow / Unblock buttons.
 The list lives in `data/users.json`. All users share the admin's LLM subscription limits.
 No system packages are needed: ffmpeg comes from `imageio-ffmpeg` (a system ffmpeg is preferred if

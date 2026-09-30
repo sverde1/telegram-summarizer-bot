@@ -6,7 +6,8 @@ import logging
 import time
 from dataclasses import dataclass
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
+from telegram import (BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InlineKeyboardButton,
+                      InlineKeyboardMarkup, Update, User)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
@@ -49,8 +50,9 @@ def _info(user: User) -> dict:
     return {"name": user.full_name, "username": user.username}
 
 
-async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
-    """True if the user may use the bot. Unknown users trigger an access request to the admins."""
+async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = False) -> bool:
+    """True if the user may use the bot. With request=True (/start), an unknown user's access
+    request is sent to the admins; otherwise they're only told how to ask."""
     user = update.effective_user
     if not user:
         return False
@@ -69,6 +71,10 @@ async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
     if st == "pending":
         if msg:
             await msg.reply_text("⏳ Your access request is waiting for the admin's approval.")
+        return False
+    if not request:
+        if msg:
+            await msg.reply_text("🔒 This is a private bot. Send /start to request access.")
         return False
     info = access.set_state(user.id, "pending", _info(user))
     log.warning("access request from %s", access.label(user.id, info))
@@ -158,6 +164,11 @@ def command(**opts):
         if await guard(update, ctx):
             await enqueue(update, find_url(" ".join(ctx.args)), **opts)
     return handler
+
+
+async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if await guard(update, ctx, request=True):
+        await update.message.reply_text(HELP + (ADMIN_HELP if access.is_admin(update.effective_user.id) else ""))
 
 
 async def on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -301,7 +312,25 @@ async def _fail(app: Application, job: Job, msg: str) -> None:
         await app.bot.send_message(job.chat_id, f"⚠️ {msg}")
 
 
+COMMANDS = [
+    BotCommand("help", "How to use the bot"),
+    BotCommand("frames", "Summarize and look at video frames: /frames <url>"),
+    BotCommand("noframes", "Summarize from the transcript only: /noframes <url>"),
+    BotCommand("again", "Summarize again, ignoring the cache: /again <url>"),
+    BotCommand("transcript", "Get the raw transcript as a file: /transcript <url>"),
+    BotCommand("start", "Start / request access"),
+]
+ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock")]
+
+
 async def post_init(app: Application) -> None:
+    # The chat's "Menu" button and "/" autocomplete. Admins get /users on top.
+    await app.bot.set_my_commands(COMMANDS, scope=BotCommandScopeDefault())
+    for admin in access.ADMINS:
+        try:
+            await app.bot.set_my_commands(ADMIN_COMMANDS + COMMANDS, scope=BotCommandScopeChat(admin))
+        except BadRequest as e:  # admin hasn't opened a chat with the bot yet
+            log.warning("couldn't set admin commands for %s: %s", admin, e)
     app.bot_data["worker"] = asyncio.create_task(worker(app))
     log.info("bot ready; admins: %s, allowed users: %d", sorted(access.ADMINS) or "NONE (setup mode)",
              len(access.all_users()["allowed"]))
@@ -321,7 +350,8 @@ def main() -> None:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set (.env)")
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
     app.add_error_handler(on_error)
-    app.add_handler(CommandHandler(["start", "help"], on_help))
+    app.add_handler(CommandHandler("start", on_start))
+    app.add_handler(CommandHandler("help", on_help))
     app.add_handler(CommandHandler("frames", command(force_frames=True)))
     app.add_handler(CommandHandler("noframes", command(force_frames=False)))
     app.add_handler(CommandHandler("again", command(use_cache=False)))
