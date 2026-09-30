@@ -77,10 +77,11 @@ class Status:
 def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         transcript_only: bool = False, request_id: int | None = None, backend: str | None = None,
         model: str | None = None) -> Result:
-    """backend/model: the user's LLM choice (None = defaults), used when a summary has to be written.
-    A cached summary is reused whichever model wrote it (the footer says which); /again (use_cache=False)
-    rewrites it with the user's model."""
+    """backend/model: the user's LLM choice (None = defaults). Summaries are cached per video and model,
+    so each user gets the one their model wrote; a missing one is written from the saved transcript.
+    /again (use_cache=False) rewrites it."""
     backend = backend or config.LLM_BACKEND
+    model = model or summarize.default_model(backend)  # the cache key; a pinned model id when possible
     t0 = time.time()
     video = classify(url)
 
@@ -88,11 +89,12 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         db.update_request(request_id, platform=video.platform, video_id=video.video_id, status="processing")
 
     cached = db.get_video(video.platform, video.video_id)
+    saved = db.get_summary(video.platform, video.video_id, backend, model) if model else None
     if cached and use_cache and cached["meta"] and (
-            cached["result"] or (transcript_only and cached["transcript_source"])):
+            saved or (transcript_only and cached["transcript_source"])):
         return Result(video.platform, video.video_id, video.url, cached["meta"], cached["transcript"] or "",
-                      cached["transcript_source"] or "none", cached["language"] or "", cached["result"],
-                      cached["frames_used"], cached=True)
+                      cached["transcript_source"] or "none", cached["language"] or "",
+                      saved["result"] if saved else None, bool(saved and saved["frames_used"]), cached=True)
 
     db.start_video(video.platform, video.video_id, video.url)
     try:
@@ -207,16 +209,14 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             conv.close()
         summary["_stats"] = {"steps": timings, "total": time.time() - t0, "llm": llm,  # cached with the summary
                              "backend": backend, "model": model or conv.model}
+        db.save_summary(video.platform, video.video_id, backend, model or conv.model, summary, bool(images))
         return _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media
 
 
 def _finish(video, meta, transcript, source, lang, summary, frames_used, notes, t0) -> Result:
-    fields = {"status": "done", "error": None}
-    if summary:  # a /transcript run keeps the earlier summary
-        fields.update(result=summary, frames_used=frames_used)
-    db.update_video(video.platform, video.video_id, **fields)
+    db.update_video(video.platform, video.video_id, status="done", error=None)
     log.info("done %s/%s source=%s lang=%s frames=%s in %.0fs", video.platform, video.video_id, source,
              lang, frames_used, time.time() - t0)
     return Result(video.platform, video.video_id, video.url, meta, transcript, source, lang, summary,

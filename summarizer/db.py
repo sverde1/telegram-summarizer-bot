@@ -1,7 +1,8 @@
 """The bot's database (data/bot.sqlite3).
 
 users     people other than the .env admins: allowed / pending / blocked
-videos    one row per video (platform, video_id): metadata, transcript, summary, as they come in
+videos    one row per video (platform, video_id): metadata and transcript, as they come in
+summaries one row per video and LLM (backend + model): each user gets the summary of the model they use
 requests  one row per link a user sends: who, what, when, how it went
 
 Who submitted which video is private: only admins can see other users' requests.
@@ -39,11 +40,19 @@ CREATE TABLE IF NOT EXISTS videos (
     transcript        TEXT,
     transcript_source TEXT,
     language          TEXT,
-    result            TEXT,                    -- JSON summary (+ _stats)
-    frames_used       INTEGER DEFAULT 0,
     created_at        REAL NOT NULL,
     updated_at        REAL NOT NULL,
     PRIMARY KEY (platform, video_id)
+);
+CREATE TABLE IF NOT EXISTS summaries (
+    platform     TEXT NOT NULL,
+    video_id     TEXT NOT NULL,
+    backend      TEXT NOT NULL,                -- codex | claude-code | api
+    model        TEXT NOT NULL,                -- the model requested (default resolved), e.g. gpt-6-sol
+    result       TEXT NOT NULL,                -- JSON summary (+ _stats)
+    frames_used  INTEGER DEFAULT 0,
+    created_at   REAL NOT NULL,
+    PRIMARY KEY (platform, video_id, backend, model)
 );
 CREATE TABLE IF NOT EXISTS requests (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,6 +97,17 @@ def init() -> None:
         for col in ("backend", "model"):  # databases created before per-user models
             if col not in cols:
                 c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+        vcols = {r["name"] for r in c.execute("PRAGMA table_info(videos)")}
+        if "result" in vcols:  # summaries used to live in videos (one per video): move them out
+            for r in c.execute("SELECT platform, video_id, result, frames_used, updated_at FROM videos "
+                               "WHERE result IS NOT NULL").fetchall():
+                st = json.loads(r["result"]).get("_stats", {})
+                # Summaries from before model tracking were written by Codex's default then, gpt-6-astra.
+                c.execute("INSERT OR IGNORE INTO summaries VALUES (?,?,?,?,?,?,?)",
+                          (r["platform"], r["video_id"], st.get("backend") or "codex",
+                           st.get("model") or "gpt-6-astra", r["result"], r["frames_used"] or 0, r["updated_at"]))
+            c.execute("ALTER TABLE videos DROP COLUMN result")
+            c.execute("ALTER TABLE videos DROP COLUMN frames_used")
         if c.execute("SELECT 1 FROM sqlite_master WHERE name='user_settings'").fetchone():
             for r in c.execute("SELECT user_id, model FROM user_settings").fetchall():
                 c.execute("UPDATE users SET model=? WHERE id=?", (r["model"], r["user_id"]))
@@ -164,13 +184,11 @@ def get_video(platform: str, video_id: str) -> dict | None:
         return None
     v = dict(row)
     v["meta"] = json.loads(v["meta"]) if v["meta"] else None
-    v["result"] = json.loads(v["result"]) if v["result"] else None
-    v["frames_used"] = bool(v["frames_used"])
     return v
 
 
 def start_video(platform: str, video_id: str, url: str) -> None:
-    """Row exists as soon as work starts; keeps earlier transcript/result for /again."""
+    """Row exists as soon as work starts; keeps the earlier transcript for /again."""
     now = time.time()
     with _db() as c:
         c.execute("""INSERT INTO videos (platform, video_id, url, status, created_at, updated_at)
@@ -181,17 +199,31 @@ def start_video(platform: str, video_id: str, url: str) -> None:
 
 
 def update_video(platform: str, video_id: str, **fields) -> None:
-    """Fill in columns as data arrives (meta/result are JSON-encoded here)."""
-    for k in ("meta", "result"):
-        if k in fields and fields[k] is not None:
-            fields[k] = json.dumps(fields[k], ensure_ascii=False)
-    if "frames_used" in fields:
-        fields["frames_used"] = int(bool(fields["frames_used"]))
+    """Fill in columns as data arrives (meta is JSON-encoded here)."""
+    if fields.get("meta") is not None:
+        fields["meta"] = json.dumps(fields["meta"], ensure_ascii=False)
     fields["updated_at"] = time.time()
     cols = ", ".join(f"{k}=?" for k in fields)
     with _db() as c:
         c.execute(f"UPDATE videos SET {cols} WHERE platform=? AND video_id=?",
                   (*fields.values(), platform, video_id))
+
+
+# ---------- summaries ----------
+
+def get_summary(platform: str, video_id: str, backend: str, model: str) -> dict | None:
+    """{"result": {...}, "frames_used": bool} for this video and model, or None."""
+    with _db() as c:
+        row = c.execute("SELECT result, frames_used FROM summaries WHERE platform=? AND video_id=? "
+                        "AND backend=? AND model=?", (platform, video_id, backend, model)).fetchone()
+    return {"result": json.loads(row["result"]), "frames_used": bool(row["frames_used"])} if row else None
+
+
+def save_summary(platform: str, video_id: str, backend: str, model: str, result: dict, frames_used: bool) -> None:
+    with _db() as c:
+        c.execute("INSERT OR REPLACE INTO summaries VALUES (?,?,?,?,?,?,?)",
+                  (platform, video_id, backend, model, json.dumps(result, ensure_ascii=False),
+                   int(frames_used), time.time()))
 
 
 # ---------- requests ----------
@@ -248,10 +280,12 @@ def _migrate_old_files() -> None:
             for p, vid, meta, tr, ts, lang, res, fu, created in rows:
                 title = (json.loads(meta) or {}).get("title") if meta else None
                 c.execute("""INSERT OR IGNORE INTO videos (platform, video_id, title, status, meta, transcript,
-                             transcript_source, language, result, frames_used, created_at, updated_at)
-                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                          (p, vid, title, "done" if res else "failed", meta, tr, ts, lang, res, fu,
-                           created, created))
+                             transcript_source, language, created_at, updated_at)
+                             VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                          (p, vid, title, "done" if res else "failed", meta, tr, ts, lang, created, created))
+                if res:
+                    c.execute("INSERT OR IGNORE INTO summaries VALUES (?,?,?,?,?,?,?)",
+                              (p, vid, "codex", "gpt-6-astra", res, fu or 0, created))
         for f in config.DATA_DIR.glob("cache.sqlite3*"):
             f.unlink()
     old_users = config.DATA_DIR / "users.json"

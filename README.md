@@ -57,8 +57,10 @@ All users share the admin's LLM subscription limits.
 ## Database (`data/bot.sqlite3`)
 - `users`: everyone, with status admin (synced from `.env` at startup) / allowed / pending / blocked,
   and their chosen LLM `backend` + `model` (NULL = default: Codex with its default model).
-- `videos`: one row per video, created when processing starts (`processing`) and filled in as metadata,
-  transcript and summary arrive; ends `done` or `failed` (with the error). Doubles as the cache.
+- `videos`: one row per video, created when processing starts (`processing`) and filled in as metadata
+  and transcript arrive; ends `done` or `failed` (with the error).
+- `summaries`: one row per video and LLM (backend + model). Each user gets the summary written by the
+  model they use; if that model hasn't summarized the video yet, it's written from the saved transcript.
 - `requests`: one row per link a user sends, written immediately: who, URL, kind (summary / again /
   transcript), status, whether it was served from cache, timestamps.
 
@@ -80,8 +82,8 @@ per user: strangers only see `/start`.
 The AI is chosen per user with `/models`: first the provider (Codex on ChatGPT, Claude Code on Claude,
 Claude API if `ANTHROPIC_API_KEY` is set; only installed ones are shown), then one of its models
 (Codex: the models Codex itself lists; Claude Code: Opus 5.5, Sonnet 5.5, Haiku 4.5). The default is `LLM_BACKEND` (Codex) with its default
-model. Cached summaries are reused whichever model wrote them (the footer names it); `/again`
-rewrites one with the user's current model.
+model. Summaries are cached per model, so users on different models each get their own model's
+summary; `/again` rewrites the one for the user's current model.
 
 ## GPU later
 Set `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16`, `WHISPER_MODEL=medium`, install
