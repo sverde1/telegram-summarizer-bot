@@ -2,10 +2,11 @@
 import logging
 import subprocess
 import threading
+import time
 
 import numpy as np
 
-from . import config
+from . import config, stats
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +57,22 @@ def transcribe(audio_path: str) -> tuple[list[tuple[float, str]], str, float]:
     non-English audio makes whisper produce fluent, invented English instead of an error.
     """
     with _lock:
-        segments, info = get_model().transcribe(_decode(audio_path), language=None, vad_filter=True)
+        model = get_model()
+        t0 = time.monotonic()
+        audio = _decode(audio_path)
+        segments, info = model.transcribe(audio, language=None, vad_filter=True)
         cues = [(s.start, s.text.strip()) for s in segments if s.text.strip()]
+        audio_sec = len(audio) / 16000
+        if audio_sec > 5:
+            stats.record(speed_key(), (time.monotonic() - t0) / audio_sec)
     return cues, info.language, info.language_probability
+
+
+def speed_key() -> str:
+    return f"whisper:{config.WHISPER_DEVICE}:{config.WHISPER_MODEL}"
+
+
+def estimate(audio_sec: float) -> float:
+    """Seconds to transcribe, from the measured realtime factor (+ model load if not loaded yet)."""
+    factor = stats.get(speed_key(), 0.5 if config.WHISPER_DEVICE == "cpu" else 0.05)
+    return audio_sec * factor + (0 if _model else 15)

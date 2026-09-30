@@ -1,14 +1,20 @@
-"""URL in, summary out. Blocking; the bot runs it in a worker thread."""
+"""URL in, summary out. Blocking; the bot runs it in a worker thread.
+
+`progress(text, eta)` is called at every stage: `text` is the full status to show, `eta` the estimated
+seconds until the summary is ready (None when unknown).
+"""
 import logging
 import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from . import cache, config, frames, media, summarize, transcribe
+from . import cache, config, frames, media, stats, summarize, transcribe
 from .urls import classify
 
 log = logging.getLogger(__name__)
+
+BACKEND_NAMES = {"codex": "Codex (ChatGPT)", "claude-code": "Claude Code", "api": "Claude API"}
 
 
 @dataclass
@@ -35,7 +41,42 @@ def _fmt_duration(sec: float) -> str:
     return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
 
 
-def run(url: str, progress: Callable[[str], None], *, force_frames: bool | None = None,
+# ---------- ETA estimates (seconds) ----------
+
+def _llm_load(chars: int, n_images: int) -> float:
+    return 1 + chars / 40000 + n_images * 0.1
+
+
+def _eta_llm(chars: int, n_images: int) -> float:
+    return stats.get(f"llm:{config.LLM_BACKEND}", 25) * _llm_load(chars, n_images)
+
+
+def _eta_audio(duration: float) -> float:
+    return 3 + duration / 200
+
+
+def _eta_frames(duration: float) -> float:
+    return 10 + duration / 20
+
+
+def _chars_for(duration: float) -> int:
+    return int(duration * 15)  # ~15 transcript characters per second of speech
+
+
+class Status:
+    """Accumulates status lines under a header and reports them with an ETA."""
+
+    def __init__(self, progress: Callable[..., None]):
+        self.progress, self.head, self.done = progress, "", []
+
+    def show(self, current: str, eta: float | None = None) -> None:
+        self.progress("\n".join(filter(None, [self.head, *self.done, current])), eta)
+
+    def ok(self, line: str) -> None:
+        self.done.append(line)
+
+
+def run(url: str, progress: Callable[..., None], *, force_frames: bool | None = None,
         use_cache: bool = True, transcript_only: bool = False) -> Result:
     t0 = time.time()
     video = classify(url)
@@ -46,18 +87,21 @@ def run(url: str, progress: Callable[[str], None], *, force_frames: bool | None 
                       cached["transcript_source"], cached["language"], cached["result"],
                       cached["frames_used"], cached=True)
 
-    progress("🔎 Looking up the video…")
+    st = Status(progress)
+    st.show("🔎 Looking up the video…")
     try:
         meta = media.probe(video)
     except media.MediaError as e:
         raise PipelineError(f"Couldn't load the video: {e}")
-    head = f"🎬 {meta['title'][:80]} ({_fmt_duration(meta['duration'])})"
-    if meta["duration"] > config.MAX_DURATION_MIN * 60:
+    dur = meta["duration"] or 0
+    st.head = f"🎬 {meta['title'][:80]} ({_fmt_duration(dur)})"
+    if dur > config.MAX_DURATION_MIN * 60:
         raise PipelineError(f"Video is longer than {config.MAX_DURATION_MIN} min; skipping.")
 
     workdir = config.DATA_DIR / "work" / f"{video.platform}_{video.video_id}"
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True)
+    llm = BACKEND_NAMES.get(config.LLM_BACKEND, config.LLM_BACKEND)
     try:
         cues, source, lang, images, notes = [], "none", "", [], []
         is_carousel = video.kind == "photo"
@@ -66,16 +110,18 @@ def run(url: str, progress: Callable[[str], None], *, force_frames: bool | None 
         if cached and cached["transcript_source"] != "none" and not is_carousel:
             cues = [(0.0, cached["transcript"])]
             source, lang = cached["transcript_source"], cached["language"]
+            st.ok(f"✅ Transcript: from cache ({source})")
         elif is_carousel:
-            progress(f"{head}\n🖼 Downloading slides…")
+            st.show("🖼 Photo post: downloading slides…", 10 + _eta_llm(0, 10))
             slides = media.download_carousel(video, workdir)
             if not slides:
                 raise PipelineError("This photo post has no downloadable images (deleted, private, "
                                     "or region-locked).")
             images = [(media.to_jpeg(p, p.with_suffix(".conv.jpg")), f"slide {i}/{len(slides)}")
                       for i, p in enumerate(slides[:config.MAX_FRAMES], 1)]
+            st.ok(f"✅ {len(images)} slides downloaded")
         else:
-            cues, source, lang = _transcript(video, meta, workdir, progress, head, notes)
+            cues, source, lang = _transcript(video, meta, workdir, st, notes, transcript_only)
 
         transcript = summarize.format_transcript(cues) if len(cues) > 1 else (cues[0][1] if cues else "")
         if transcript_only:
@@ -85,21 +131,27 @@ def run(url: str, progress: Callable[[str], None], *, force_frames: bool | None 
             use, reasons = frames.decide(meta, cues, force_frames)
             log.info("frames=%s reasons=%s", use, reasons)
             if use:
-                progress(f"{head}\n✓ transcript ({source})\n🎞 Pulling frames: {'; '.join(reasons)}…")
+                st.show(f"🎞 Pulling video frames ({'; '.join(reasons)})…",
+                        _eta_frames(dur) + _eta_llm(len(transcript), config.MAX_FRAMES))
                 try:
                     vid = media.download_video(video, workdir)
-                    images = frames.extract(vid, cues, meta["duration"], workdir)
+                    images = frames.extract(vid, cues, dur, workdir)
                     vid.unlink(missing_ok=True)
+                    st.ok(f"✅ {len(images)} frames selected")
                 except media.MediaError as e:
                     notes.append(f"frames unavailable: {e}")
+                    st.ok("⚠️ Couldn't get frames, continuing without")
 
-        progress(f"{head}\n✓ transcript ({source})"
-                 + (f"\n✓ {len(images)} images" if images else "") + "\n🧠 Summarizing…")
+        n_img = len(images) + 1  # + thumbnail
+        st.show(f"🧠 Summarizing with {llm}…", _eta_llm(len(transcript), n_img))
         thumb = media.download_thumbnail(meta, workdir)
+        t_llm = time.monotonic()
         try:
             summary = summarize.summarize(meta, video.platform, transcript, source, lang, thumb, images)
         except summarize.SummaryError as e:
             raise PipelineError(str(e))
+        stats.record(f"llm:{config.LLM_BACKEND}",
+                     (time.monotonic() - t_llm) / _llm_load(len(transcript), n_img))
         return _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media
@@ -115,8 +167,11 @@ def _finish(video, meta, transcript, source, lang, summary, frames_used, notes, 
                   frames_used, notes=notes)
 
 
-def _whisper(video, workdir, progress, head, notes) -> tuple[list, str, str] | None:
-    progress(f"{head}\n🎧 Downloading audio…")
+def _whisper(video, meta, workdir, st: Status, notes, why: str, rest: float) -> tuple[list, str, str] | None:
+    dur = meta["duration"] or 0
+    whisper = f"Whisper ({config.WHISPER_MODEL}, {config.WHISPER_DEVICE.upper()})"
+    st.show(f"🎧 {why} → downloading audio for {whisper}…",
+            _eta_audio(dur) + transcribe.estimate(dur) + rest)
     try:
         audio = media.download_audio(video, workdir)
     except media.MediaError as e:
@@ -125,26 +180,33 @@ def _whisper(video, workdir, progress, head, notes) -> tuple[list, str, str] | N
     if not media.has_audio_stream(audio):
         notes.append("downloaded file has no audio track")
         return None
-    progress(f"{head}\n🗣 Transcribing audio ({config.WHISPER_MODEL} on {config.WHISPER_DEVICE})…")
+    st.show(f"🗣 {why} → transcribing {_fmt_duration(dur)} of audio with {whisper}…",
+            transcribe.estimate(dur) + rest)
     cues, lang, prob = transcribe.transcribe(str(audio))
     audio.unlink(missing_ok=True)
     log.info("whisper: %d segments, lang=%s p=%.2f", len(cues), lang, prob)
+    st.ok(f"✅ Transcript: Whisper, language {lang}" if cues else "✅ Whisper: no speech found")
     return cues, f"whisper-{config.WHISPER_MODEL}", lang
 
 
-def _transcript(video, meta, workdir, progress, head, notes) -> tuple[list, str, str]:
+def _transcript(video, meta, workdir, st: Status, notes, transcript_only: bool) -> tuple[list, str, str]:
+    dur = meta["duration"] or 0
+    rest = 0 if transcript_only else _eta_llm(_chars_for(dur), 1)
     if video.platform == "youtube":
-        progress(f"{head}\n📝 Fetching captions…")
+        st.show("📝 Checking for YouTube captions…")
         if got := media.fetch_captions(video, meta, workdir):
+            st.ok(f"✅ Transcript: YouTube captions ({got[1]})")
             return got[0], "captions", got[1]
-        if got := _whisper(video, workdir, progress, head, notes):
+        if got := _whisper(video, meta, workdir, st, notes, "No captions", rest):
             return got
+        st.ok("⚠️ No transcript available")
         return [], "none", ""
 
     # TikTok: no transcript API. Audio + whisper first, then TikTok's own auto-captions.
-    got = _whisper(video, workdir, progress, head, notes)
+    got = _whisper(video, meta, workdir, st, notes, "TikTok has no transcript", rest)
     if got and got[0]:
         return got
     if caps := media.fetch_captions(video, meta, workdir):
+        st.ok(f"✅ Transcript: TikTok captions ({caps[1]})")
         return caps[0], "tiktok-webvtt", caps[1]
     return [], "none", got[2] if got else ""

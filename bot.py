@@ -123,25 +123,67 @@ def render(r: pipeline.Result) -> list[str]:
     return [c for c in chunks if c.strip()]
 
 
+def _fmt_eta(sec: float) -> str:
+    sec = max(int(sec), 0)
+    if sec < 60:
+        return f"{max(-(-sec // 5) * 5, 5)} s"  # round up to 5 s
+    return f"{round(sec / 30) / 2:g} min" if sec < 600 else f"{round(sec / 60)} min"
+
+
 class Progress:
-    """Edits the status message from the worker thread, at most once every few seconds."""
+    """Shows pipeline stages in the status message, with an ETA countdown refreshed every 15 s.
+
+    Called from the worker thread. Edits run in call order (asyncio.Lock is FIFO), so a later
+    stage is never overwritten by an earlier one, and no stage is dropped.
+    """
+
+    TICK = 15
 
     def __init__(self, app: Application, loop: asyncio.AbstractEventLoop, job: Job):
         self.app, self.loop, self.job = app, loop, job
-        self.last_sent, self.last_text = 0.0, ""
+        self.lock = asyncio.Lock()
+        self.text, self.eta, self.eta_at, self.shown, self.last_edit = "", None, 0.0, "", 0.0
+        self.started, self.closed = time.monotonic(), False
+        self.ticker = asyncio.run_coroutine_threadsafe(self._tick(), loop)
 
-    def __call__(self, text: str) -> None:
-        now = time.monotonic()
-        if text == self.last_text or now - self.last_sent < 3:
-            return
-        self.last_sent, self.last_text = now, text
-        asyncio.run_coroutine_threadsafe(self._edit(text), self.loop)
+    def __call__(self, text: str, eta: float | None = None) -> None:
+        self.text, self.eta, self.eta_at = text, eta, time.monotonic()
+        asyncio.run_coroutine_threadsafe(self._edit(), self.loop)
 
-    async def _edit(self, text: str) -> None:
-        try:
-            await self.app.bot.edit_message_text(text, self.job.chat_id, self.job.status_id)
-        except (BadRequest, RetryAfter) as e:  # "message is not modified", flood control
-            log.debug("progress edit skipped: %s", e)
+    async def close(self) -> None:
+        """Stop updating; waits for an in-flight edit so it can't overwrite the final message."""
+        self.ticker.cancel()
+        async with self.lock:
+            self.closed = True
+
+    def _render(self) -> str:
+        elapsed = time.monotonic() - self.started
+        line = f"⏱ {int(elapsed) // 60}:{int(elapsed) % 60:02d} elapsed"
+        if self.eta is not None:
+            left = self.eta - (time.monotonic() - self.eta_at)
+            line += f" · ~{_fmt_eta(left)} left" if left > 0 else " · taking longer than estimated…"
+        return f"{self.text}\n\n{line}"
+
+    async def _tick(self) -> None:
+        while True:
+            await asyncio.sleep(self.TICK)
+            if self.text and time.monotonic() - self.last_edit >= self.TICK - 1:
+                await self._edit()
+
+    async def _edit(self) -> None:
+        async with self.lock:
+            if self.closed:
+                return
+            text = self._render()
+            if text == self.shown:
+                return
+            try:
+                await self.app.bot.edit_message_text(text, self.job.chat_id, self.job.status_id)
+                self.shown, self.last_edit = text, time.monotonic()
+            except RetryAfter as e:  # flood control: skip this edit, the next tick catches up
+                log.warning("progress edit rate-limited for %ss", e.retry_after)
+            except BadRequest as e:  # "message is not modified" etc.
+                log.debug("progress edit skipped: %s", e)
 
 
 async def worker(app: Application) -> None:
@@ -149,9 +191,13 @@ async def worker(app: Application) -> None:
     while True:
         job = await queue.get()
         try:
-            result = await asyncio.to_thread(
-                pipeline.run, job.url, Progress(app, loop, job), force_frames=job.force_frames,
-                use_cache=job.use_cache, transcript_only=job.transcript_only)
+            progress = Progress(app, loop, job)
+            try:
+                result = await asyncio.to_thread(
+                    pipeline.run, job.url, progress, force_frames=job.force_frames,
+                    use_cache=job.use_cache, transcript_only=job.transcript_only)
+            finally:
+                await progress.close()
             if job.transcript_only:
                 if not result.transcript:
                     await app.bot.send_message(job.chat_id, "No transcript available for this video.")
