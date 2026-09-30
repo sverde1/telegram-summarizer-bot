@@ -14,11 +14,11 @@ Summary:          overview + key points, sized to fit a Telegram message
 2. `yt-dlp` metadata probe. SQLite cache in `data/` keyed by (platform, id): a video is never fetched twice.
 3. Transcript: YouTube captions -> audio + faster-whisper. TikTok: audio + whisper -> TikTok captions.
    Photo carousels: the slide images are the content.
-4. Frames, decided automatically: short videos (≤ `SHORT_VIDEO_SEC`, default 3 min) and speechless ones
-   are always sampled densely; for longer videos the LLM reads the timestamped transcript and names the
-   moments where something is shown rather than said ("this book"), backed up by phrase matching.
-   Near-duplicate frames are dropped, max `MAX_FRAMES`.
-5. The LLM gets metadata, thumbnail, transcript and frames and returns structured JSON (see below).
+4. One LLM conversation per video. Turn 1: metadata + thumbnail + timestamped transcript -> summary, plus
+   `needs_frames` and the moments to look at. Turn 2 (only if it asked): the bot grabs frames at those
+   moments (plus an even sweep for short or speechless videos), sends them in the same conversation, and
+   the LLM revises the summary. Codex continues by the exact session id from turn 1 (never `--last`);
+   Claude Code by a per-video UUID. Session files are deleted after each job.
 6. Reply in Telegram (HTML, split at 4096 chars). Downloaded media is deleted after each job.
 
 ## LLM backends and sandboxing

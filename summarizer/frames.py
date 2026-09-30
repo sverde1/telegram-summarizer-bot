@@ -1,9 +1,4 @@
-"""Which moments of the video to look at, and pulling a small set of distinct frames from them.
-
-Short videos (TikTok, Shorts): always look, sampling densely, because speakers constantly show things
-("this book", a product, a text overlay) without naming them. Long videos: the LLM reads the timestamped
-transcript and names the moments where something is shown (see summarize.triage); a phrase regex backs it up.
-"""
+"""Pulling a small set of distinct frames at the moments the LLM asked for (plus an even sweep)."""
 import logging
 import re
 import subprocess
@@ -26,11 +21,6 @@ SCREEN_REF = re.compile(
 
 def is_short(meta: dict) -> bool:
     return (meta.get("duration") or 0) <= config.SHORT_VIDEO_SEC
-
-
-def speech_wpm(meta: dict, cues: list[tuple[float, str]]) -> float:
-    minutes = max(meta.get("duration") or 0, 1) / 60
-    return len(" ".join(t for _, t in cues).split()) / minutes
 
 
 def regex_moments(cues: list[tuple[float, str]]) -> list[float]:

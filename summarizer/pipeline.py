@@ -127,19 +127,33 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         if transcript_only:
             return _finish(video, meta, transcript, source, lang, None, False, notes, t0)
 
-        if not is_carousel:
-            images = _frames(video, meta, cues, transcript, workdir, st, notes, llm)
-
-        n_img = len(images) + 1  # + thumbnail
-        st.show(f"🧠 Summarizing with {llm}…", _eta_llm(len(transcript), n_img))
         thumb = media.download_thumbnail(meta, workdir)
-        t_llm = time.monotonic()
+        first_images = ([(thumb, "thumbnail")] if thumb else []) + images  # images = slides, if any
+        conv = summarize.conversation()
         try:
-            summary = summarize.summarize(meta, video.platform, transcript, source, lang, thumb, images)
+            st.show(f"🧠 Summarizing with {llm}…", _eta_llm(len(transcript), len(first_images)))
+            t_llm = time.monotonic()
+            answer = conv.start(meta, video.platform, transcript, source, lang, first_images)
+            stats.record(f"llm:{config.LLM_BACKEND}",
+                         (time.monotonic() - t_llm) / _llm_load(len(transcript), len(first_images)))
+            summary = {k: answer[k] for k in summarize.SCHEMA["required"]}
+            log.info("needs_frames=%s moments=%s", answer.get("needs_frames"), answer.get("frame_moments"))
+            if answer.get("needs_frames") and not is_carousel:
+                st.ok("✅ First summary written")
+                frames_ = _frames(video, meta, cues, answer.get("frame_moments") or [], workdir, st, notes)
+                if frames_:
+                    st.show(f"🧠 {llm} is updating the summary with {len(frames_)} frames…",
+                            _eta_llm(0, len(frames_)))
+                    try:
+                        summary = conv.add_frames(frames_)
+                        images = frames_
+                    except summarize.SummaryError as e:  # keep the transcript-only summary
+                        log.warning("frames follow-up failed: %s", e)
+                        notes.append(f"frames follow-up failed: {e}")
         except summarize.SummaryError as e:
             raise PipelineError(str(e))
-        stats.record(f"llm:{config.LLM_BACKEND}",
-                     (time.monotonic() - t_llm) / _llm_load(len(transcript), n_img))
+        finally:
+            conv.close()
         return _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media
@@ -155,38 +169,25 @@ def _finish(video, meta, transcript, source, lang, summary, frames_used, notes, 
                   frames_used, notes=notes)
 
 
-def _frames(video, meta, cues, transcript, workdir, st: Status, notes, llm) -> list[tuple]:
-    """Decide which moments to look at, then grab frames there. Returns [(path, label)]."""
+def _frames(video, meta, cues, moments: list[dict], workdir, st: Status, notes) -> list[tuple]:
+    """Grab the frames the LLM asked for. Returns [(path, label)]."""
     dur = meta["duration"] or 0
-    short = frames.is_short(meta)
-    no_speech = frames.speech_wpm(meta, cues) < 15
-    moments = frames.regex_moments(cues)
-    if short or no_speech:
-        why = "short video" if short else "little or no speech"
-    else:
-        st.show(f"🔍 Asking {llm} which moments show something on screen…",
-                _eta_llm(len(transcript), 0) * 2 + _eta_frames(dur))
-        try:
-            tri = summarize.triage(meta, cues)
-            log.info("triage: %s", tri)
-            moments += [float(m["t"]) for m in tri["moments"] if 0 <= float(m["t"]) < dur]
-        except (summarize.SummaryError, KeyError, TypeError, ValueError) as e:
-            log.warning("triage failed, using phrase matching only: %s", e)
-        if not moments:
-            st.ok("✅ Nothing important shown on screen, skipping frames")
-            return []
-        why = f"{len(moments)} on-screen moments"
-    st.show(f"🎞 Looking at the video ({why})…",
-            _eta_frames(dur) + _eta_llm(len(transcript), config.MAX_FRAMES))
+    times = sorted({float(m["t"]) for m in moments if 0 <= float(m.get("t", -1)) < max(dur, 1)})
+    reasons = "; ".join(dict.fromkeys(str(m.get("why", "")) for m in moments if m.get("why")))[:120]
+    # Dense sampling too when the LLM wants the whole video, or the video is short (cheap, catches
+    # things shown briefly between the moments it named).
+    sweep = not times or frames.is_short(meta)
+    st.show(f"🎞 Grabbing frames: {reasons or 'LLM wants to see the video'}…",
+            _eta_frames(dur) + _eta_llm(0, config.MAX_FRAMES))
     try:
         vid = media.download_video(video, workdir)
-        images = frames.extract(vid, dur, moments, workdir, sweep=short or no_speech)
+        images = frames.extract(vid, dur, times + frames.regex_moments(cues), workdir, sweep=sweep)
         vid.unlink(missing_ok=True)
     except media.MediaError as e:
         notes.append(f"frames unavailable: {e}")
-        st.ok("⚠️ Couldn't get video frames, continuing without")
+        st.ok("⚠️ Couldn't get video frames, keeping the transcript-only summary")
         return []
-    st.ok(f"✅ {len(images)} frames selected ({why})")
+    st.ok(f"✅ {len(images)} frames grabbed")
     return images
 
 
