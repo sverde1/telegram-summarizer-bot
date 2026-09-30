@@ -1,0 +1,15 @@
+anthropic==1.9.0
+av==19.0.0
+ctranslate2==4.8.2
+curl_cffi==0.16.3
+deno==2.9.7
+faster-whisper==1.2.1
+gallery_dl==1.32.14
+ImageHash==4.3.2
+imageio-ffmpeg==0.6.0
+numpy==2.5.3
+pillow==12.3.0
+python-dotenv==1.2.3
+python-telegram-bot==22.8
+yt-dlp==2026.8.19
+yt-dlp-ejs==0.8.0

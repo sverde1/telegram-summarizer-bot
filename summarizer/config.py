@@ -1,0 +1,60 @@
+"""All settings come from environment variables (loaded from .env)."""
+import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
+
+
+def _env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+# Telegram
+TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
+ALLOWED_USER_IDS = {int(x) for x in _env("ALLOWED_USER_IDS").replace(" ", "").split(",") if x}
+
+# Claude
+CLAUDE_MODEL = _env("CLAUDE_MODEL", "claude-opus-5-5")
+CLAUDE_EFFORT = _env("CLAUDE_EFFORT", "medium")
+SUMMARY_LANGUAGE = _env("SUMMARY_LANGUAGE", "English")
+
+# Whisper (speech-to-text). CPU by default; set WHISPER_DEVICE=cuda once a GPU is installed.
+WHISPER_DEVICE = _env("WHISPER_DEVICE", "cpu")  # cpu | cuda | auto
+WHISPER_MODEL = _env("WHISPER_MODEL", "small")  # multilingual models only: small | medium | large-v3
+WHISPER_COMPUTE_TYPE = _env("WHISPER_COMPUTE_TYPE", "int8" if WHISPER_DEVICE == "cpu" else "float16")
+WHISPER_CPU_THREADS = int(_env("WHISPER_CPU_THREADS", "0"))  # 0 = ctranslate2 default
+
+# Limits
+MAX_DURATION_MIN = int(_env("MAX_DURATION_MIN", "180"))
+MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
+
+DATA_DIR = Path(_env("DATA_DIR", str(ROOT / "data")))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Resolve CLI tools next to the interpreter so a stale system yt-dlp never shadows the venv one,
+# and so yt-dlp finds the venv's deno (YouTube JS runtime).
+VENV_BIN = Path(sys.executable).parent
+os.environ["PATH"] = f"{VENV_BIN}{os.pathsep}{os.environ.get('PATH', '')}"
+
+
+def _tool(name: str) -> str:
+    return str(VENV_BIN / name) if (VENV_BIN / name).exists() else name
+
+
+YTDLP = _tool("yt-dlp")
+GALLERY_DL = _tool("gallery-dl")
+
+
+def _ffmpeg() -> str:
+    import shutil
+    if found := shutil.which("ffmpeg"):
+        return found
+    import imageio_ffmpeg  # bundled static build, used when ffmpeg isn't installed system-wide
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+FFMPEG = _ffmpeg()

@@ -1,0 +1,22 @@
+# Install as a user service:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/telegram-summarizer-bot.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now telegram-summarizer-bot
+#   loginctl enable-linger $USER   # keep it running when you're logged out
+#   journalctl --user -u telegram-summarizer-bot -f
+[Unit]
+Description=Telegram YouTube/TikTok summarizer bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/scripts/telegram-summarizer-bot
+ExecStart=%h/scripts/telegram-summarizer-bot/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+# GPU later: the CUDA libs from the nvidia-* wheels must be on the loader path before Python starts.
+#Environment=LD_LIBRARY_PATH=%h/scripts/telegram-summarizer-bot/.venv/lib/python3.14/site-packages/nvidia/cublas/lib:%h/scripts/telegram-summarizer-bot/.venv/lib/python3.14/site-packages/nvidia/cudnn/lib
+
+[Install]
+WantedBy=default.target
