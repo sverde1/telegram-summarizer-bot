@@ -11,7 +11,7 @@ from telegram import (BotCommand, BotCommandScopeChat, BotCommandScopeDefault, I
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
-                          TypeHandler, filters)
+                          filters)
 
 import access
 from summarizer import config, db, pipeline, stats, summarize, updates
@@ -93,15 +93,11 @@ async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = 
     return False
 
 
-async def remember_names(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Runs before every handler: keep known users' names/usernames current (they change)."""
-    if user := update.effective_user:
-        db.touch_user(user.id, user.full_name, user.username)  # no-op for unknown users
-
-
 async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not access.is_admin(update.effective_user.id):
+    user = update.effective_user
+    if not access.is_admin(user.id):
         return
+    db.touch_user(user.id, user.full_name, user.username)  # admins have no /start request to record it
     users = access.all_users()
 
     def llm(u: dict) -> str:
@@ -309,6 +305,8 @@ def command(**opts):
 
 
 async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    db.touch_user(user.id, user.full_name, user.username)  # known users: refresh name (no-op otherwise)
     if await guard(update, ctx, request=True):
         await update.message.reply_text(HELP + (ADMIN_HELP if access.is_admin(update.effective_user.id) else ""))
 
@@ -572,7 +570,6 @@ def main() -> None:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set (.env)")
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
     app.add_error_handler(on_error)
-    app.add_handler(TypeHandler(Update, remember_names), group=-1)  # before all other handlers
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("help", on_help))
     app.add_handler(CommandHandler("again", command(use_cache=False)))
