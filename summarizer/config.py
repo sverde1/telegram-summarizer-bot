@@ -15,7 +15,6 @@ def _env(name: str, default: str = "") -> str:
 
 # Telegram
 TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
-ALLOWED_USER_IDS = {int(x) for x in _env("ALLOWED_USER_IDS").replace(" ", "").split(",") if x}
 
 # LLM
 LLM_BACKEND = _env("LLM_BACKEND", "codex")  # codex | claude-code | api

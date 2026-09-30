@@ -6,11 +6,13 @@ import logging
 import time
 from dataclasses import dataclass
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.error import BadRequest, Forbidden, RetryAfter
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
+                          filters)
 
+import access
 from summarizer import config, pipeline
 from summarizer.urls import UnsupportedURL, find_url
 
@@ -27,6 +29,7 @@ HELP = (
     "/again <url> - ignore the cache and summarize again\n"
     "/transcript <url> - send the raw transcript as a file"
 )
+ADMIN_HELP = "\n\nAdmin:\n/users - list users; allow, remove, or unblock them"
 
 
 @dataclass
@@ -42,21 +45,93 @@ class Job:
 queue: asyncio.Queue[Job] = asyncio.Queue()
 
 
-def allowed(update: Update) -> bool:
-    uid = update.effective_user.id if update.effective_user else None
-    return uid in config.ALLOWED_USER_IDS
+def _info(user: User) -> dict:
+    return {"name": user.full_name, "username": user.username}
 
 
-async def guard(update: Update) -> bool:
-    if allowed(update):
-        return True
+async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+    """True if the user may use the bot. Unknown users trigger an access request to the admins."""
     user = update.effective_user
-    log.warning("rejected user id=%s username=%s", user and user.id, user and user.username)
-    if not config.ALLOWED_USER_IDS and update.message:  # setup mode: tell the owner their id
-        await update.message.reply_text(
-            f"Setup: your Telegram user id is {user.id}. Add ALLOWED_USER_IDS={user.id} to .env "
-            "and restart the bot.")
+    if not user:
+        return False
+    st = access.state(user.id)
+    if st in ("admin", "allowed"):
+        return True
+    msg = update.effective_message
+    if not access.ADMINS:  # setup mode: tell the owner their id
+        if msg:
+            await msg.reply_text(f"Setup: your Telegram user id is {user.id}. Add ADMIN_USER_IDS={user.id} "
+                                 "to .env and restart the bot.")
+        return False
+    if st == "blocked":
+        log.info("ignored blocked user %s", user.id)
+        return False
+    if st == "pending":
+        if msg:
+            await msg.reply_text("⏳ Your access request is waiting for the admin's approval.")
+        return False
+    info = access.set_state(user.id, "pending", _info(user))
+    log.warning("access request from %s", access.label(user.id, info))
+    buttons = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Allow", callback_data=f"allow:{user.id}"),
+                                     InlineKeyboardButton("❌ Deny", callback_data=f"block:{user.id}")]])
+    for admin in access.ADMINS:
+        try:
+            await ctx.bot.send_message(admin, f"🔔 Access request from {access.label(user.id, info)}",
+                                       reply_markup=buttons)
+        except (BadRequest, Forbidden) as e:
+            log.error("couldn't notify admin %s: %s", admin, e)
+    if msg:
+        await msg.reply_text("🔒 This is a private bot. I've asked the admin to give you access; "
+                             "you'll get a message when it's approved.")
     return False
+
+
+async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not access.is_admin(update.effective_user.id):
+        return
+    users = access.all_users()
+    if not any(users.values()):
+        await update.message.reply_text("No users besides you yet. When someone messages the bot, "
+                                        "you'll get an access request here.")
+        return
+    actions = {"allowed": [("🗑 Remove", "remove")], "pending": [("✅ Allow", "allow"), ("❌ Deny", "block")],
+               "blocked": [("↩️ Unblock", "remove")]}
+    titles = {"allowed": "✅ Allowed", "pending": "⏳ Pending", "blocked": "⛔ Blocked"}
+    for st in access.STATES:
+        if not users[st]:
+            continue
+        rows = [[InlineKeyboardButton(f"{text}: {info.get('name') or uid}", callback_data=f"{act}:{uid}")
+                 for text, act in actions[st]] for uid, info in users[st].items()]
+        lines = "\n".join(f"• {access.label(uid, info)}" for uid, info in users[st].items())
+        await update.message.reply_text(f"{titles[st]}\n{lines}", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not access.is_admin(q.from_user.id):
+        await q.answer("Admins only.")
+        return
+    action, _, uid_s = (q.data or "").partition(":")
+    if action not in ("allow", "block", "remove") or not uid_s.isdigit():
+        await q.answer()
+        return
+    uid = int(uid_s)
+    if access.is_admin(uid):
+        await q.answer("That's an admin (configured in .env).")
+        return
+    new = {"allow": "allowed", "block": "blocked", "remove": None}[action]
+    info = access.set_state(uid, new) or {}
+    who = access.label(uid, info)
+    done = {"allow": f"✅ Allowed {who}", "block": f"⛔ Denied and blocked {who}",
+            "remove": f"🗑 Removed {who}"}[action]
+    log.info("admin %s: %s", q.from_user.id, done)
+    await q.answer(done[:200])
+    await q.edit_message_text(done)
+    if action == "allow":
+        try:
+            await ctx.bot.send_message(uid, "✅ You now have access. Send me a YouTube or TikTok link.\n\n" + HELP)
+        except (BadRequest, Forbidden) as e:
+            log.warning("couldn't notify user %s: %s", uid, e)
 
 
 async def enqueue(update: Update, url: str | None, **opts) -> None:
@@ -70,7 +145,7 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, ctx):
         return
     text = update.message.text or update.message.caption or ""
     words = text.lower().split()
@@ -80,14 +155,14 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 def command(**opts):
     async def handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if await guard(update):
+        if await guard(update, ctx):
             await enqueue(update, find_url(" ".join(ctx.args)), **opts)
     return handler
 
 
 async def on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if await guard(update):
-        await update.message.reply_text(HELP)
+    if await guard(update, ctx):
+        await update.message.reply_text(HELP + (ADMIN_HELP if access.is_admin(update.effective_user.id) else ""))
 
 
 # ---------- output ----------
@@ -228,7 +303,8 @@ async def _fail(app: Application, job: Job, msg: str) -> None:
 
 async def post_init(app: Application) -> None:
     app.bot_data["worker"] = asyncio.create_task(worker(app))
-    log.info("bot ready; allowed users: %s", sorted(config.ALLOWED_USER_IDS) or "NONE (setup mode)")
+    log.info("bot ready; admins: %s, allowed users: %d", sorted(access.ADMINS) or "NONE (setup mode)",
+             len(access.all_users()["allowed"]))
 
 
 async def post_stop(app: Application) -> None:
@@ -250,6 +326,8 @@ def main() -> None:
     app.add_handler(CommandHandler("noframes", command(force_frames=False)))
     app.add_handler(CommandHandler("again", command(use_cache=False)))
     app.add_handler(CommandHandler("transcript", command(transcript_only=True)))
+    app.add_handler(CommandHandler("users", on_users))
+    app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
