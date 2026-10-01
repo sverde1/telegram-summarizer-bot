@@ -278,7 +278,7 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 
 | Provider | Isolation |
 |---|---|
-| Codex | `codex exec` inside `bwrap`: read-only `/usr` and certificates, the bot's own `CODEX_HOME`, and this job's images. No `/home`, `.env` or repo. Browser, computer use, apps and web search disabled; Codex's own sandbox read-only. |
+| Codex | `codex exec` inside `bwrap`: read-only `/usr` and certificates, the bot's own `CODEX_HOME`, and this job's images. No `/home`, `.env` or repo. Every tool feature switched off (shell, JavaScript runtime, image viewing and generation, sub-agents, browser, computer use, apps, plugins…), web search off, Codex's own sandbox read-only. |
 | Claude Code | `claude -p --tools ""`: no tools, no MCP servers; images are sent inline. |
 | Claude API | A plain Messages call with no tools. |
 | OpenAI API | A plain Responses call with no tools. Turn 2 continues server-side via `previous_response_id`; the stored responses are deleted after each job. |

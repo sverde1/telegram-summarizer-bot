@@ -425,6 +425,40 @@ class Conversation:
 
 # ---------- codex (ChatGPT subscription), sandboxed with bubblewrap ----------
 
+# Codex features that give the model a capability a summary doesn't need. A video can carry prompt injection,
+# and a tool is how an injected instruction would turn into an action: shell commands (shell_tool,
+# unified_exec) could read the login in /codex-home and the network is open; the JavaScript runtime
+# (code_mode_host), image generation, sub-agents, image viewing from disk, browser/computer use, apps,
+# plugins, hooks, skills and the rest are switched off too. Images are attached with -i, not viewed by a tool.
+CODEX_DISABLED_FEATURES = (
+    "shell_tool", "unified_exec", "code_mode_host", "image_generation", "multi_agent", "view_image", "goals",
+    "hooks", "plugins", "apps", "browser_use", "browser_use_external", "computer_use", "skill_search",
+    "tool_suggest", "sleep_tool", "workspace_dependencies", "worktrees", "in_app_local_automation",
+)
+_codex_known_features: set[str] | None = None
+
+
+def codex_disabled_features() -> list[str]:
+    """The tool features to switch off, limited to the ones the installed Codex knows.
+
+    Codex refuses to start on an unknown `--disable` name ("Unknown feature flag"), so a feature that a future
+    Codex version drops or renames would otherwise break every summary. The installed list is read once (on
+    first use, not at import, so tests and startup don't spawn Codex) and cached.
+    """
+    global _codex_known_features
+    if _codex_known_features is None:
+        try:
+            out = proc.run(["codex", "features", "list"], timeout=30).stdout
+            _codex_known_features = {line.split()[0] for line in out.splitlines() if line.strip()}
+        except (OSError, proc.ProcError) as e:
+            log.warning("couldn't list Codex features (%s); disabling the full list", e)
+            return list(CODEX_DISABLED_FEATURES)
+    missing = [f for f in CODEX_DISABLED_FEATURES if f not in _codex_known_features]
+    if missing:
+        log.warning("installed Codex doesn't know these features (skipped): %s", ", ".join(missing))
+    return [f for f in CODEX_DISABLED_FEATURES if f in _codex_known_features]
+
+
 def _bwrap(job: Path) -> list[str]:
     """Builds the bubblewrap command prefix that sandboxes one Codex run.
 
@@ -498,10 +532,11 @@ class CodexConversation(Conversation):
             # Codex exec has no separate system prompt, so it goes at the top of the user message.
             prompt = "\n\n".join(filter(None, [system, text, "Reply with only the JSON object."]))
             # --ignore-user-config: nothing from a config.toml (MCP servers, trusted projects) can add
-            # capabilities. --json: the event stream carries the session id needed for turn 2. Browser,
-            # computer use, apps and web search off, and Codex's own sandbox read-only, on top of bwrap.
-            common = ["--skip-git-repo-check", "--ignore-user-config", "--json",
-                      "--disable", "browser_use", "--disable", "computer_use", "--disable", "apps",
+            # capabilities. --json: the event stream carries the session id needed for turn 2. Every tool
+            # switched off (see codex_disabled_features), web search off, and Codex's own sandbox read-only,
+            # on top of bwrap.
+            disable = [arg for name in codex_disabled_features() for arg in ("--disable", name)]
+            common = ["--skip-git-repo-check", "--ignore-user-config", "--json", *disable,
                       "-c", 'web_search="disabled"', "-c", 'sandbox_mode="read-only"',
                       "-c", f'model_reasoning_effort="{config.CODEX_EFFORT}"',
                       *(["-m", m] if (m := self.requested or config.CODEX_MODEL) else []),
