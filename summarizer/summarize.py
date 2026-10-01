@@ -265,6 +265,10 @@ def default_model(backend: str | None = None) -> str:
             or stats.recall(f"model:{backend}"))
 
 
+_API_MODELS_TTL = 300  # seconds: the API model lists change rarely, and /models shouldn't wait on them each tap
+_api_models_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
 def list_models(backend: str | None = None) -> list[dict]:
     """Lists the models a backend can use, best first.
 
@@ -291,14 +295,21 @@ def list_models(backend: str | None = None) -> list[dict]:
                  "description": m.get("description") or ""} for m in models]
     if backend == "claude-code":
         return CLAUDE_CODE_MODELS
+    cached = _api_models_cache.get(backend)
+    if cached and time.monotonic() - cached[0] < _API_MODELS_TTL:
+        return cached[1]
     if backend == "openai-api":
-        return _openai_models()
-    import anthropic
-    try:
-        return [{"id": m.id, "name": m.display_name, "description": ""}
-                for m in anthropic.Anthropic().models.list(limit=50)]
-    except anthropic.AnthropicError as e:
-        raise SummaryError(f"Couldn't list Claude API models: {e}")
+        models = _openai_models()
+    else:
+        import anthropic
+        try:
+            # Short timeout, no retries: a user is waiting on this in the /models picker.
+            client = anthropic.Anthropic(timeout=10, max_retries=0)
+            models = [{"id": m.id, "name": m.display_name, "description": ""} for m in client.models.list(limit=50)]
+        except anthropic.AnthropicError as e:
+            raise SummaryError(f"Couldn't list Claude API models: {e}")
+    _api_models_cache[backend] = (time.monotonic(), models)
+    return models
 
 
 # The OpenAI model list also holds embedding, speech, image and realtime models; none of these can
@@ -318,7 +329,7 @@ def _openai_models() -> list[dict]:
     """
     import openai
     try:
-        api = sorted(openai.OpenAI().models.list(), key=lambda m: m.created, reverse=True)
+        api = sorted(openai.OpenAI(timeout=10, max_retries=0).models.list(), key=lambda m: m.created, reverse=True)
     except openai.OpenAIError as e:
         raise SummaryError(f"Couldn't list OpenAI API models: {e}")
     ids = [m.id for m in api if m.id.startswith("gpt-") and not any(w in m.id for w in _OPENAI_NOT_CHAT)]

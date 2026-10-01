@@ -216,7 +216,7 @@ def _llm_home(uid: int) -> tuple[str, InlineKeyboardMarkup]:
     return text, InlineKeyboardMarkup(rows)
 
 
-def _llm_models(uid: int, backend: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _llm_models(uid: int, backend: str) -> tuple[str, InlineKeyboardMarkup]:
     """Builds step 2 of /models: the models of one provider, the user's current one marked ✓.
 
     Args:
@@ -228,7 +228,9 @@ def _llm_models(uid: int, backend: str) -> tuple[str, InlineKeyboardMarkup]:
     """
     b, m, _ = _current_llm(uid)
     try:
-        models = summarize.list_models(backend)
+        # The API backends fetch their list over the network: never on the event loop, which would
+        # freeze every other chat until the provider answers.
+        models = await asyncio.to_thread(summarize.list_models, backend)
     except summarize.SummaryError as e:
         return f"⚠️ {e}", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="llm:home")]])
     default = summarize.default_model(backend)
@@ -245,7 +247,7 @@ def _llm_models(uid: int, backend: str) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
-def _set_llm(uid: int, backend: str | None, model: str | None) -> str:
+async def _set_llm(uid: int, backend: str | None, model: str | None) -> str:
     """Validates and stores a user's backend/model choice.
 
     The choice is re-validated here rather than trusted from the button, because callback data comes
@@ -266,7 +268,7 @@ def _set_llm(uid: int, backend: str | None, model: str | None) -> str:
     if backend not in summarize.available_backends():
         return f"⚠️ {backend} isn't available on this bot."
     try:
-        ids = [m["id"] for m in summarize.list_models(backend)]
+        ids = [m["id"] for m in await asyncio.to_thread(summarize.list_models, backend)]
     except summarize.SummaryError as e:
         return f"⚠️ {e}"
     if model not in ids:
@@ -296,13 +298,20 @@ async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer()
         return
     parts = (q.data or "").split(":", 3)  # llm:home | llm:default | llm:b:<backend> | llm:m:<backend>:<model>
-    if parts[1] == "b":
-        text, buttons = _llm_models(uid, parts[2])
+    # Callback data comes from the client: anything malformed or naming an unknown provider just shows the
+    # first step again instead of raising.
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "b" and len(parts) == 3 and parts[2] in summarize.BACKENDS:
+        text, buttons = await _llm_models(uid, parts[2])
         await q.answer()
-    elif parts[1] in ("m", "default"):
-        reply = _set_llm(uid, parts[2], parts[3]) if parts[1] == "m" else _set_llm(uid, None, None)
+    elif action == "m" and len(parts) == 4 and parts[2] in summarize.BACKENDS:
+        reply = await _set_llm(uid, parts[2], parts[3])
         await q.answer(reply[:200])  # Telegram caps callback answer (toast) text at 200 characters
-        text, buttons = _llm_models(uid, parts[2]) if parts[1] == "m" else _llm_home(uid)
+        text, buttons = await _llm_models(uid, parts[2])
+    elif action == "default":
+        reply = await _set_llm(uid, None, None)
+        await q.answer(reply[:200])
+        text, buttons = _llm_home(uid)
     else:
         text, buttons = _llm_home(uid)
         await q.answer()
@@ -595,8 +604,10 @@ class Progress:
             eta: Estimated seconds until the summary is ready, or None if unknown.
         """
         self.text, self.eta, self.eta_at = text, eta, time.monotonic()
-        # The pipeline runs in a worker thread; Telegram calls must run on the bot's event loop.
-        asyncio.run_coroutine_threadsafe(self._edit(), self.loop)
+        # The pipeline runs in a worker thread; Telegram calls must run on the bot's event loop. The stage is
+        # passed along: rendering the *current* text instead would skip a stage that's replaced by the next
+        # one before its edit runs.
+        asyncio.run_coroutine_threadsafe(self._edit((text, eta, self.eta_at)), self.loop)
 
     async def close(self) -> None:
         """Stop updating; waits for an in-flight edit so it can't overwrite the final message."""
@@ -604,19 +615,23 @@ class Progress:
         async with self.lock:
             self.closed = True
 
-    def _render(self) -> str:
-        """Builds the status text: the current stage plus elapsed time and the ETA countdown.
+    def _render(self, stage: tuple | None = None) -> str:
+        """Builds the status text: a stage plus elapsed time and the ETA countdown.
+
+        Args:
+            stage: (text, eta, eta_at) of a specific stage; None = the current one (countdown refresh).
 
         Returns:
             The text for the status message.
         """
+        text, eta, eta_at = stage or (self.text, self.eta, self.eta_at)
         elapsed = time.monotonic() - self.started
         line = f"⏱ {int(elapsed) // 60}:{int(elapsed) % 60:02d} elapsed"
-        if self.eta is not None:
+        if eta is not None:
             # Count down from when the ETA was given, not from job start: each stage brings a new ETA.
-            left = self.eta - (time.monotonic() - self.eta_at)
+            left = eta - (time.monotonic() - eta_at)
             line += f" · ~{_fmt_eta(left)} left" if left > 0 else " · taking longer than estimated…"
-        return f"{self.text}\n\n{line}"
+        return f"{text}\n\n{line}"
 
     async def _tick(self) -> None:
         """Refreshes the countdown every TICK seconds until cancelled."""
@@ -627,13 +642,17 @@ class Progress:
             if self.text and time.monotonic() - self.last_edit >= self.TICK - 1:
                 await self._edit()
 
-    async def _edit(self) -> None:
-        """Edits the status message to the current text, unless closed or unchanged."""
+    async def _edit(self, stage: tuple | None = None) -> None:
+        """Edits the status message, unless closed or unchanged.
+
+        Args:
+            stage: The stage to show (see _render); None = the current one.
+        """
         # The lock serializes edits in call order, so a stage edit can't overtake a later one.
         async with self.lock:
             if self.closed:
                 return
-            text = self._render()
+            text = self._render(stage)
             if text == self.shown:
                 return
             try:
@@ -905,18 +924,18 @@ def add_handlers(app: Application) -> None:
     Separate from main() so tests can build an application with exactly the bot's handlers.
     """
     app.add_error_handler(on_error)
-    app.add_handler(CommandHandler("start", on_start))
-    app.add_handler(CommandHandler("help", on_help))
-    app.add_handler(CommandHandler("again", command(use_cache=False)))
-    app.add_handler(CommandHandler("transcript", command(transcript_only=True)))
-    app.add_handler(CommandHandler("users", on_users))
-    app.add_handler(CommandHandler("history", on_history))
-    app.add_handler(CommandHandler("models", on_models))
+    # New messages only: an edited message would re-run a command (and edited ones carry no
+    # update.message, which the handlers use to reply).
+    new = filters.UpdateType.MESSAGE
+    for name, handler in [("start", on_start), ("help", on_help), ("again", command(use_cache=False)),
+                          ("transcript", command(transcript_only=True)), ("users", on_users),
+                          ("history", on_history), ("models", on_models)]:
+        app.add_handler(CommandHandler(name, handler, filters=new))
     # Order matters: the first matching handler wins, so the picker's `llm:` buttons must be registered
     # before the catch-all admin-button handler.
     app.add_handler(CallbackQueryHandler(on_llm_button, pattern=r"^llm:"))
     app.add_handler(CallbackQueryHandler(on_button))
-    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
+    app.add_handler(MessageHandler(new & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
 
 
 def main() -> None:
