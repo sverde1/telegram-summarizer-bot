@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from . import config
+from . import config, proc
 from .urls import Video
 
 log = logging.getLogger(__name__)
@@ -33,10 +33,14 @@ def _run(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     Raises:
         MediaError: The command failed. The message is the last "ERROR" line of its output (yt-dlp and
             gallery-dl print warnings and progress around it), or the last line if there is none.
-        subprocess.TimeoutExpired: The command ran longer than `timeout`.
+        proc.ProcCancelled: The job was cancelled. Deliberately not turned into MediaError: callers that
+            shrug off a failed download must not carry on with a cancelled job.
     """
     log.debug("run: %s", " ".join(cmd))
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        p = proc.run(cmd, timeout=timeout)
+    except proc.ProcTimeout:
+        raise MediaError("the download timed out")  # ProcCancelled is deliberately not caught: it stops the job
     if p.returncode != 0:
         err = (p.stderr or p.stdout).strip().splitlines()
         msg = next((ln for ln in reversed(err) if "ERROR" in ln), err[-1] if err else "unknown error")

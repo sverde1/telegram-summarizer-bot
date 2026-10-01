@@ -2,7 +2,8 @@
 import logging
 import re
 import shutil
-import subprocess
+
+from . import proc
 
 log = logging.getLogger(__name__)
 
@@ -37,8 +38,8 @@ def _run(cmd: list[str]) -> str:
         means no notification this round.
     """
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout
-    except (OSError, subprocess.TimeoutExpired) as e:
+        return proc.run(cmd, timeout=60).stdout
+    except (OSError, proc.ProcError) as e:
         log.warning("%s failed: %s", cmd[0], e)
         return ""
 

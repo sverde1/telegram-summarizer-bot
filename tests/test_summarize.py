@@ -51,7 +51,7 @@ def test_labels_and_defaults():
 def test_codex_runs_sandboxed_and_resumes_by_session_id(codex_home, monkeypatch):
     calls = []
 
-    def fake_run(cmd, input=None, **kwargs):
+    def fake_run(cmd, *, timeout, input=None, **kwargs):
         """Plays Codex: writes the answer where -o points (via the bwrap mount) and reports a session id."""
         calls.append(cmd)
         out_dir = cmd[cmd.index("/job/out") - 1]
@@ -60,7 +60,7 @@ def test_codex_runs_sandboxed_and_resumes_by_session_id(codex_home, monkeypatch)
         return subprocess.CompletedProcess(cmd, 0, stdout='{"type":"thread.started","thread_id":"S-1"}\n',
                                            stderr="")
 
-    monkeypatch.setattr(summarize.subprocess, "run", fake_run)
+    monkeypatch.setattr(summarize.proc, "run", fake_run)
     conv = summarize.conversation("codex")
     conv.start({"title": "t", "uploader": "u", "upload_date": "", "duration": 1, "description": ""},
                "youtube", "text", "captions", "en", [])

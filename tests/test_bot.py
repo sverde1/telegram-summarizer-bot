@@ -120,6 +120,7 @@ async def test_progress_edits_in_order_and_stops(app, telegram, monkeypatch):
     job = bot.Job("u", chat_id=FRIEND, status_id=7)
     progress = bot.Progress(app, asyncio.get_running_loop(), job)
     await asyncio.to_thread(progress, "step one", 30)
+    await asyncio.sleep(0.1)  # stages arrive seconds apart in practice
     await asyncio.to_thread(progress, "step two", 20)
     await asyncio.sleep(0.2)
     await progress.close()

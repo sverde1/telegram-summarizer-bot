@@ -1,13 +1,12 @@
 """Pulling a small set of distinct frames at the moments the LLM asked for (plus an even sweep)."""
 import logging
 import re
-import subprocess
 from pathlib import Path
 
 import imagehash
 from PIL import Image
 
-from . import config
+from . import config, proc
 
 log = logging.getLogger(__name__)
 
@@ -65,9 +64,12 @@ def _grab(video: Path, t: float, out: Path) -> bool:
     """
     # -ss before -i seeks on keyframes first: fast even deep into a long video. Width is capped at
     # 1280 px: enough to read on-screen text, smaller to send; -2 keeps the aspect ratio (even height).
-    p = subprocess.run([config.FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.2f}",
-                        "-i", str(video), "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2",
-                        "-q:v", "2", str(out)], capture_output=True, timeout=120)
+    try:
+        p = proc.run([config.FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.2f}",
+                      "-i", str(video), "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2",
+                      "-q:v", "2", str(out)], timeout=120)
+    except proc.ProcTimeout:
+        return False  # a frame that can't be grabbed in time is just skipped
     return p.returncode == 0 and out.exists() and out.stat().st_size > 0
 
 
@@ -84,9 +86,12 @@ def _sweep(video: Path, interval: float, fdir: Path) -> list[tuple[float, Path]]
     Returns:
         [(approximate time in seconds, path)] in order. The fps filter's first frame is at 0 s.
     """
-    subprocess.run([config.FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
-                    "-vf", f"fps=1/{interval:.3f},scale='min(1280,iw)':-2", "-q:v", "2",
-                    str(fdir / "s_%04d.jpg")], capture_output=True, timeout=900)
+    try:
+        proc.run([config.FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
+                  "-vf", f"fps=1/{interval:.3f},scale='min(1280,iw)':-2", "-q:v", "2",
+                  str(fdir / "s_%04d.jpg")], timeout=900)
+    except proc.ProcTimeout:
+        pass  # keep whatever frames were written before the time ran out
     return [(i * interval, p) for i, p in enumerate(sorted(fdir.glob("s_*.jpg")))]
 
 

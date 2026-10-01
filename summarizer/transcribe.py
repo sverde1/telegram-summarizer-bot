@@ -1,12 +1,11 @@
 """Speech-to-text with faster-whisper. Device/model come from config (CPU now, GPU later)."""
 import logging
-import subprocess
 import threading
 import time
 
 import numpy as np
 
-from . import config, stats
+from . import config, proc, stats
 
 log = logging.getLogger(__name__)
 
@@ -79,8 +78,11 @@ def _decode(path: str) -> np.ndarray:
     Raises:
         RuntimeError: ffmpeg couldn't decode the file.
     """
-    p = subprocess.run([config.FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
-                        "-ac", "1", "-ar", "16000", "-f", "f32le", "-"], capture_output=True, timeout=1800)
+    try:
+        p = proc.run([config.FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
+                      "-ac", "1", "-ar", "16000", "-f", "f32le", "-"], timeout=1800, text=False)
+    except proc.ProcTimeout:
+        raise RuntimeError("decoding the audio timed out")
     if p.returncode != 0:
         raise RuntimeError(f"ffmpeg could not decode audio: {p.stderr.decode(errors='replace')[-300:]}")
     return np.frombuffer(p.stdout, dtype=np.float32)

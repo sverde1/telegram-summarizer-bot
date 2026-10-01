@@ -22,13 +22,12 @@ import json
 import logging
 import os
 import shutil
-import subprocess
 import tempfile
 import time
 import uuid
 from pathlib import Path
 
-from . import config
+from . import config, proc
 
 log = logging.getLogger(__name__)
 
@@ -505,9 +504,8 @@ class CodexConversation(Conversation):
             # 15 min cap: long transcripts at high effort can take minutes, but a hung run must not block
             # the one-job-at-a-time queue forever.
             try:
-                p = subprocess.run(_bwrap(job) + cmd, input=prompt, capture_output=True, text=True,
-                                   timeout=900)
-            except subprocess.TimeoutExpired:
+                p = proc.run(_bwrap(job) + cmd, input=prompt, timeout=900)
+            except proc.ProcTimeout:
                 raise SummaryError("Codex timed out.")
             for line in p.stdout.splitlines():  # JSONL events; thread.started carries the session id
                 if '"thread.started"' in line:
@@ -613,9 +611,8 @@ class ClaudeCodeConversation(Conversation):
                *(["--session-id", self.session, "--system-prompt", system] if first
                  else ["--resume", self.session])]
         try:
-            p = subprocess.run(cmd, input=json.dumps(msg) + "\n", capture_output=True, text=True,
-                               timeout=900, cwd=self.CWD)
-        except subprocess.TimeoutExpired:
+            p = proc.run(cmd, input=json.dumps(msg) + "\n", timeout=900, cwd=self.CWD)
+        except proc.ProcTimeout:
             raise SummaryError("Claude Code timed out.")
         res = None
         for line in p.stdout.splitlines():  # event stream; the final {"type": "result"} event has the answer
