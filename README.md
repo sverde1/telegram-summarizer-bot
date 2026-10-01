@@ -63,7 +63,7 @@ sudo apt install git python3 python3-venv bubblewrap nodejs npm
 
 ```bash
 mkdir -p ~/scripts && cd ~/scripts
-git clone <repo-url> telegram-summarizer-bot
+git clone https://github.com/sverde1/telegram-summarizer-bot.git
 cd telegram-summarizer-bot
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
