@@ -75,7 +75,7 @@ TikTok). LLM time isn't hardware-dependent and is listed separately.
 | Audio download (10.6-min video) | 4.7 s | 4.5 s |
 | TikTok lookup + video download (1 min) | 3.9 s | 3.8 s |
 | Frame grabbing (1-min video, 16 frames) | 3.0 s | 1.5 s |
-| ffmpeg audio decode (10.6 min) | 1.7 s | 2.8 s |
+| ffmpeg audio decode (10.6 min) | 1.7 s (ffmpeg 8.0) | 1.3 s (ffmpeg 7.0) |
 | Whisper `small`, CPU (int8, 4 threads) | 169 s = 0.27× video length | 148 s = 0.23× |
 | Whisper `small`, GPU (float16) | – | 22 s = 0.03× |
 | Whisper `medium`, GPU (float16) | – | 39 s = 0.06× |
@@ -98,7 +98,8 @@ the GPU and `small`, ~2 minutes with the GPU and the more accurate `medium`.
 
 Whisper on CPU uses 4 threads by default, which is why the 24-thread CPU was barely faster there; set
 `WHISPER_CPU_THREADS` to the number of physical cores on a bigger CPU. ffmpeg's share (audio conversion,
-a few frame grabs) is seconds either way; the bot runs it on the CPU, so a GPU and a system ffmpeg barely
+a few frame grabs) is seconds either way (older ffmpeg builds are slower: Ubuntu 24.04's 6.1 took 2.8 s for
+the same decode); the bot runs it on the CPU, so a GPU and a system ffmpeg barely
 change that part.
 
 ## Installation
