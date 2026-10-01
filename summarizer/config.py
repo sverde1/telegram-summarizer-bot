@@ -53,6 +53,11 @@ WHISPER_CPU_THREADS = int(_env("WHISPER_CPU_THREADS", "0"))  # 0 = ctranslate2 d
 
 # Limits
 MAX_DURATION_MIN = int(_env("MAX_DURATION_MIN", "180"))
+# Per-user and global queue limits, and how often one user may redo (/again) the same video. Admins are exempt.
+# They keep one account (careless or borrowed) from using up the LLM limits or blocking everyone for hours.
+MAX_QUEUED_PER_USER = int(_env("MAX_QUEUED_PER_USER", "3"))  # queued + running
+MAX_QUEUE = int(_env("MAX_QUEUE", "20"))
+AGAIN_COOLDOWN_MIN = int(_env("AGAIN_COOLDOWN_MIN", "10"))
 MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
 SHORT_VIDEO_SEC = int(_env("SHORT_VIDEO_SEC", "180"))  # up to this long: denser frame sampling
 MAX_SLIDES = int(_env("MAX_SLIDES", "35"))  # TikTok carousels allow up to 35 images

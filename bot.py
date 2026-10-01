@@ -1,5 +1,6 @@
 """Telegram bot: send a YouTube/TikTok link, get back title, clickbait answer and summary."""
 import asyncio
+import collections
 import datetime as dt
 import html
 import io
@@ -74,6 +75,10 @@ class Job:
 # twice in parallel, and two users' LLM conversations can't interleave.
 queue: asyncio.Queue[Job] = asyncio.Queue()
 
+
+# Jobs per user, queued or running (see config.MAX_QUEUED_PER_USER). Decremented whenever a job ends,
+# however it ends, so a user is never locked out by a job that's gone.
+_user_jobs: collections.Counter = collections.Counter()
 
 MAX_PENDING = 10  # open access requests; more is a flood of throwaway accounts, not family and friends
 PENDING_REPLY_EVERY = 600  # seconds between "still waiting for approval" replies to the same user
@@ -452,16 +457,27 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
     except UnsupportedURL as e:
         await update.message.reply_text(f"⚠️ {e}")
         return
+    uid = update.effective_user.id
+    if not access.is_admin(uid):
+        if _user_jobs[uid] >= config.MAX_QUEUED_PER_USER:
+            await update.message.reply_text(
+                f"⏳ You already have {_user_jobs[uid]} videos in the queue. Send this one again when one of "
+                "them is done.")
+            return
+        if queue.qsize() >= config.MAX_QUEUE:
+            await update.message.reply_text(
+                f"⏳ The bot is busy right now ({queue.qsize()} videos queued). Please try again in a few minutes.")
+            return
     ahead = queue.qsize()
     status = await update.message.reply_text(
         "⏳ Got it" + (f", queued (position {ahead + 1})" if ahead else ", working…"))
     kind = "transcript" if opts.get("transcript_only") else "again" if opts.get("use_cache") is False else "summary"
-    uid = update.effective_user.id
     req = db.add_request(uid, url, kind)  # logged the moment the link arrives
     b, m, is_default = _current_llm(uid)
     # Users on the defaults pass None, so their jobs follow the default (and its later changes)
     # instead of pinning whatever the default resolves to right now.
     b, m = (None, None) if is_default else (b, m)
+    _user_jobs[uid] += 1
     await queue.put(Job(url, update.effective_chat.id, status.message_id, queued_at=time.monotonic(),
                         user_id=uid, request_id=req, backend=b, model=m, **opts))
 
@@ -764,6 +780,9 @@ async def worker(app: Application) -> None:
         except Exception:
             log.exception("worker: job %s failed while reporting its result", job.request_id)
         finally:
+            _user_jobs[job.user_id] -= 1
+            if _user_jobs[job.user_id] <= 0:
+                del _user_jobs[job.user_id]
             queue.task_done()
 
 
@@ -782,7 +801,8 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             # The pipeline blocks (downloads, Whisper, LLM subprocesses): run it off the event loop.
             result = await asyncio.to_thread(
                 pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
-                backend=job.backend, model=job.model, transcript_only=job.transcript_only)
+                backend=job.backend, model=job.model, transcript_only=job.transcript_only,
+                again_limit_user=None if access.is_admin(job.user_id) else job.user_id)
         finally:
             # Before replying or deleting the status message: a late status edit must not land
             # after the final result.

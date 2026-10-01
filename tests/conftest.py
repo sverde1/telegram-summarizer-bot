@@ -6,6 +6,7 @@ before anything from the bot is imported.
 """
 import asyncio
 import atexit
+import collections
 import itertools
 import json
 import os
@@ -47,8 +48,9 @@ if config.DATA_DIR.resolve() == (config.ROOT / "data").resolve() or config.TELEG
     raise SystemExit("tests aren't isolated from the real bot; refusing to run")
 
 import access  # noqa: E402
+from helpers import SUMMARY, FakeConversation, meta  # noqa: E402
 import bot  # noqa: E402
-from summarizer import db, stats  # noqa: E402
+from summarizer import db, media, stats, summarize  # noqa: E402
 
 ADMIN_ID = 1
 
@@ -69,6 +71,7 @@ def fresh_state(tmp_path, monkeypatch):
     monkeypatch.setattr(stats, "_FILE", tmp_path / "stats.json")
     monkeypatch.setattr(bot, "queue", asyncio.Queue())
     monkeypatch.setattr(bot, "_pending_replied", {})
+    monkeypatch.setattr(bot, "_user_jobs", collections.Counter())
 
 
 @pytest.fixture(autouse=True)
@@ -239,6 +242,32 @@ def codex_home():
     yield config.CODEX_HOME
     for f in ("auth.json", "models_cache.json"):
         (config.CODEX_HOME / f).unlink(missing_ok=True)
+
+
+@pytest.fixture
+def fake_media(monkeypatch):
+    """Replaces all downloads: a captioned 10-minute YouTube video, no thumbnail."""
+    calls = []
+    monkeypatch.setattr(media, "probe", lambda v: calls.append("probe") or meta())
+    monkeypatch.setattr(media, "fetch_captions",
+                        lambda v, m, w: calls.append("captions") or ([(0.0, "word " * 400)], "en"))
+    monkeypatch.setattr(media, "download_thumbnail", lambda m, w: None)
+    return calls
+
+
+@pytest.fixture
+def llm(monkeypatch):
+    """Installs a FakeConversation factory; returns the list of conversations created."""
+    convs = []
+
+    def factory(backend=None, model=None):
+        """Creates a conversation answering turn 1 with a plain summary."""
+        c = FakeConversation([{**SUMMARY, "needs_frames": False, "frame_moments": []}], model=model or "x")
+        convs.append(c)
+        return c
+
+    monkeypatch.setattr(summarize, "conversation", factory)
+    return convs
 
 
 # ---------- media ----------

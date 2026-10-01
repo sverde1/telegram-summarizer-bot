@@ -8,32 +8,6 @@ from helpers import SUMMARY, FakeConversation, meta
 URL = "https://youtu.be/abcdefghijk"
 
 
-@pytest.fixture
-def fake_media(monkeypatch):
-    """Replaces all downloads: a captioned 10-minute YouTube video, no thumbnail."""
-    calls = []
-    monkeypatch.setattr(media, "probe", lambda v: calls.append("probe") or meta())
-    monkeypatch.setattr(media, "fetch_captions",
-                        lambda v, m, w: calls.append("captions") or ([(0.0, "word " * 400)], "en"))
-    monkeypatch.setattr(media, "download_thumbnail", lambda m, w: None)
-    return calls
-
-
-@pytest.fixture
-def llm(monkeypatch):
-    """Installs a FakeConversation factory; returns the list of conversations created."""
-    convs = []
-
-    def factory(backend=None, model=None):
-        """Creates a conversation answering turn 1 with a plain summary."""
-        c = FakeConversation([{**SUMMARY, "needs_frames": False, "frame_moments": []}], model=model or "x")
-        convs.append(c)
-        return c
-
-    monkeypatch.setattr(summarize, "conversation", factory)
-    return convs
-
-
 def test_first_run_then_cache_hit(fake_media, llm):
     r1 = pipeline.run(URL, lambda *a: None)
     assert not r1.cached and r1.summary["summary"] == "A summary." and llm[0].closed

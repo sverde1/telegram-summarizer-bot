@@ -163,7 +163,7 @@ class Status:
 
 def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         transcript_only: bool = False, request_id: int | None = None, backend: str | None = None,
-        model: str | None = None) -> Result:
+        model: str | None = None, again_limit_user: int | None = None) -> Result:
     """Summarize a YouTube or TikTok video, from the cache when possible.
 
     Summaries are cached per video and model, so each user gets the one their model wrote; a missing
@@ -177,6 +177,7 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         request_id: The requests row to update with the resolved video and status.
         backend: The user's LLM backend; None = config.LLM_BACKEND.
         model: The user's model; None = that backend's default.
+        again_limit_user: For /again by a non-admin: the user whose /again cooldown applies.
 
     Returns:
         The result to render.
@@ -192,6 +193,15 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
 
     if request_id:
         db.update_request(request_id, platform=video.platform, video_id=video.video_id, status="processing")
+    if again_limit_user is not None and not use_cache:
+        # Checked here, not when the link arrives: only now is the video's id known (short links are resolved
+        # above). The requests table has every past /again, so the limit also survives restarts.
+        last = db.last_again(again_limit_user, video.platform, video.video_id, request_id or 0)
+        wait = (last or 0) + config.AGAIN_COOLDOWN_MIN * 60 - time.time()
+        if last and wait > 0:
+            ago = max(1, round((time.time() - last) / 60))
+            raise PipelineError(f"⏳ You redid this video {ago} min ago; you can redo it again in "
+                                f"{max(1, round(wait / 60))} min.")
 
     cached = db.get_video(video.platform, video.video_id)
     saved = db.get_summary(video.platform, video.video_id, backend, model) if model else None

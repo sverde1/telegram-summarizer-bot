@@ -395,6 +395,25 @@ def update_request(req_id: int, **fields) -> None:
         c.execute(f"UPDATE requests SET {cols} WHERE id=?", (*fields.values(), req_id))
 
 
+def last_again(user_id: int, platform: str, video_id: str, except_request: int) -> float | None:
+    """When this user last successfully redid (/again) this video, or None if never.
+
+    Args:
+        user_id: Telegram user id.
+        platform: "youtube" or "tiktok".
+        video_id: The video's id on that platform.
+        except_request: The current request, which mustn't count itself.
+
+    Returns:
+        The unix time it finished, or None.
+    """
+    with _db() as c:
+        row = c.execute("""SELECT MAX(finished_at) AS t FROM requests WHERE user_id=? AND platform=? AND video_id=?
+                           AND kind='again' AND status='done' AND id<>?""",
+                        (user_id, platform, video_id, except_request)).fetchone()
+    return row["t"] if row else None
+
+
 def user_saw_video(user_id: int, platform: str, video_id: str, except_request: int) -> bool:
     """Whether this user successfully requested this video before.
 
