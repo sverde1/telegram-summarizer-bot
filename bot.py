@@ -21,7 +21,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
 
 import access
 from summarizer import config, db, pipeline, stats, summarize, updates
-from summarizer.urls import UnsupportedURL, find_url
+from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 # httpx logs every Telegram API call (each long poll, each status edit) at INFO; that drowns the bot's log.
@@ -446,6 +446,11 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
     """
     if not url:
         await update.message.reply_text("Send me a YouTube or TikTok link.")
+        return
+    try:
+        check_url(url)  # no network: a bad link is refused before it gets a queue slot or a request row
+    except UnsupportedURL as e:
+        await update.message.reply_text(f"⚠️ {e}")
         return
     ahead = queue.qsize()
     status = await update.message.reply_text(

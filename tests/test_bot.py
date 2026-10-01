@@ -148,3 +148,10 @@ async def test_update_notification_is_sent_once_per_version(app, telegram, monke
         await bot.update_checker(app)
     notes = [d for d in telegram.sent("sendMessage") if d["chat_id"] == ADMIN_ID]
     assert len(notes) == 1 and "<pre>sudo npm install -g @openai/codex</pre>" in notes[0]["text"]
+
+
+async def test_bad_link_is_refused_before_queueing(app, telegram):
+    access.set_state(FRIEND, "allowed")
+    await send(app, msg_update(FRIEND, "http://192.168.1.1/?vm.tiktok.com/x"))
+    assert bot.queue.qsize() == 0 and db.recent_requests(FRIEND) == []
+    assert telegram.texts()[-1] == "⚠️ Only YouTube and TikTok links are supported."
