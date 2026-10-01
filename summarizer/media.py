@@ -16,8 +16,17 @@ log = logging.getLogger(__name__)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
+LIVE = ("🔴 Live streams aren't supported. Send the link again once the stream has ended and the recording "
+        "is available.")
+UPCOMING = "🔴 This stream hasn't started yet. Send the link again once it has ended and the recording is available."
+
+
 class MediaError(RuntimeError):
     """A download or probe failed; the message is the tool's own error line, fit to show users."""
+
+
+class NotProcessable(MediaError):
+    """The video exists but can't be summarized (e.g. a live stream). The message is shown as-is."""
 
 
 def _run(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
@@ -88,7 +97,25 @@ def probe(video: Video) -> dict:
     """
     # A TikTok carousel without music has no formats at all; still return its metadata.
     extra = ["--ignore-no-formats-error"] if video.platform == "tiktok" else []
-    d = json.loads(_ytdlp("--skip-download", "-J", *extra, video.url, timeout=120).stdout)
+    try:
+        d = json.loads(_ytdlp("--skip-download", "-J", *extra, video.url, timeout=120).stdout)
+    except MediaError as e:
+        # yt-dlp often refuses live streams itself ("This live stream recording is not available.", "This
+        # live event will begin in …", "Premieres in …"): give those the same clear message.
+        text = str(e).lower()
+        if "live event will begin" in text or "premieres in" in text:
+            raise NotProcessable(UPCOMING)
+        if "live stream" in text or "is live" in text:
+            raise NotProcessable(LIVE)
+        raise
+    # A live stream has no end: downloading it would block the queue until the timeout and keep writing to
+    # disk. "post_live" is a just-ended stream whose recording isn't processed yet; "was_live" (a finished
+    # stream with a recording) is fine.
+    live = d.get("live_status")
+    if live in ("is_live", "post_live") or d.get("is_live"):
+        raise NotProcessable(LIVE)
+    if live == "is_upcoming":
+        raise NotProcessable(UPCOMING)
     title = d.get("title") or ""
     if video.platform == "tiktok":
         # TikTok "title" is a truncated description; the full caption is more useful.

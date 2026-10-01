@@ -258,6 +258,8 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         meta = media.probe(video)
         took("lookup", t)
         db.update_video(video.platform, video.video_id, meta=meta, title=meta["title"][:300])
+    except media.NotProcessable as e:
+        raise PipelineError(str(e))  # already a complete message for the user
     except media.MediaError as e:
         raise PipelineError(f"Couldn't load the video: {e}")
     dur = meta["duration"] or 0
@@ -267,6 +269,10 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         st.head = f"🎬 {meta['title'][:80]} ({_fmt_duration(dur)})"
     if dur > config.MAX_DURATION_MIN * 60:
         raise PipelineError(f"Video is longer than {config.MAX_DURATION_MIN} min; skipping.")
+    if not dur and not (video.kind == "photo" or meta.get("is_carousel")):
+        # Without a length there's no limit on the download (and the length check above can't work).
+        # Carousels are fine: their "duration" is just the background music's, if any.
+        raise PipelineError("Couldn't determine this video's length, so it can't be processed.")
 
     workdir = config.DATA_DIR / "work" / f"{video.platform}_{video.video_id}"
     shutil.rmtree(workdir, ignore_errors=True)  # leftovers from a crashed earlier run
