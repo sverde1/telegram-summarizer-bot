@@ -283,6 +283,10 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 - Who submitted what is visible only to admins. A user is told a result came from the cache only if
   they requested that video themselves before (a cached reply is still faster, which can hint at it).
 - All users share the admin's subscription limits.
+- The bot works only in private chats and leaves any group it's added to.
+- Strangers can't flood it: they only get an answer to `/start`, a pending user is reminded at most every
+  10 minutes, blocked users are ignored silently, and at most 10 access requests can be pending at once
+  (further `/start`s are declined without notifying the admins).
 
 ## Data (`data/`, not in git)
 
