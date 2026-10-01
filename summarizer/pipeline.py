@@ -181,7 +181,8 @@ class Status:
 
 def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         transcript_only: bool = False, request_id: int | None = None, backend: str | None = None,
-        model: str | None = None, again_limit_user: int | None = None) -> Result:
+        model: str | None = None, again_limit_user: int | None = None,
+        hide_cache_from: int | None = None) -> Result:
     """Summarize a YouTube or TikTok video, from the cache when possible.
 
     Summaries are cached per video and model, so each user gets the one their model wrote; a missing
@@ -196,6 +197,8 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         backend: The user's LLM backend; None = config.LLM_BACKEND.
         model: The user's model; None = that backend's default.
         again_limit_user: For /again by a non-admin: the user whose /again cooldown applies.
+        hide_cache_from: A non-admin requester who must not learn that someone else processed this video
+            before (if they haven't requested it themselves): status lines then don't mention the cache.
 
     Returns:
         The result to render.
@@ -231,9 +234,11 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
 
     # The videos row exists from the start (status "processing") and is filled in as data arrives, so a
     # crash mid-way still leaves a record of what was attempted and how far it got.
+    hide_cache = bool(hide_cache_from) and not db.user_saw_video(hide_cache_from, video.platform,
+                                                                 video.video_id, request_id or 0)
     db.start_video(video.platform, video.video_id, video.url)
     try:
-        return _process(video, progress, cached, transcript_only, t0, backend, model)
+        return _process(video, progress, cached, transcript_only, t0, backend, model, hide_cache)
     except proc.ProcCancelled:
         # The video itself is fine; only this request was stopped. Don't record it as a failed video.
         db.update_video(video.platform, video.video_id, status="cancelled", error=None)
@@ -252,7 +257,7 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
 
 
 def _process(video, progress, cached: dict | None, transcript_only: bool, t0: float,
-             backend: str, model: str | None) -> Result:
+             backend: str, model: str | None, hide_cache: bool = False) -> Result:
     """Do the work for a video that isn't (fully) cached: lookup, transcript, frames, LLM.
 
     Args:
@@ -263,6 +268,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         t0: Wall-clock start time, for the total shown in the footer.
         backend: LLM backend to use.
         model: Model to use; also the cache key the summary is saved under.
+        hide_cache: Don't mention the cache in status lines (see run()).
 
     Returns:
         The result to render.
@@ -330,7 +336,8 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             # never fetch captions or run Whisper twice. It is already formatted, so it becomes one cue.
             cues = [(0.0, cached["transcript"])]
             source, lang = cached["transcript_source"], cached["language"]
-            st.ok(f"✅ Transcript: from cache ({source})")
+            # "from cache" would tell a first-time requester that someone else sent this video before.
+            st.ok("✅ Transcript ready" if hide_cache else f"✅ Transcript: from cache ({source})")
         else:
             t = time.monotonic()
             cues, source, lang = _transcript(video, meta, workdir, st, notes, transcript_only)

@@ -106,6 +106,10 @@ async def cancel_user_jobs(app: Application, uid: int, reason: str) -> int:
         job.cancel_reason = reason
         if job is _running:
             proc.current_job_cancel.set()  # the worker reports it when the pipeline stops
+        elif job.request_id in _delayed:
+            _delayed[job.request_id].cancel()  # its finally ends the job
+            db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
+            await _fail(app, job, reason)
         elif job in _waiting_for_memory:
             _waiting_for_memory.remove(job)
             _end_job(job)
@@ -610,6 +614,19 @@ def _secs(sec: float) -> str:
     return f"{sec} s" if sec < 60 else f"{sec // 60}:{sec % 60:02d}"
 
 
+CACHED_DELAY_SHARE = 0.5  # a first-time requester of a cached video waits this share of the original run…
+CACHED_DELAY_MAX = 120  # …but at most this many seconds
+
+
+def cached_delay(stats: dict) -> float:
+    """Seconds to hold back a cached summary from someone who mustn't learn it was cached.
+
+    An instant answer would give away that someone else submitted the video before; half the original
+    processing time looks like a normal (quick) run. Without recorded timings (old summaries): no delay.
+    """
+    return min(stats.get("total", 0) * CACHED_DELAY_SHARE, CACHED_DELAY_MAX) if stats else 0.0
+
+
 def details(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> str:
     """Builds the footer: how long each step took and what was used (transcript, frames, LLM).
 
@@ -617,15 +634,21 @@ def details(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) ->
         r: The pipeline result.
         waited: Seconds the job waited in the queue; shown when it's 5 s or more.
         reveal_cache: Whether this user may learn the result came from the cache. When False, a cached
-            result shows no timing line at all: the original run's timings would show it was cached,
-            revealing that someone else submitted the video.
+            result shows timings like a fresh run: the original steps scaled to the replay's duration (see
+            cached_delay), so the footer matches how long they actually waited.
 
     Returns:
         One or two lines of plain text (the caller HTML-escapes it).
     """
     stats = (r.summary or {}).get("_stats") or {}
     if r.cached and not reveal_cache:
-        timing = ""
+        delay = cached_delay(stats)
+        scale = delay / stats["total"] if stats and stats.get("total") else 0
+        if scale:
+            steps = " · ".join(f"{name} {_secs(sec * scale)}" for name, sec in stats["steps"])
+            timing = f"⏱ {_secs(delay)} total: {steps}"
+        else:
+            timing = ""
     elif r.cached:
         timing = "⚡ from cache" + (f" (first run took {_secs(stats['total'])})" if stats else "")
     elif stats:
@@ -953,11 +976,19 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             result = await asyncio.to_thread(
                 pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
                 backend=job.backend, model=job.model, transcript_only=job.transcript_only,
-                again_limit_user=None if access.is_admin(job.user_id) else job.user_id)
+                again_limit_user=None if access.is_admin(job.user_id) else job.user_id,
+                hide_cache_from=None if access.is_admin(job.user_id) else job.user_id)
         finally:
             # Before replying or deleting the status message: a late status edit must not land
             # after the final result.
             await progress.close()
+        stats = (result.summary or {}).get("_stats") or {}
+        if result.cached and not job.transcript_only and cached_delay(stats) and not (
+                access.is_admin(job.user_id)
+                or db.user_saw_video(job.user_id, result.platform, result.video_id, job.request_id)):
+            # Replayed in a separate task so the queue keeps moving meanwhile; the task ends the job.
+            _delayed[job.request_id] = asyncio.create_task(_deliver_later(app, job, result, waited, stats))
+            return True
         await _deliver(app, job, result, waited)
         db.update_request(job.request_id, status="done", cached=int(result.cached))
         try:
@@ -996,6 +1027,67 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
         else:
             await _fail(app, job, INTERNAL_ERROR_NOTIFIED)
             await _notify_admins_of_error(app, job, e)
+
+
+_delayed: dict[int, asyncio.Task] = {}  # request id -> replay task of a cached summary (see _deliver_later)
+
+
+def _replay_stage(name: str, llm: str) -> str:
+    """The status line a real run shows for a recorded step (see pipeline's took() labels)."""
+    if name == "lookup":
+        return "🔎 Looking up the video…"
+    if name == "captions":
+        return "📝 Checking for YouTube captions…"
+    if name.startswith("Whisper"):
+        return "🗣 Transcribing the audio with Whisper…"
+    if name.endswith("slides"):
+        return "🖼 Photo post: downloading the slides…"
+    if name.endswith("frames"):
+        return "🎞 Grabbing frames…"
+    if name == "update with frames":
+        return f"🧠 {llm} is updating the summary with frames…"
+    return f"🧠 Summarizing with {llm}…"
+
+
+async def _deliver_later(app: Application, job: Job, result: pipeline.Result, waited: float, stats: dict) -> None:
+    """Replays a cached summary like a fresh run, for a user who mustn't learn it was cached.
+
+    Shows the original run's stages, scaled to cached_delay(), then delivers. Runs beside the worker (which
+    doesn't wait for it), and stops if the job is cancelled meanwhile. Always ends the job.
+    """
+    try:
+        delay = cached_delay(stats)
+        scale = delay / stats["total"]
+        progress = Progress(app, asyncio.get_running_loop(), job)
+        meta = result.meta or {}
+        head = (f"🖼 {meta.get('title', '')[:80]} (photo post)" if meta.get("is_carousel")
+                else f"🎬 {meta.get('title', '')[:80]} ({pipeline._fmt_duration(meta.get('duration') or 0)})")
+        llm = stats.get("llm") or summarize.llm_label()
+        remaining = delay
+        try:
+            for name, sec in stats["steps"]:
+                if job.cancel_reason:
+                    return
+                progress(f"{head}\n{_replay_stage(name, llm)}", remaining)
+                await asyncio.sleep(sec * scale)
+                remaining -= sec * scale
+        finally:
+            await progress.close()
+        if job.cancel_reason:
+            return
+        await _deliver(app, job, result, waited)
+        db.update_request(job.request_id, status="done", cached=1)
+        try:
+            await app.bot.delete_message(job.chat_id, job.status_id)
+        except TelegramError:
+            pass
+    except UserBlockedBot:
+        db.update_request(job.request_id, status="failed", error="user blocked the bot")
+    except Exception:
+        log.exception("replaying cached result for job %s failed", job.request_id)
+    finally:
+        _delayed.pop(job.request_id, None)
+        _end_job(job)
 
 
 async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: float) -> None:

@@ -64,3 +64,11 @@ def test_duration_format_and_etas():
     assert pipeline._fmt_duration(3725) == "1:02:05"
     assert pipeline._eta_audio(200) == 4
     assert pipeline._eta_llm(0, 0) == 25  # starting guess before anything was measured
+
+
+def test_reused_transcript_is_not_announced_to_first_time_requesters(fake_media, llm):
+    pipeline.run(URL, lambda *a: None)  # someone summarized it before
+    seen = []
+    pipeline.run(URL, lambda text, eta=None: seen.append(text), backend="codex", model="other-model",
+                 hide_cache_from=60)
+    assert not any("from cache" in s for s in seen) and any("Transcript ready" in s for s in seen)

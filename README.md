@@ -285,8 +285,10 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 | Claude API | A plain Messages call with no tools. |
 | OpenAI API | A plain Responses call with no tools. Turn 2 continues server-side via `previous_response_id`; the stored responses are deleted after each job. |
 
-- Who submitted what is visible only to admins. A user is told a result came from the cache only if
-  they requested that video themselves before (a cached reply is still faster, which can hint at it).
+- Who submitted what is visible only to admins. Someone requesting a video another user already
+  summarized can't tell: they see the same stages as a real run, the answer arrives after half the original
+  processing time (at most 2 minutes), and the footer's timings match. Only a repeat of their own request
+  is answered instantly from the cache.
 - All users share the admin's subscription limits.
 - The bot works only in private chats and leaves any group it's added to.
 - Users only see fixed, expected error messages (never raw tool output, paths or stack traces). Admins see

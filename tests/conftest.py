@@ -77,6 +77,7 @@ def fresh_state(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "_jobs", {})
     monkeypatch.setattr(bot, "_running", None)
     monkeypatch.setattr(bot, "_waiting_for_memory", [])
+    monkeypatch.setattr(bot, "_delayed", {})
     import threading
     from summarizer import proc
     monkeypatch.setattr(proc, "current_job_cancel", threading.Event())

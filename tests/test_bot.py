@@ -107,7 +107,7 @@ def test_footer_hides_cache_from_first_time_requesters():
     stats = {"steps": [["lookup", 2.0], ["summary", 9.0]], "total": 11.0, "llm": "Codex (gpt-test)"}
     assert "from cache" in bot.details(_result("x", cached=True, stats=stats), reveal_cache=True)
     hidden = bot.details(_result("x", cached=True, stats=stats), reveal_cache=False)
-    assert "cache" not in hidden and "⏱" not in hidden
+    assert "cache" not in hidden and "⏱ 6 s total" in hidden  # scaled to the replay: 50 % of 11 s
     assert "11 s total" in bot.details(_result("x", stats=stats))
 
 
