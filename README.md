@@ -222,6 +222,8 @@ The database migrates itself on start.
 | `WHISPER_COMPUTE_TYPE` | `int8` | `float16` on a GPU. |
 | `WHISPER_CPU_THREADS` | `0` (= 4 threads) | CPU threads for Whisper; raise it on CPUs with more cores. |
 | `MAX_DURATION_MIN` | `180` | Longer videos are refused. |
+| `WHISPER_RAM_FRACTION` | `0.5` | Share of RAM Whisper may use. A video that doesn't fit right now waits while other videos go first; one that could never fit is refused. |
+| `WHISPER_RAM_WAIT_MIN` | `60` | How long such a video waits for memory (the user can stop waiting with a button). |
 | `MAX_QUEUED_PER_USER` | `3` | Videos one user may have queued or running at once (admins: no limit). |
 | `MAX_QUEUE` | `20` | Total videos in the queue; new links are refused beyond that (admins excepted). |
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |

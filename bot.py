@@ -21,7 +21,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
                           MessageHandler, filters)
 
 import access
-from summarizer import config, db, pipeline, proc, stats, summarize, updates
+from summarizer import config, db, memory, pipeline, proc, stats, summarize, updates
 from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -70,6 +70,8 @@ class Job:
     backend: str | None = None  # the user's chosen LLM backend/model; None = default
     model: str | None = None
     cancel_reason: str | None = None  # set when the job is cancelled; the text shown to the user
+    waiting_since: float | None = None  # when it was first set aside for lack of memory (monotonic)
+    memory_needed: int = 0  # bytes its transcription needs (for the re-checks while it waits)
 
 
 # A single queue drained by a single worker: jobs run one at a time, so Whisper (CPU-heavy) never runs
@@ -104,6 +106,11 @@ async def cancel_user_jobs(app: Application, uid: int, reason: str) -> int:
         job.cancel_reason = reason
         if job is _running:
             proc.current_job_cancel.set()  # the worker reports it when the pipeline stops
+        elif job in _waiting_for_memory:
+            _waiting_for_memory.remove(job)
+            _end_job(job)
+            db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
+            await _fail(app, job, reason)
         else:
             db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
             await _fail(app, job, reason)
@@ -436,6 +443,31 @@ async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append(line)
     head = "Recent requests (all users; ⚡ = from cache)" if admin else "Your recent requests"
     await update.message.reply_text(head + "\n\n" + "\n".join(lines), disable_web_page_preview=True)
+
+
+async def on_cancel_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles "✖️ Don't wait, cancel" on a job waiting for memory (`cancel:<request id>`).
+
+    Only the job's owner or an admin may cancel it; the data is checked, since callback data can be forged.
+    """
+    q = update.callback_query
+    _, _, rid = (q.data or "").partition(":")
+    job = _jobs.get(int(rid)) if rid.isdigit() else None
+    if not _private(update) or job is None or job.cancel_reason:
+        await q.answer("This request isn't waiting any more.")
+        return
+    if q.from_user.id != job.user_id and not access.is_admin(q.from_user.id):
+        await q.answer("Only the person who sent this link can cancel it.")
+        return
+    job.cancel_reason = CANCELLED
+    db.update_request(job.request_id, status="cancelled", error="cancelled by the user")
+    if job is _running:
+        proc.current_job_cancel.set()  # stops it at once; the worker shows CANCELLED
+    elif job in _waiting_for_memory:
+        _waiting_for_memory.remove(job)
+        _end_job(job)
+        await _fail(app=ctx.application, job=job, msg=CANCELLED)
+    await q.answer("Cancelled.")
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -802,6 +834,68 @@ async def _send_with_retry(make_call):
         raise UserBlockedBot(str(e))
 
 
+CANCELLED = "✖️ Cancelled. You can send the link again any time."
+MEMORY_RECHECK = 15  # seconds between memory re-checks for jobs set aside
+# Jobs set aside because their transcription doesn't fit in memory right now; retried between other jobs.
+_waiting_for_memory: list["Job"] = []
+
+
+def _end_job(job: "Job") -> None:
+    """Forgets a job that's completely done (finished, failed, cancelled or expired): frees its user's slot."""
+    _jobs.pop(job.request_id, None)
+    _user_jobs[job.user_id] -= 1
+    if _user_jobs[job.user_id] <= 0:
+        del _user_jobs[job.user_id]
+
+
+async def _set_aside(app: Application, job: "Job", needed: int) -> None:
+    """Parks a job that needs more memory than is free, and shows why, with a button to stop waiting."""
+    if job.waiting_since is None:
+        job.waiting_since = time.monotonic()
+    job.memory_needed = needed
+    _waiting_for_memory.append(job)
+    db.update_request(job.request_id, status="queued")
+    text = (f"🧠 Not enough free memory to transcribe this video right now (needs about "
+            f"{needed / memory.GB:.1f} GB). Waiting up to {config.WHISPER_RAM_WAIT_MIN} min; other videos go "
+            "first meanwhile.")
+    button = InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Don't wait, cancel",
+                                                         callback_data=f"cancel:{job.request_id}")]])
+    try:
+        await app.bot.edit_message_text(text, job.chat_id, job.status_id, reply_markup=button)
+    except TelegramError as e:
+        log.debug("couldn't show the memory wait: %s", e)
+
+
+async def _next_job(app: Application) -> tuple["Job | None", bool]:
+    """Picks the next job: a parked one whose memory now fits, else the next one from the queue.
+
+    Parked jobs past their wait limit are failed here. While jobs are parked, waiting on the queue times out
+    every MEMORY_RECHECK seconds so they're re-checked even when nothing new arrives.
+
+    Returns:
+        (job or None if nothing to do yet, whether it came from the queue).
+    """
+    now = time.monotonic()
+    for job in list(_waiting_for_memory):
+        if job.cancel_reason:  # cancelled while parked: already reported
+            _waiting_for_memory.remove(job)
+            _end_job(job)
+        elif now - job.waiting_since > config.WHISPER_RAM_WAIT_MIN * 60:
+            _waiting_for_memory.remove(job)
+            db.update_request(job.request_id, status="failed", error="waited too long for memory")
+            await _fail(app, job, f"🧠 Still not enough free memory after {config.WHISPER_RAM_WAIT_MIN} min. "
+                                  "Please try again later.")
+            _end_job(job)
+        elif memory.fits_now(job.memory_needed):
+            _waiting_for_memory.remove(job)
+            return job, False
+    try:
+        timeout = MEMORY_RECHECK if _waiting_for_memory else None
+        return await asyncio.wait_for(queue.get(), timeout), True
+    except TimeoutError:
+        return None, False
+
+
 async def worker(app: Application) -> None:
     """Runs queued jobs one at a time, forever.
 
@@ -812,9 +906,13 @@ async def worker(app: Application) -> None:
     Args:
         app: The running application.
     """
+    global _running
     loop = asyncio.get_running_loop()
     while True:
-        job = await queue.get()
+        job, from_queue = await _next_job(app)
+        if job is None:
+            continue
+        parked = False
         try:
             if access.state(job.user_id) not in ("admin", "allowed") and not job.cancel_reason:
                 # Access removed while queued (e.g. a path that didn't go through cancel_user_jobs).
@@ -822,21 +920,22 @@ async def worker(app: Application) -> None:
                 db.update_request(job.request_id, status="cancelled", error="cancelled: access removed")
                 await _fail(app, job, ACCESS_REMOVED)
             if not job.cancel_reason:  # cancelled while queued: already reported, just skip it
-                await _run_job(app, loop, job)
+                parked = await _run_job(app, loop, job)
         except Exception:
             log.exception("worker: job %s failed while reporting its result", job.request_id)
         finally:
-            global _running
             _running = None
-            _jobs.pop(job.request_id, None)
-            _user_jobs[job.user_id] -= 1
-            if _user_jobs[job.user_id] <= 0:
-                del _user_jobs[job.user_id]
-            queue.task_done()
+            if not parked:
+                _end_job(job)
+            if from_queue:
+                queue.task_done()
 
 
-async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) -> None:
+async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) -> bool:
     """Runs one job: pipeline, reply, request bookkeeping. Failures are reported to the user and recorded.
+
+    Returns:
+        True if the job was set aside to wait for memory (it isn't done yet), else False.
 
     Args:
         app: The running application.
@@ -865,8 +964,11 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             await app.bot.delete_message(job.chat_id, job.status_id)
         except TelegramError:
             pass  # the user deleted it already, or can't be reached: the result is delivered either way
+    except memory.NeedsMemory as e:
+        await _set_aside(app, job, e.needed)
+        return True
     except proc.ProcCancelled:
-        reason = job.cancel_reason or "Cancelled."
+        reason = job.cancel_reason or CANCELLED
         db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
         await _fail(app, job, reason)
     except UserBlockedBot:
@@ -979,7 +1081,7 @@ async def _fail(app: Application, job: Job, msg: str, detail: str | None = None)
         msg: The message for the user (one of the expected texts, never a raw error).
         detail: Technical detail, only passed when the requester is an admin (they maintain the bot).
     """
-    text = msg if msg.startswith(("⚠️", "⏳", "🔴", "🔒", "🔞", "🌍", "🚫", "⛔")) else f"⚠️ {msg}"
+    text = f"⚠️ {msg}" if msg[:1].isalnum() else msg  # messages with their own emoji keep it
     if detail:
         text += f"\n\nDetails: {detail[:800]}"
     try:
@@ -1125,7 +1227,8 @@ def add_handlers(app: Application) -> None:
     # Order matters: the first matching handler wins, so the picker's `llm:` buttons must be registered
     # before the catch-all admin-button handler.
     app.add_handler(CallbackQueryHandler(on_llm_button, pattern=r"^llm:"))
-    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(CallbackQueryHandler(on_cancel_button, pattern=r"^cancel:"))
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(allow|block|remove):"))
     app.add_handler(MessageHandler(new & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
 
 

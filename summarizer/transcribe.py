@@ -36,6 +36,11 @@ def _load(device: str, compute_type: str):
     return m
 
 
+def is_loaded() -> bool:
+    """Whether the Whisper model is already in memory (loaded by an earlier transcription)."""
+    return _model is not None
+
+
 def get_model():
     """Returns the Whisper model, loading it on first use.
 

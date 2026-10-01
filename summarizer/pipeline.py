@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from . import config, db, frames, media, proc, stats, summarize, transcribe
+from . import config, db, frames, media, memory, proc, stats, summarize, transcribe
 from .urls import classify
 
 log = logging.getLogger(__name__)
@@ -236,6 +236,9 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
     except proc.ProcCancelled:
         # The video itself is fine; only this request was stopped. Don't record it as a failed video.
         db.update_video(video.platform, video.video_id, status="cancelled", error=None)
+        raise
+    except memory.NeedsMemory:
+        db.update_video(video.platform, video.video_id, status="waiting", error=None)  # will be retried
         raise
     except media.Blocked as e:
         db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
@@ -494,6 +497,14 @@ def _whisper(video, meta, workdir, st: Status, notes, why: str, rest: float) -> 
         couldn't be downloaded or has no audio stream.
     """
     dur = meta["duration"] or 0
+    # Check memory before downloading anything: a job that has to wait shouldn't hold a download meanwhile.
+    needed = memory.whisper_needs(dur, transcribe.is_loaded())
+    if not memory.can_ever_fit(needed):
+        raise PipelineError(f"🧠 This video is too long to transcribe on this machine: it would need about "
+                            f"{needed / memory.GB:.1f} GB of memory, more than the bot may use.",
+                            detail=f"needs {needed} B, cap {memory.cap()} B")
+    if not memory.fits_now(needed):
+        raise memory.NeedsMemory(needed)  # the worker sets the job aside and retries it later
     whisper = f"Whisper ({config.WHISPER_MODEL}, {config.WHISPER_DEVICE.upper()})"
     st.show(f"🎧 {why} → downloading audio for {whisper}…",
             _eta_audio(dur) + transcribe.estimate(dur) + rest)
