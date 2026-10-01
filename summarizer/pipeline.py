@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from . import config, db, frames, media, stats, summarize, transcribe
+from . import config, db, frames, media, proc, stats, summarize, transcribe
 from .urls import classify
 
 log = logging.getLogger(__name__)
@@ -165,6 +165,8 @@ class Status:
             current: The step in progress, e.g. "🧠 Summarizing…".
             eta: Estimated seconds until the summary is ready, or None if unknown.
         """
+        # Every stage change is a cancellation checkpoint: a removed user's job stops before its next step.
+        proc.check_cancelled()
         self.progress("\n".join(filter(None, [self.head, *self.done, current])), eta)
 
     def ok(self, line: str) -> None:
@@ -231,6 +233,10 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
     db.start_video(video.platform, video.video_id, video.url)
     try:
         return _process(video, progress, cached, transcript_only, t0, backend, model)
+    except proc.ProcCancelled:
+        # The video itself is fine; only this request was stopped. Don't record it as a failed video.
+        db.update_video(video.platform, video.video_id, status="cancelled", error=None)
+        raise
     except media.Blocked as e:
         db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
         name = {"youtube": "YouTube", "tiktok": "TikTok"}.get(video.platform, video.platform)
@@ -347,6 +353,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             st.show(f"🧠 Summarizing with {llm}…", _eta_llm(len(transcript), len(first_images), backend))
             t_llm = time.monotonic()
             answer = conv.start(meta, video.platform, transcript, source, lang, first_images)
+            proc.check_cancelled()  # an API call can't be interrupted; at least don't go on after it
             if conv.model:
                 llm = summarize.llm_label(backend, conv.model)
                 if not model:  # remember what the default resolves to, for labels and /models
@@ -370,6 +377,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
                         # Same conversation: the transcript is already in context and in the provider's
                         # prompt cache, so only the frames are new.
                         summary = conv.add_frames(frames_)
+                        proc.check_cancelled()
                         took("update with frames", t)
                         images = frames_
                     except summarize.SummaryError as e:  # keep the transcript-only summary

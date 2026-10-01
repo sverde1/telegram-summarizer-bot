@@ -4,12 +4,19 @@ import asyncio
 import pytest
 from telegram.error import Forbidden, RetryAfter
 
+import access
 import bot
 from summarizer import db, pipeline
 
 from conftest import ADMIN_ID
 
 USER = 60
+
+
+@pytest.fixture(autouse=True)
+def approved_user():
+    """The test user is an approved user (the worker cancels jobs of users without access)."""
+    access.set_state(USER, "allowed", "Ana", None)
 
 
 def _result(text="A summary.") -> pipeline.Result:

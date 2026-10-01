@@ -21,7 +21,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
                           MessageHandler, filters)
 
 import access
-from summarizer import config, db, pipeline, stats, summarize, updates
+from summarizer import config, db, pipeline, proc, stats, summarize, updates
 from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -69,11 +69,47 @@ class Job:
     request_id: int = 0
     backend: str | None = None  # the user's chosen LLM backend/model; None = default
     model: str | None = None
+    cancel_reason: str | None = None  # set when the job is cancelled; the text shown to the user
 
 
 # A single queue drained by a single worker: jobs run one at a time, so Whisper (CPU-heavy) never runs
 # twice in parallel, and two users' LLM conversations can't interleave.
 queue: asyncio.Queue[Job] = asyncio.Queue()
+
+
+ACCESS_REMOVED = "⛔ Your access to this bot was removed, so this request was cancelled."
+
+# Every job not yet finished, by request id, so a user's jobs can be found and cancelled. The worker runs one
+# job at a time; _running is that one (its programs are stopped through proc.current_job_cancel).
+_jobs: dict[int, "Job"] = {}
+_running: "Job | None" = None
+
+
+async def cancel_user_jobs(app: Application, uid: int, reason: str) -> int:
+    """Cancels all of a user's queued and running jobs and tells them why.
+
+    Queued jobs are marked (the worker skips them) and their status message changes at once; the running job
+    has its current program killed and stops at the next checkpoint.
+
+    Args:
+        app: The running application.
+        uid: The user whose jobs to cancel.
+        reason: The message shown on each cancelled job's status.
+
+    Returns:
+        How many jobs were cancelled.
+    """
+    mine = [j for j in _jobs.values() if j.user_id == uid and not j.cancel_reason]
+    for job in mine:
+        job.cancel_reason = reason
+        if job is _running:
+            proc.current_job_cancel.set()  # the worker reports it when the pipeline stops
+        else:
+            db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
+            await _fail(app, job, reason)
+    if mine:
+        log.info("cancelled %d job(s) of user %s", len(mine), uid)
+    return len(mine)
 
 
 # Jobs per user, queued or running (see config.MAX_QUEUED_PER_USER). Decremented whenever a job ends,
@@ -384,7 +420,7 @@ async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not rows:
         await update.message.reply_text("No requests yet.")
         return
-    icons = {"done": "✅", "failed": "⚠️", "queued": "⏳", "processing": "⏳"}
+    icons = {"done": "✅", "failed": "⚠️", "queued": "⏳", "processing": "⏳", "cancelled": "✖️"}
     lines = []
     for r in rows:
         when = time.strftime("%d.%m. %H:%M", time.localtime(r["created_at"]))
@@ -428,6 +464,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     done = {"allow": f"✅ Allowed {who}", "block": f"⛔ Denied and blocked {who}",
             "remove": f"🗑 Removed {who}"}[action]
     log.info("admin %s: %s", q.from_user.id, done)
+    if action in ("block", "remove"):
+        await cancel_user_jobs(ctx.application, uid, ACCESS_REMOVED)
     await q.answer(done[:200])  # Telegram caps callback answer (toast) text at 200 characters
     await q.edit_message_text(done)
     await sync_commands(ctx.bot, uid)
@@ -478,8 +516,10 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
     # instead of pinning whatever the default resolves to right now.
     b, m = (None, None) if is_default else (b, m)
     _user_jobs[uid] += 1
-    await queue.put(Job(url, update.effective_chat.id, status.message_id, queued_at=time.monotonic(),
-                        user_id=uid, request_id=req, backend=b, model=m, **opts))
+    job = Job(url, update.effective_chat.id, status.message_id, queued_at=time.monotonic(),
+              user_id=uid, request_id=req, backend=b, model=m, **opts)
+    _jobs[req] = job
+    await queue.put(job)
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -776,10 +816,19 @@ async def worker(app: Application) -> None:
     while True:
         job = await queue.get()
         try:
-            await _run_job(app, loop, job)
+            if access.state(job.user_id) not in ("admin", "allowed") and not job.cancel_reason:
+                # Access removed while queued (e.g. a path that didn't go through cancel_user_jobs).
+                job.cancel_reason = ACCESS_REMOVED
+                db.update_request(job.request_id, status="cancelled", error="cancelled: access removed")
+                await _fail(app, job, ACCESS_REMOVED)
+            if not job.cancel_reason:  # cancelled while queued: already reported, just skip it
+                await _run_job(app, loop, job)
         except Exception:
             log.exception("worker: job %s failed while reporting its result", job.request_id)
         finally:
+            global _running
+            _running = None
+            _jobs.pop(job.request_id, None)
             _user_jobs[job.user_id] -= 1
             if _user_jobs[job.user_id] <= 0:
                 del _user_jobs[job.user_id]
@@ -794,7 +843,10 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
         loop: The event loop (for thread-safe status edits from the pipeline thread).
         job: The job to run.
     """
+    global _running
     waited = time.monotonic() - job.queued_at
+    proc.current_job_cancel.clear()
+    _running = job
     try:
         progress = Progress(app, loop, job)
         try:
@@ -813,6 +865,10 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             await app.bot.delete_message(job.chat_id, job.status_id)
         except TelegramError:
             pass  # the user deleted it already, or can't be reached: the result is delivered either way
+    except proc.ProcCancelled:
+        reason = job.cancel_reason or "Cancelled."
+        db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
+        await _fail(app, job, reason)
     except UserBlockedBot:
         db.update_request(job.request_id, status="failed", error="user blocked the bot")
         log.info("job %s: user %s blocked the bot", job.request_id, job.user_id)
@@ -826,6 +882,10 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
         if isinstance(e, pipeline.Blocked):
             await _notify_admins_of_block(app, e)
     except Exception as e:  # report, don't crash the worker
+        if job.cancel_reason:  # e.g. an API call that ended oddly because of the cancel: report the cancel
+            db.update_request(job.request_id, status="cancelled", error="cancelled: " + job.cancel_reason[:200])
+            await _fail(app, job, job.cancel_reason)
+            return
         log.exception("job failed: %s", job.url)
         detail = f"{type(e).__name__}: {e}"
         db.update_request(job.request_id, status="failed", error=f"unexpected: {detail}"[:500])

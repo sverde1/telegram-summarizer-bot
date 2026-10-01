@@ -36,6 +36,16 @@ class ProcCancelled(ProcError):
     worker, which stops the job."""
 
 
+def check_cancelled() -> None:
+    """Raises ProcCancelled if the current job was cancelled (a checkpoint between steps that run no program).
+
+    Raises:
+        ProcCancelled: The job was cancelled.
+    """
+    if current_job_cancel.is_set():
+        raise ProcCancelled("cancelled")
+
+
 def _kill(p: subprocess.Popen) -> None:
     """Kills the program's whole process group and reaps it.
 

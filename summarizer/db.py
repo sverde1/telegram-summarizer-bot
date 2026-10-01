@@ -388,7 +388,7 @@ def update_request(req_id: int, **fields) -> None:
         **fields: Column values, e.g. status=..., platform=..., cached=..., error=...; finished_at is set
             automatically when the status becomes "done" or "failed". Column names come from code only.
     """
-    if fields.get("status") in ("done", "failed"):
+    if fields.get("status") in ("done", "failed", "cancelled"):
         fields["finished_at"] = time.time()
     cols = ", ".join(f"{k}=?" for k in fields)
     with _db() as c:

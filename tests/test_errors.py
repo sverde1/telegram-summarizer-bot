@@ -12,6 +12,12 @@ from conftest import ADMIN_ID
 USER = 60
 
 
+@pytest.fixture(autouse=True)
+def approved_user():
+    """The test user is an approved user (the worker cancels jobs of users without access)."""
+    access.set_state(USER, "allowed", "Ana", None)
+
+
 @pytest.mark.parametrize("raw,expected", [
     ("[youtube] x: Private video. Sign in if you've been granted access", "private"),
     ("[youtube] x: Sign in to confirm your age. This video may be inappropriate", "age-restricted"),

@@ -111,7 +111,11 @@ def transcribe(audio_path: str) -> tuple[list[tuple[float, str]], str, float]:
         audio = _decode(audio_path)
         # The voice-activity filter skips silence and music, where Whisper tends to hallucinate text.
         segments, info = model.transcribe(audio, language=None, vad_filter=True)
-        cues = [(s.start, s.text.strip()) for s in segments if s.text.strip()]
+        cues = []
+        for s in segments:  # the generator transcribes as it's consumed: a cancel stops it between segments
+            proc.check_cancelled()
+            if s.text.strip():
+                cues.append((s.start, s.text.strip()))
         audio_sec = len(audio) / 16000
         # Very short clips are dominated by fixed overhead and would skew the realtime factor.
         if audio_sec > 5:

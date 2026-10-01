@@ -74,6 +74,11 @@ def fresh_state(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "_user_jobs", collections.Counter())
     monkeypatch.setattr(bot, "_admin_error_noticed", {})
     monkeypatch.setattr(bot, "_block_noticed", {})
+    monkeypatch.setattr(bot, "_jobs", {})
+    monkeypatch.setattr(bot, "_running", None)
+    import threading
+    from summarizer import proc
+    monkeypatch.setattr(proc, "current_job_cancel", threading.Event())
     # Pretend the installed Codex knows every feature we disable (asking it would spawn codex).
     monkeypatch.setattr(summarize, "_codex_known_features", set(summarize.CODEX_DISABLED_FEATURES))
 
