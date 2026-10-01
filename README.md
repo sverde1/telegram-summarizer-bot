@@ -287,6 +287,9 @@ injection. The model therefore gets no capability beyond returning its JSON answ
   they requested that video themselves before (a cached reply is still faster, which can hint at it).
 - All users share the admin's subscription limits.
 - The bot works only in private chats and leaves any group it's added to.
+- Users only see fixed, expected error messages (never raw tool output, paths or stack traces). Admins see
+  the technical details on their own requests and get a notice when a user's request fails unexpectedly
+  (at most one per error type every 10 minutes).
 - Strangers can't flood it: they only get an answer to `/start`, a pending user is reminded at most every
   10 minutes, blocked users are ignored silently, and at most 10 access requests can be pending at once
   (further `/start`s are declined without notifying the admins).

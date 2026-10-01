@@ -817,12 +817,21 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
         db.update_request(job.request_id, status="failed", error="user blocked the bot")
         log.info("job %s: user %s blocked the bot", job.request_id, job.user_id)
     except (pipeline.PipelineError, UnsupportedURL) as e:
-        db.update_request(job.request_id, status="failed", error=str(e)[:500])
-        await _fail(app, job, str(e))
+        # Expected failures: the message is written for the user; the technical detail is for the admin.
+        detail = getattr(e, "detail", None)
+        db.update_request(job.request_id, status="failed", error=(detail or str(e))[:500])
+        if detail:
+            log.warning("job %s failed: %s (%s)", job.request_id, e, detail)
+        await _fail(app, job, str(e), detail if access.is_admin(job.user_id) else None)
     except Exception as e:  # report, don't crash the worker
         log.exception("job failed: %s", job.url)
-        db.update_request(job.request_id, status="failed", error=f"unexpected: {e}"[:500])
-        await _fail(app, job, f"Unexpected error: {e}")
+        detail = f"{type(e).__name__}: {e}"
+        db.update_request(job.request_id, status="failed", error=f"unexpected: {detail}"[:500])
+        if access.is_admin(job.user_id):
+            await _fail(app, job, INTERNAL_ERROR, detail)
+        else:
+            await _fail(app, job, INTERNAL_ERROR_NOTIFIED)
+            await _notify_admins_of_error(app, job, e)
 
 
 async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: float) -> None:
@@ -852,7 +861,29 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
             job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True))
 
 
-async def _fail(app: Application, job: Job, msg: str) -> None:
+INTERNAL_ERROR = "⚠️ Something went wrong on the bot's side."
+INTERNAL_ERROR_NOTIFIED = INTERNAL_ERROR + " The admin has been notified."
+ADMIN_ERROR_NOTICE_EVERY = 600  # seconds: one notice per error type, so a recurring bug can't flood the admins
+_admin_error_noticed: dict[str, float] = {}  # error type -> when the admins were last told
+
+
+async def _notify_admins_of_error(app: Application, job: Job, e: Exception) -> None:
+    """Tells the admins about an unexpected error in another user's job (at most once per type per 10 min)."""
+    kind = type(e).__name__
+    now = time.monotonic()
+    if now - _admin_error_noticed.get(kind, -ADMIN_ERROR_NOTICE_EVERY) < ADMIN_ERROR_NOTICE_EVERY:
+        return
+    _admin_error_noticed[kind] = now
+    who = access.label(job.user_id, db.get_user(job.user_id))
+    text = f"⚠️ Unexpected error in a job for {who}\nLink: {job.url}\nDetails: {kind}: {str(e)[:500]}"
+    for admin in access.ADMINS:
+        try:
+            await app.bot.send_message(admin, text, disable_web_page_preview=True)
+        except TelegramError as err:
+            log.warning("couldn't notify admin %s: %s", admin, err)
+
+
+async def _fail(app: Application, job: Job, msg: str, detail: str | None = None) -> None:
     """Shows an error in place of the job's status message. Never raises.
 
     Falls back to a new message if the status message can't be edited (e.g. it was deleted). If the user
@@ -861,13 +892,17 @@ async def _fail(app: Application, job: Job, msg: str) -> None:
     Args:
         app: The running application.
         job: The failed job.
-        msg: The error to show.
+        msg: The message for the user (one of the expected texts, never a raw error).
+        detail: Technical detail, only passed when the requester is an admin (they maintain the bot).
     """
+    text = msg if msg.startswith(("⚠️", "⏳", "🔴", "🔒", "🔞", "🌍", "🚫", "⛔")) else f"⚠️ {msg}"
+    if detail:
+        text += f"\n\nDetails: {detail[:800]}"
     try:
         try:
-            await app.bot.edit_message_text(f"⚠️ {msg}", job.chat_id, job.status_id)
+            await app.bot.edit_message_text(text, job.chat_id, job.status_id)
         except BadRequest:
-            await app.bot.send_message(job.chat_id, f"⚠️ {msg}")
+            await app.bot.send_message(job.chat_id, text)
     except TelegramError as e:
         log.warning("couldn't report the failure of job %s: %s", job.request_id, e)
 

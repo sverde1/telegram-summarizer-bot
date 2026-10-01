@@ -107,8 +107,22 @@ FIRST_SCHEMA = {
 }
 
 
+AI_FAILED = "⚠️ The AI couldn't write the summary right now. Please try again in a few minutes."
+AI_LIMIT = "⏳ The AI's usage limit is reached for now. Please try again later."
+AI_TIMEOUT = "⚠️ The AI took too long to answer. Please try again later."
+AI_DECLINED = "The AI declined to summarize this video."
+MODELS_FAILED = "Couldn't load the model list right now. Please try again later."
+
+
 class SummaryError(RuntimeError):
-    """A summary couldn't be produced; the message is shown to the Telegram user as is."""
+    """The LLM step failed. str() is a message fit for the user; `detail` has the technical cause (for the
+    admin and the log), never shown to other users.
+    """
+
+    def __init__(self, message: str, detail: str | None = None):
+        """Stores the user message and the optional technical detail."""
+        super().__init__(message)
+        self.detail = detail
 
 
 def format_transcript(cues: list[tuple[float, str]], every: float = 10.0) -> str:
@@ -172,10 +186,10 @@ def _parse(text: str, schema: dict) -> dict:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        raise SummaryError(f"The model returned invalid JSON: {text[:200]}")
+        raise SummaryError(AI_FAILED, f"invalid JSON from the model: {text[:200]}")
     missing = [k for k in schema["required"] if k not in data]
     if missing:
-        raise SummaryError(f"The model's answer is missing {missing}")
+        raise SummaryError(AI_FAILED, f"model answer is missing {missing}")
     return data
 
 
@@ -228,7 +242,7 @@ def _backend(backend: str | None) -> str:
     """
     backend = backend or config.LLM_BACKEND
     if backend not in BACKENDS:
-        raise SummaryError(f"Unknown LLM backend {backend!r} (codex | claude-code | api | openai-api)")
+        raise SummaryError(AI_FAILED, f"unknown LLM backend {backend!r} (codex | claude-code | api | openai-api)")
     return backend
 
 
@@ -307,7 +321,7 @@ def list_models(backend: str | None = None) -> list[dict]:
             client = anthropic.Anthropic(timeout=10, max_retries=0)
             models = [{"id": m.id, "name": m.display_name, "description": ""} for m in client.models.list(limit=50)]
         except anthropic.AnthropicError as e:
-            raise SummaryError(f"Couldn't list Claude API models: {e}")
+            raise SummaryError(MODELS_FAILED, f"Claude API model list: {e}")
     _api_models_cache[backend] = (time.monotonic(), models)
     return models
 
@@ -331,7 +345,7 @@ def _openai_models() -> list[dict]:
     try:
         api = sorted(openai.OpenAI(timeout=10, max_retries=0).models.list(), key=lambda m: m.created, reverse=True)
     except openai.OpenAIError as e:
-        raise SummaryError(f"Couldn't list OpenAI API models: {e}")
+        raise SummaryError(MODELS_FAILED, f"OpenAI API model list: {e}")
     ids = [m.id for m in api if m.id.startswith("gpt-") and not any(w in m.id for w in _OPENAI_NOT_CHAT)]
     known = []
     if config.LLM_BACKEND == "codex" or (config.CODEX_HOME / "models_cache.json").exists():
@@ -510,7 +524,7 @@ class CodexConversation(Conversation):
             SummaryError: Codex isn't logged in for the bot (the message says how to fix it).
         """
         if not (config.CODEX_HOME / "auth.json").exists():
-            raise SummaryError(f"Codex isn't logged in for the bot. Run once:\n"
+            raise SummaryError(AI_FAILED, f"Codex isn't logged in for the bot. Run once: "
                                f"CODEX_HOME={config.CODEX_HOME} codex login --device-auth")
         self.session: str | None = None
 
@@ -552,7 +566,7 @@ class CodexConversation(Conversation):
             try:
                 p = proc.run(_bwrap(job) + cmd, input=prompt, timeout=900)
             except proc.ProcTimeout:
-                raise SummaryError("Codex timed out.")
+                raise SummaryError(AI_TIMEOUT, "Codex timed out")
             for line in p.stdout.splitlines():  # JSONL events; thread.started carries the session id
                 if '"thread.started"' in line:
                     try:
@@ -564,8 +578,8 @@ class CodexConversation(Conversation):
                 tail = (p.stderr or p.stdout).strip()[-600:]
                 log.error("codex failed (%s): %s", p.returncode, tail)
                 if "usage limit" in tail.lower() or "rate limit" in tail.lower():
-                    raise SummaryError("ChatGPT usage limit reached; try again later.")
-                raise SummaryError(f"Codex failed: {tail[-300:]}")
+                    raise SummaryError(AI_LIMIT, f"ChatGPT usage limit: {tail[-300:]}")
+                raise SummaryError(AI_FAILED, f"Codex failed: {tail[-300:]}")
             if first and not self.session:
                 log.warning("codex: no session id in output; a frames follow-up won't be possible")
             if first and self.session:
@@ -595,7 +609,7 @@ class CodexConversation(Conversation):
             SummaryError: Turn 1 gave no session id to resume.
         """
         if not self.session:
-            raise SummaryError("Codex session id missing; can't continue the conversation.")
+            raise SummaryError(AI_FAILED, "Codex session id missing; can't continue the conversation")
         return super().add_frames(frames)
 
     def close(self):
@@ -659,7 +673,7 @@ class ClaudeCodeConversation(Conversation):
         try:
             p = proc.run(cmd, input=json.dumps(msg) + "\n", timeout=900, cwd=self.CWD)
         except proc.ProcTimeout:
-            raise SummaryError("Claude Code timed out.")
+            raise SummaryError(AI_TIMEOUT, "Claude Code timed out")
         res = None
         for line in p.stdout.splitlines():  # event stream; the final {"type": "result"} event has the answer
             try:
@@ -672,9 +686,10 @@ class ClaudeCodeConversation(Conversation):
             elif ev.get("type") == "system" and ev.get("subtype") == "init" and ev.get("model"):
                 self.model = ev["model"]
         if res is None:
-            raise SummaryError(f"Claude Code failed: {(p.stderr or p.stdout).strip()[-300:]}")
+            raise SummaryError(AI_FAILED, f"Claude Code failed: {(p.stderr or p.stdout).strip()[-300:]}")
         if res.get("is_error"):
-            raise SummaryError(f"Claude Code error: {str(res.get('result'))[:300]}")
+            raise SummaryError(AI_LIMIT if "limit" in str(res.get("result")).lower() else AI_FAILED,
+                               f"Claude Code error: {str(res.get('result'))[:300]}")
         if isinstance(res.get("structured_output"), dict):
             return res["structured_output"]
         return _parse(res.get("result") or "", schema)
@@ -725,25 +740,25 @@ class ApiConversation(Conversation):
             ) as stream:
                 msg = stream.get_final_message()
         except anthropic.AuthenticationError:
-            raise SummaryError("Anthropic API key is missing or invalid (ANTHROPIC_API_KEY in .env).")
+            raise SummaryError(AI_FAILED, "Anthropic API key is missing or invalid (ANTHROPIC_API_KEY in .env)")
         except anthropic.BadRequestError as e:
-            raise SummaryError(f"Claude rejected the request: {e.message}")
+            raise SummaryError(AI_FAILED, f"Claude rejected the request: {e.message}")
         except anthropic.RateLimitError:
-            raise SummaryError("Claude rate limit hit; try again in a minute.")
+            raise SummaryError(AI_LIMIT, "Claude API rate limit")
         except anthropic.APIStatusError as e:
-            raise SummaryError(f"Claude API error {e.status_code}; try again later.")
+            raise SummaryError(AI_FAILED, f"Claude API error {e.status_code}")
         except anthropic.APIConnectionError:
-            raise SummaryError("Couldn't reach the Claude API (network error).")
+            raise SummaryError(AI_FAILED, "couldn't reach the Claude API (network error)")
         except anthropic.AnthropicError as e:  # e.g. no credentials configured at all
-            raise SummaryError(f"Claude client error: {e}")
+            raise SummaryError(AI_FAILED, f"Claude client error: {e}")
 
         u = msg.usage
         log.info("claude %s: in=%s cache_read=%s out=%s stop=%s req=%s", msg.model, u.input_tokens,
                  u.cache_read_input_tokens, u.output_tokens, msg.stop_reason, msg._request_id)
         if msg.stop_reason == "refusal":
-            raise SummaryError("Claude declined to summarize this video.")
+            raise SummaryError(AI_DECLINED, "Claude refusal")
         if msg.stop_reason == "max_tokens":
-            raise SummaryError("Claude's answer was cut off (max_tokens).")
+            raise SummaryError(AI_FAILED, "Claude's answer was cut off (max_tokens)")
         self.model = msg.model
         # Appended unchanged, thinking blocks included: the history must stay append-only for thinking to
         # stay valid on turn 2.
@@ -801,17 +816,17 @@ class OpenAIConversation(Conversation):
                 timeout=900,
             )
         except openai.AuthenticationError:
-            raise SummaryError("OpenAI API key is missing or invalid (OPENAI_API_KEY in .env).")
+            raise SummaryError(AI_FAILED, "OpenAI API key is missing or invalid (OPENAI_API_KEY in .env)")
         except openai.BadRequestError as e:
-            raise SummaryError(f"OpenAI rejected the request: {e.message}")
+            raise SummaryError(AI_FAILED, f"OpenAI rejected the request: {e.message}")
         except openai.RateLimitError:
-            raise SummaryError("OpenAI rate limit or quota hit; try again later.")
+            raise SummaryError(AI_LIMIT, "OpenAI rate limit or quota")
         except openai.APIStatusError as e:
-            raise SummaryError(f"OpenAI API error {e.status_code}; try again later.")
+            raise SummaryError(AI_FAILED, f"OpenAI API error {e.status_code}")
         except openai.APIConnectionError:
-            raise SummaryError("Couldn't reach the OpenAI API (network error).")
+            raise SummaryError(AI_FAILED, "couldn't reach the OpenAI API (network error)")
         except openai.OpenAIError as e:  # e.g. no key configured at all
-            raise SummaryError(f"OpenAI client error: {e}")
+            raise SummaryError(AI_FAILED, f"OpenAI client error: {e}")
 
         self.response_ids.append(resp.id)
         self.model = resp.model
@@ -821,10 +836,10 @@ class OpenAIConversation(Conversation):
         refusal = next((c.refusal for item in resp.output if item.type == "message"
                         for c in item.content if c.type == "refusal"), None)
         if refusal:
-            raise SummaryError(f"OpenAI declined to summarize this video: {refusal[:200]}")
+            raise SummaryError(AI_DECLINED, f"OpenAI refusal: {refusal[:200]}")
         if resp.status != "completed":
             reason = resp.incomplete_details.reason if resp.incomplete_details else resp.status
-            raise SummaryError(f"OpenAI's answer is incomplete ({reason}).")
+            raise SummaryError(AI_FAILED, f"OpenAI answer incomplete ({reason})")
         return _parse(resp.output_text, schema)
 
     def close(self):

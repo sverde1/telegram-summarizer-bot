@@ -29,6 +29,27 @@ class NotProcessable(MediaError):
     """The video exists but can't be summarized (e.g. a live stream). The message is shown as-is."""
 
 
+def describe(e: MediaError) -> str:
+    """Turns a download error (yt-dlp's raw last error line) into a message for the user.
+
+    The raw text goes to the admin and the log as detail; users get one of these fixed messages.
+    """
+    if isinstance(e, NotProcessable):
+        return str(e)
+    text = str(e).lower()
+    if "private" in text:
+        return "🔒 This video is private, so the bot can't open it."
+    if "age" in text and ("confirm" in text or "sign in" in text or "restricted" in text):
+        return "🔞 This video is age-restricted, so the bot can't open it."
+    if "country" in text or "geo" in text or "region" in text:
+        return "🌍 This video isn't available in the bot's country."
+    if "timed out" in text:
+        return "⚠️ Downloading the video took too long. Please try again later."
+    if any(w in text for w in ("removed", "deleted", "unavailable", "not available", "does not exist", "no longer")):
+        return "This video is unavailable (deleted, private or region-locked)."
+    return "⚠️ Couldn't load this video. It may be private, deleted or unavailable here."
+
+
 def _run(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     """Runs a command and turns a non-zero exit into a readable MediaError.
 

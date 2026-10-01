@@ -12,10 +12,12 @@ from helpers import SUMMARY
 
 def test_parse_accepts_fences_and_checks_keys():
     assert summarize._parse("```json\n" + json.dumps(SUMMARY) + "\n```", summarize.SCHEMA) == SUMMARY
-    with pytest.raises(summarize.SummaryError, match="missing"):
+    with pytest.raises(summarize.SummaryError) as e:
         summarize._parse('{"title": "x"}', summarize.SCHEMA)
-    with pytest.raises(summarize.SummaryError, match="invalid JSON"):
+    assert str(e.value) == summarize.AI_FAILED and "missing" in e.value.detail
+    with pytest.raises(summarize.SummaryError) as e:
         summarize._parse("not json", summarize.SCHEMA)
+    assert "invalid JSON" in e.value.detail
 
 
 def test_schemas_are_strict():

@@ -46,8 +46,14 @@ class Result:
 
 
 class PipelineError(RuntimeError):
-    """A failure whose message is fit to show the user as-is."""
-    pass
+    """The video can't be summarized. str() is a message fit for the user; `detail` has the technical cause
+    (for the admin and the log), never shown to other users.
+    """
+
+    def __init__(self, message: str, detail: str | None = None):
+        """Stores the user message and the optional technical detail."""
+        super().__init__(message)
+        self.detail = detail
 
 
 def _fmt_duration(sec: float) -> str:
@@ -258,10 +264,8 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         meta = media.probe(video)
         took("lookup", t)
         db.update_video(video.platform, video.video_id, meta=meta, title=meta["title"][:300])
-    except media.NotProcessable as e:
-        raise PipelineError(str(e))  # already a complete message for the user
     except media.MediaError as e:
-        raise PipelineError(f"Couldn't load the video: {e}")
+        raise PipelineError(media.describe(e), detail=str(e))
     dur = meta["duration"] or 0
     if video.kind == "photo" or meta.get("is_carousel"):
         st.head = f"🖼 {meta['title'][:80]} (photo post)"  # "duration" would be the music's
@@ -356,7 +360,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
                         log.warning("frames follow-up failed: %s", e)
                         notes.append(f"frames follow-up failed: {e}")
         except summarize.SummaryError as e:
-            raise PipelineError(str(e))
+            raise PipelineError(str(e), detail=e.detail)
         finally:
             conv.close()  # deletes the CLI session files; they're only needed for the follow-up turn
         summary["_stats"] = {"steps": timings, "total": time.time() - t0, "llm": llm,  # cached with the summary
