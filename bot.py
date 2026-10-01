@@ -822,15 +822,11 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("update handling failed", exc_info=ctx.error)
 
 
-def main() -> None:
-    """Builds the application, registers the handlers and runs long polling until stopped.
+def add_handlers(app: Application) -> None:
+    """Registers the bot's update handlers and error handler on an application.
 
-    Raises:
-        SystemExit: If TELEGRAM_BOT_TOKEN isn't set.
+    Separate from main() so tests can build an application with exactly the bot's handlers.
     """
-    if not config.TELEGRAM_BOT_TOKEN:
-        raise SystemExit("TELEGRAM_BOT_TOKEN is not set (.env)")
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("help", on_help))
@@ -844,8 +840,19 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_llm_button, pattern=r"^llm:"))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
+
+def main() -> None:
+    """Builds the application, registers the handlers and runs long polling until stopped.
+
+    Raises:
+        SystemExit: If TELEGRAM_BOT_TOKEN isn't set.
+    """
+    if not config.TELEGRAM_BOT_TOKEN:
+        raise SystemExit("TELEGRAM_BOT_TOKEN is not set (.env)")
+    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
+    add_handlers(app)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# Parallel on all cores (pytest-xdist). Slow tests (real ffmpeg/Whisper work) and network tests (real
+# downloads/LLM calls) are opt-in: -m slow, -m network, or -m "" for everything. -n0 for debugging one test.
+addopts = "-n auto -q -m 'not slow and not network'"
+asyncio_mode = "auto"
+markers = [
+    "slow: real ffmpeg/Whisper work that takes more than a second",
+    "network: needs the internet (downloads, Telegram, LLM calls); lifts the network block",
+]

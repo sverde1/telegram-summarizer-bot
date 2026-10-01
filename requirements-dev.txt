@@ -1,0 +1,5 @@
+# Test tools; install with: .venv/bin/pip install -r requirements-dev.txt
+execnet==2.1.2
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-xdist==3.8.0
