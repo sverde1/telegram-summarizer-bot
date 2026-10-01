@@ -15,6 +15,9 @@ ExecStart=%h/scripts/telegram-summarizer-bot/.venv/bin/python bot.py
 Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
+# Files the bot creates are private to its user (the code sets the same umask; this covers child processes
+# started before that, and keeps it if the code changes).
+UMask=0077
 # GPU later: the CUDA libs from the nvidia-* wheels must be on the loader path before Python starts.
 #Environment=LD_LIBRARY_PATH=%h/scripts/telegram-summarizer-bot/.venv/lib/python3.14/site-packages/nvidia/cublas/lib:%h/scripts/telegram-summarizer-bot/.venv/lib/python3.14/site-packages/nvidia/cudnn/lib
 

@@ -5,6 +5,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Everything the bot creates (database, downloads, logins, temp files) is private to its user. Set first,
+# before any directory or file below is created: this module runs at import, ahead of everything else.
+os.umask(0o077)
+
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
@@ -92,3 +96,17 @@ def _ffmpeg() -> str:
 
 
 FFMPEG = _ffmpeg()
+
+
+def secure_files() -> None:
+    """Makes the bot's secrets and data private to its user (other local accounts can't read them).
+
+    umask only covers files created from now on; this fixes files that already exist with looser modes
+    (e.g. a .env written by an editor as 664). Called once at startup, never at import, so tests only ever
+    touch their own temp paths.
+    """
+    targets = [(ROOT / ".env", 0o600), (DATA_DIR, 0o700)]
+    targets += [(p, 0o600) for p in DATA_DIR.glob("bot.sqlite3*")]  # the database and its -wal/-shm files
+    for path, mode in targets:
+        if path.exists() and (path.stat().st_mode & 0o777) != mode:
+            path.chmod(mode)

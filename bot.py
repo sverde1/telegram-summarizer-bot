@@ -850,6 +850,7 @@ def main() -> None:
     """
     if not config.TELEGRAM_BOT_TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set (.env)")
+    config.secure_files()
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
     add_handlers(app)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
