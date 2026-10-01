@@ -29,6 +29,7 @@ _TMP = Path(tempfile.mkdtemp(prefix=f"tsb-{os.environ.get('PYTEST_XDIST_WORKER',
 atexit.register(shutil.rmtree, _TMP, True)
 os.environ.pop("ALLOWED_USER_IDS", None)
 os.environ.update({
+    "PTB_TIMEDELTA": "1",  # as bot.py sets it, but before PTB is imported by anything else
     "DATA_DIR": str(_TMP / "data"),
     "CODEX_HOME": str(_TMP / "codex-home"),
     "ADMIN_USER_IDS": "1",

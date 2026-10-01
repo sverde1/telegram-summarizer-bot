@@ -1,15 +1,21 @@
 """Telegram bot: send a YouTube/TikTok link, get back title, clickbait answer and summary."""
 import asyncio
+import datetime as dt
 import html
 import io
 import logging
+import os
 import time
 from dataclasses import dataclass
+
+# Opt in to PTB's coming behavior: RetryAfter.retry_after as a timedelta (an int with a deprecation warning
+# until then). Must be set before telegram is imported; _retry_seconds handles both forms.
+os.environ.setdefault("PTB_TIMEDELTA", "1")
 
 from telegram import (BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InlineKeyboardButton,
                       InlineKeyboardMarkup, Update)
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, RetryAfter
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
                           filters)
 
@@ -634,15 +640,49 @@ class Progress:
                 await self.app.bot.edit_message_text(text, self.job.chat_id, self.job.status_id)
                 self.shown, self.last_edit = text, time.monotonic()
             except RetryAfter as e:  # flood control: skip this edit, the next tick catches up
-                log.warning("progress edit rate-limited for %ss", e.retry_after)
-            except BadRequest as e:  # "message is not modified" etc.
+                log.warning("progress edit rate-limited for %ss", _retry_seconds(e))
+            except TelegramError as e:
+                # "message is not modified", the user blocked the bot, a network blip: a missed status edit
+                # is harmless, and an exception here would kill the ticker task.
                 log.debug("progress edit skipped: %s", e)
 
 
-async def worker(app: Application) -> None:
-    """Runs queued jobs one at a time, forever: pipeline, reply, request bookkeeping.
+def _retry_seconds(e: RetryAfter) -> float:
+    """Seconds Telegram asks us to wait. PTB returns an int today and a timedelta in a future version."""
+    wait = e.retry_after
+    return wait.total_seconds() if isinstance(wait, dt.timedelta) else float(wait)
 
-    Any failure is reported to the user and recorded on the request; it never stops the worker.
+
+class UserBlockedBot(Exception):
+    """Telegram refuses to deliver to the user (they blocked the bot or deleted the chat)."""
+
+
+async def _send_with_retry(make_call):
+    """Runs one Telegram send, waiting out flood control once.
+
+    Args:
+        make_call: Zero-argument function returning the API coroutine (a coroutine can only be awaited once,
+            so a retry needs a fresh one).
+
+    Raises:
+        UserBlockedBot: Telegram says the user can't be reached.
+        TelegramError: Any other Telegram failure, including a second flood-control refusal.
+    """
+    try:
+        return await make_call()
+    except RetryAfter as e:
+        await asyncio.sleep(_retry_seconds(e))
+        return await make_call()
+    except Forbidden as e:
+        raise UserBlockedBot(str(e))
+
+
+async def worker(app: Application) -> None:
+    """Runs queued jobs one at a time, forever.
+
+    Nothing may end this loop: if it stopped, the bot would keep acknowledging links ("⏳ Got it") but never
+    process them, and systemd wouldn't notice since the process is still alive. So each job runs inside a
+    last-resort `except Exception` (not BaseException: shutdown cancels this task and that must still work).
 
     Args:
         app: The running application.
@@ -650,50 +690,84 @@ async def worker(app: Application) -> None:
     loop = asyncio.get_running_loop()
     while True:
         job = await queue.get()
-        waited = time.monotonic() - job.queued_at
         try:
-            progress = Progress(app, loop, job)
-            try:
-                # The pipeline blocks (downloads, Whisper, LLM subprocesses): run it off the event loop.
-                result = await asyncio.to_thread(
-                    pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
-                    backend=job.backend, model=job.model, transcript_only=job.transcript_only)
-            finally:
-                # Before replying or deleting the status message: a late status edit must not land
-                # after the final result.
-                await progress.close()
-            if job.transcript_only:
-                if not result.transcript:
-                    await app.bot.send_message(job.chat_id, "No transcript available for this video.")
-                else:
-                    doc = io.BytesIO(result.transcript.encode())
-                    await app.bot.send_document(job.chat_id, doc, filename=f"{result.video_id}.txt",
-                                                caption=f"Transcript ({result.transcript_source})")
-            else:
-                # Only admins, or the user who asked for this video before, may learn it was cached:
-                # otherwise it would reveal what other users submit.
-                reveal = access.is_admin(job.user_id) or db.user_saw_video(
-                    job.user_id, result.platform, result.video_id, job.request_id)
-                for chunk in render(result, waited, reveal_cache=reveal):
-                    await app.bot.send_message(job.chat_id, chunk, parse_mode=ParseMode.HTML,
-                                               disable_web_page_preview=True)
-            db.update_request(job.request_id, status="done", cached=int(result.cached))
-            await app.bot.delete_message(job.chat_id, job.status_id)
-        except (pipeline.PipelineError, UnsupportedURL) as e:
-            db.update_request(job.request_id, status="failed", error=str(e)[:500])
-            await _fail(app, job, str(e))
-        except Exception as e:  # report, don't crash the worker
-            log.exception("job failed: %s", job.url)
-            db.update_request(job.request_id, status="failed", error=f"unexpected: {e}"[:500])
-            await _fail(app, job, f"Unexpected error: {e}")
+            await _run_job(app, loop, job)
+        except Exception:
+            log.exception("worker: job %s failed while reporting its result", job.request_id)
         finally:
             queue.task_done()
 
 
-async def _fail(app: Application, job: Job, msg: str) -> None:
-    """Shows an error in place of the job's status message.
+async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) -> None:
+    """Runs one job: pipeline, reply, request bookkeeping. Failures are reported to the user and recorded.
 
-    Falls back to a new message if the status message can't be edited (e.g. it was deleted).
+    Args:
+        app: The running application.
+        loop: The event loop (for thread-safe status edits from the pipeline thread).
+        job: The job to run.
+    """
+    waited = time.monotonic() - job.queued_at
+    try:
+        progress = Progress(app, loop, job)
+        try:
+            # The pipeline blocks (downloads, Whisper, LLM subprocesses): run it off the event loop.
+            result = await asyncio.to_thread(
+                pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
+                backend=job.backend, model=job.model, transcript_only=job.transcript_only)
+        finally:
+            # Before replying or deleting the status message: a late status edit must not land
+            # after the final result.
+            await progress.close()
+        await _deliver(app, job, result, waited)
+        db.update_request(job.request_id, status="done", cached=int(result.cached))
+        try:
+            await app.bot.delete_message(job.chat_id, job.status_id)
+        except TelegramError:
+            pass  # the user deleted it already, or can't be reached: the result is delivered either way
+    except UserBlockedBot:
+        db.update_request(job.request_id, status="failed", error="user blocked the bot")
+        log.info("job %s: user %s blocked the bot", job.request_id, job.user_id)
+    except (pipeline.PipelineError, UnsupportedURL) as e:
+        db.update_request(job.request_id, status="failed", error=str(e)[:500])
+        await _fail(app, job, str(e))
+    except Exception as e:  # report, don't crash the worker
+        log.exception("job failed: %s", job.url)
+        db.update_request(job.request_id, status="failed", error=f"unexpected: {e}"[:500])
+        await _fail(app, job, f"Unexpected error: {e}")
+
+
+async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: float) -> None:
+    """Sends a finished job's result: the transcript file, or the summary message(s).
+
+    Raises:
+        UserBlockedBot: The user can't be reached.
+        TelegramError: Telegram refused the message.
+    """
+    bot_ = app.bot
+    if job.transcript_only:
+        if not result.transcript:
+            await _send_with_retry(lambda: bot_.send_message(job.chat_id, "No transcript available for this video."))
+        else:
+            data = result.transcript.encode()
+            # A long transcript is a sizeable upload; PTB's default 5 s write timeout is too short for it.
+            await _send_with_retry(lambda: bot_.send_document(
+                job.chat_id, io.BytesIO(data), filename=f"{result.video_id}.txt",
+                caption=f"Transcript ({result.transcript_source})", write_timeout=60))
+        return
+    # Only admins, or the user who asked for this video before, may learn it was cached: otherwise it
+    # would reveal what other users submit.
+    reveal = access.is_admin(job.user_id) or db.user_saw_video(
+        job.user_id, result.platform, result.video_id, job.request_id)
+    for chunk in render(result, waited, reveal_cache=reveal):
+        await _send_with_retry(lambda chunk=chunk: bot_.send_message(
+            job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True))
+
+
+async def _fail(app: Application, job: Job, msg: str) -> None:
+    """Shows an error in place of the job's status message. Never raises.
+
+    Falls back to a new message if the status message can't be edited (e.g. it was deleted). If the user
+    can't be reached at all, the error is only logged: raising here would escape the job's error handling.
 
     Args:
         app: The running application.
@@ -701,9 +775,12 @@ async def _fail(app: Application, job: Job, msg: str) -> None:
         msg: The error to show.
     """
     try:
-        await app.bot.edit_message_text(f"⚠️ {msg}", job.chat_id, job.status_id)
-    except BadRequest:
-        await app.bot.send_message(job.chat_id, f"⚠️ {msg}")
+        try:
+            await app.bot.edit_message_text(f"⚠️ {msg}", job.chat_id, job.status_id)
+        except BadRequest:
+            await app.bot.send_message(job.chat_id, f"⚠️ {msg}")
+    except TelegramError as e:
+        log.warning("couldn't report the failure of job %s: %s", job.request_id, e)
 
 
 # The chat's "Menu" button and "/" autocomplete, per user: strangers only see /start, approved users the
