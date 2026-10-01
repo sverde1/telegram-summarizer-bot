@@ -52,3 +52,14 @@ def test_cancel_stops_the_program_quickly(monkeypatch):
         proc.run([PY, "-c", "import time; time.sleep(30)"], timeout=60)
     assert time.monotonic() - start < 3
 
+
+
+def test_programs_never_get_the_bots_secrets(monkeypatch):
+    for name in ("TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "SOME_API_KEY"):
+        monkeypatch.setenv(name, "secret-value")
+    monkeypatch.setenv("HARMLESS", "ok")
+    p = proc.run([PY, "-c", "import os, json; print(json.dumps(dict(os.environ)))"], timeout=10)
+    import json
+    child = json.loads(p.stdout)
+    assert "secret-value" not in p.stdout
+    assert child["HARMLESS"] == "ok" and "PATH" in child

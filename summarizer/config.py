@@ -75,6 +75,19 @@ CODEX_HOME.mkdir(parents=True, exist_ok=True, mode=0o700)
 VENV_BIN = Path(sys.executable).parent
 os.environ["PATH"] = f"{VENV_BIN}{os.pathsep}{os.environ.get('PATH', '')}"
 
+# The bot's own secrets. External programs never need them, and must not get them: Claude Code would bill
+# ANTHROPIC_API_KEY instead of the Claude subscription, and a bug in a downloader parsing a hostile page
+# shouldn't hand over the bot token.
+_SECRET_VARS = {"TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"}
+
+
+def clean_env() -> dict[str, str]:
+    """The environment for external programs: this process's, minus the bot's secrets and any *_API_KEY.
+
+    Built on each call (not once at import) so it reflects the current PATH and environment.
+    """
+    return {k: v for k, v in os.environ.items() if k not in _SECRET_VARS and not k.endswith("_API_KEY")}
+
 
 def _tool(name: str) -> str:
     """Returns the venv's copy of a command-line tool, or the bare name to look up on PATH."""

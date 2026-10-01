@@ -12,6 +12,8 @@ import subprocess
 import threading
 import time
 
+from . import config
+
 log = logging.getLogger(__name__)
 
 # Set by the worker to cancel the job it's running (one worker runs one job at a time, so one event is
@@ -59,7 +61,7 @@ def run(cmd: list[str], *, timeout: float, input: str | bytes | None = None, tex
         timeout: Seconds before the program's whole process group is killed.
         input: Data for stdin, if any.
         text: Decode output as text (False: bytes, e.g. raw audio samples).
-        env: Environment for the program; None = this process's environment.
+        env: Environment for the program; None = config.clean_env() (everything except the bot's secrets).
         cwd: Working directory.
 
     Returns:
@@ -71,7 +73,8 @@ def run(cmd: list[str], *, timeout: float, input: str | bytes | None = None, tex
         OSError: The program couldn't be started (e.g. not installed).
     """
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, env=env, cwd=cwd,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text,
+                         env=config.clean_env() if env is None else env, cwd=cwd,
                          start_new_session=True)  # own process group, so _kill reaches its children too
     deadline = time.monotonic() + timeout
     pending_input = input
