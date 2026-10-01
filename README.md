@@ -259,19 +259,24 @@ The command menu adapts per user: strangers only see `/start`.
 
 ## How it works
 
-1. **URL** → platform + id (tracking parameters stripped, TikTok short links resolved).
-2. **Lookup** with yt-dlp. TikTok carousels are detected here (no video formats).
-3. **Transcript:** YouTube captions → Whisper. TikTok: Whisper → TikTok's captions. Carousels: slides
-   via gallery-dl instead. No or hardly any speech → frames are grabbed right away.
-4. **LLM, turn 1:** metadata, thumbnail and timestamped transcript → summary, plus whether frames are
+1. **Link check** as soon as the link arrives: only YouTube/TikTok hosts, no network needed; then the
+   queue limits (3 per user, 20 in total; admins exempt).
+2. **URL** → platform + id (tracking parameters stripped, TikTok short links resolved hop by hop).
+3. **Lookup** with yt-dlp. TikTok carousels are detected here (no video formats); live streams and
+   videos of unknown length are refused.
+4. **Transcript:** YouTube captions → Whisper. TikTok: Whisper → TikTok's captions. Carousels: slides
+   via gallery-dl instead. No or hardly any speech → frames are grabbed right away. Before Whisper, the
+   memory guard checks the transcription fits in RAM; if not, the job waits while others go first.
+5. **LLM, turn 1:** metadata, thumbnail and timestamped transcript → summary, plus whether frames are
    needed and at which moments.
-5. **LLM, turn 2 (only if asked):** frames from those moments, in the same conversation (Codex by its
+6. **LLM, turn 2 (only if asked):** frames from those moments, in the same conversation (Codex by its
    exact session id, Claude Code by a per-video UUID) → revised summary.
-6. **Reply** in Telegram (HTML, split at 4096 characters). Downloaded media and LLM session files are
-   deleted after each job.
+7. **Reply** in Telegram (HTML, split at 4096 characters). Downloaded media and LLM session files are
+   deleted after each job (and any leftovers of a crashed run at the next start).
 
 Jobs run one at a time from a queue; the status message shows the queue position, each stage and an ETA
-learned from this machine's measured speeds.
+learned from this machine's measured speeds. Every external program runs in its own process group, so a
+timeout, a cancelled job or a removed user stops it at once.
 
 ## Security and privacy
 
@@ -303,9 +308,11 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 `bot.sqlite3` holds four tables:
 
 - `users`: id, name, username, status (admin / allowed / pending / blocked), chosen `backend` + `model`.
-- `videos`: metadata and transcript, status `processing` → `done` / `failed`.
+- `videos`: metadata and transcript, status `processing` → `done` / `failed` (or `waiting` for memory,
+  `cancelled`).
 - `summaries`: one per video and model.
-- `requests`: every link sent: who, what, kind, status, cache hit, timestamps.
+- `requests`: every link sent: who, what, kind, status (`queued` → `processing` → `done` / `failed` /
+  `cancelled`), cache hit, error detail, timestamps.
 
 Also there: `codex-home/` (the bot's Codex login), `stats.json` (measured speeds for ETAs).
 
