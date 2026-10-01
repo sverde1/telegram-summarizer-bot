@@ -232,7 +232,6 @@ Also there: `codex-home/` (the bot's Codex login), `stats.json` (measured speeds
 - **New models:** Codex's list updates itself; the Claude Code list is in `summarizer/summarize.py`
   (`CLAUDE_CODE_MODELS`).
 
-
 ## License
 
 Copyright (C) 2026 Sandi Verdev
