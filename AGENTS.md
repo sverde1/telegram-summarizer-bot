@@ -79,8 +79,16 @@ result was cached if they requested that video themselves (`db.user_saw_video`).
 
 ## Conventions
 
-- Match the existing style: small functions, type hints, short docstrings, comments only where the
-  reason isn't obvious.
+- Match the existing style: small functions and type hints.
+- Every function and method must have a Google-style docstring
+  (https://google.github.io/styleguide/pyguide.html#383-functions-and-methods).
+  Start with a one-line summary, then add `Args:`, `Returns:`, and `Raises:`
+  sections when they are not obvious from the signature. This applies to
+  private helpers and test helpers too — not just public APIs.
+- Comment the *why*, not the *what*: any non-obvious decision, workaround,
+  invariant, magic number, or ordering dependency gets a `#` comment explaining
+  the reason (link the issue/ticket if one exists). Don't narrate code that
+  reads plainly.
 - User-facing text is short and plain, with one emoji per status line (🔎 🎧 🗣 🎞 🧠 ✅ ⚠️).
 - New settings go in `summarizer/config.py`, `.env.example` and the README's configuration table.
 - New commands need a handler in `main()`, an entry in the per-user command menus (`USER_COMMANDS` /

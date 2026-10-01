@@ -10,6 +10,15 @@ load_dotenv(ROOT / ".env")
 
 
 def _env(name: str, default: str = "") -> str:
+    """Reads a setting from the environment, stripped of surrounding whitespace.
+
+    Args:
+        name: Variable name.
+        default: Value when the variable isn't set.
+
+    Returns:
+        The value; an empty string if unset and no default given.
+    """
     return os.environ.get(name, default).strip()
 
 
@@ -29,7 +38,9 @@ CLAUDE_EFFORT = _env("CLAUDE_EFFORT", "medium")
 
 # Whisper (speech-to-text). CPU by default; set WHISPER_DEVICE=cuda once a GPU is installed.
 WHISPER_DEVICE = _env("WHISPER_DEVICE", "cpu")  # cpu | cuda | auto
+# An English-only *.en model would turn non-English speech into invented English instead of failing.
 WHISPER_MODEL = _env("WHISPER_MODEL", "small")  # multilingual models only: small | medium | large-v3
+# int8 is the fast CPU type; GPUs run float16.
 WHISPER_COMPUTE_TYPE = _env("WHISPER_COMPUTE_TYPE", "int8" if WHISPER_DEVICE == "cpu" else "float16")
 WHISPER_CPU_THREADS = int(_env("WHISPER_CPU_THREADS", "0"))  # 0 = ctranslate2 default
 
@@ -42,16 +53,19 @@ MAX_SLIDES = int(_env("MAX_SLIDES", "35"))  # TikTok carousels allow up to 35 im
 DATA_DIR = Path(_env("DATA_DIR", str(ROOT / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 # The bot's own Codex login, separate from ~/.codex so the sandbox never sees your sessions/history.
+# 0700: it holds the ChatGPT login tokens.
 CODEX_HOME = Path(_env("CODEX_HOME", str(DATA_DIR / "codex-home")))
 CODEX_HOME.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 # Resolve CLI tools next to the interpreter so a stale system yt-dlp never shadows the venv one,
-# and so yt-dlp finds the venv's deno (YouTube JS runtime).
+# and so yt-dlp finds the venv's deno (YouTube JS runtime). Running .venv/bin/python (as the service
+# does) doesn't put .venv/bin on PATH by itself.
 VENV_BIN = Path(sys.executable).parent
 os.environ["PATH"] = f"{VENV_BIN}{os.pathsep}{os.environ.get('PATH', '')}"
 
 
 def _tool(name: str) -> str:
+    """Returns the venv's copy of a command-line tool, or the bare name to look up on PATH."""
     return str(VENV_BIN / name) if (VENV_BIN / name).exists() else name
 
 
@@ -60,6 +74,13 @@ GALLERY_DL = _tool("gallery-dl")
 
 
 def _ffmpeg() -> str:
+    """Finds an ffmpeg binary: the system one if installed, else the static build from imageio-ffmpeg.
+
+    The fallback means the bot needs no system packages.
+
+    Returns:
+        Path of the ffmpeg executable.
+    """
     import shutil
     if found := shutil.which("ffmpeg"):
         return found

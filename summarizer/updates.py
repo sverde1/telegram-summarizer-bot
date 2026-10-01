@@ -7,6 +7,9 @@ import subprocess
 log = logging.getLogger(__name__)
 
 # tool -> (command, npm package that publishes its releases, how to update)
+# Both CLIs are published on npm, so `npm view <package> version` is one uniform way to learn the latest
+# release, even for Claude Code installed by its native installer. Codex is installed globally as root,
+# hence sudo; Claude Code lives in the user's home and updates itself.
 TOOLS = {
     "Codex": ("codex", "@openai/codex", "sudo npm install -g @openai/codex"),
     "Claude Code": ("claude", "@anthropic-ai/claude-code", "claude update"),
@@ -14,11 +17,25 @@ TOOLS = {
 
 
 def _version(text: str) -> tuple[int, ...] | None:
+    """Extracts the first x.y.z version from command output.
+
+    Args:
+        text: E.g. "codex-cli 0.159.2" or "2.1.285 (Claude Code)".
+
+    Returns:
+        The version as a tuple of ints (so 0.10.0 compares above 0.9.0), or None if there is none.
+    """
     m = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
     return tuple(map(int, m.groups())) if m else None
 
 
 def _run(cmd: list[str]) -> str:
+    """Runs a command and returns its stdout.
+
+    Returns:
+        The output, or "" if the command is missing, fails to start or hangs: a failed check just
+        means no notification this round.
+    """
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -27,7 +44,12 @@ def _run(cmd: list[str]) -> str:
 
 
 def check() -> list[dict]:
-    """Tools with a newer release: [{tool, installed, latest, command}]."""
+    """Finds installed CLIs that have a newer release.
+
+    Returns:
+        One dict per outdated tool: {tool, installed, latest, command}. Tools that aren't installed,
+        or whose versions couldn't be read, are skipped.
+    """
     out = []
     for tool, (cmd, package, how) in TOOLS.items():
         if not shutil.which(cmd):

@@ -18,10 +18,11 @@ from summarizer import config, db, pipeline, stats, summarize, updates
 from summarizer.urls import UnsupportedURL, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
+# httpx logs every Telegram API call (each long poll, each status edit) at INFO; that drowns the bot's log.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
 
-TG_LIMIT = 4096
+TG_LIMIT = 4096  # Telegram's maximum message length in characters
 HELP = (
     "Send me a YouTube or TikTok link and I'll reply with the title, an answer to any clickbait, "
     "and a summary.\n\n"
@@ -36,6 +37,21 @@ ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n
 
 @dataclass
 class Job:
+    """One queued request: what to process, where to reply, and on whose behalf.
+
+    Attributes:
+        url: The link the user sent.
+        chat_id: Chat to reply in.
+        status_id: Message id of the status message that gets edited while the job runs.
+        use_cache: False for /again (re-summarize, ignoring the cached summary).
+        transcript_only: True for /transcript (send the transcript, no summary).
+        queued_at: time.monotonic() when the job was queued, to report time spent waiting.
+        user_id: Telegram user id of the requester.
+        request_id: Row id in the `requests` table, updated when the job finishes.
+        backend: The user's chosen LLM backend; None = the default.
+        model: The user's chosen model of that backend; None = the default.
+    """
+
     url: str
     chat_id: int
     status_id: int
@@ -48,12 +64,25 @@ class Job:
     model: str | None = None
 
 
+# A single queue drained by a single worker: jobs run one at a time, so Whisper (CPU-heavy) never runs
+# twice in parallel, and two users' LLM conversations can't interleave.
 queue: asyncio.Queue[Job] = asyncio.Queue()
 
 
 async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = False) -> bool:
-    """True if the user may use the bot. With request=True (/start), an unknown user's access
-    request is sent to the admins; otherwise they're only told how to ask."""
+    """Checks whether the user may use the bot, and handles everyone who may not.
+
+    Strangers only get an access request sent to the admins when they explicitly ask with /start, so
+    random messages to the bot never ping the admins. Blocked users are ignored silently.
+
+    Args:
+        update: The incoming update.
+        ctx: Handler context (used to message the admins).
+        request: True for /start: file an access request for an unknown user.
+
+    Returns:
+        True if the user is an admin or allowed; False otherwise (they've been told why, if appropriate).
+    """
     user = update.effective_user
     if not user:
         return False
@@ -70,6 +99,7 @@ async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = 
         log.info("ignored blocked user %s", user.id)
         return False
     if st == "pending":
+        # Already asked: don't notify the admins a second time.
         if msg:
             await msg.reply_text("⏳ Your access request is waiting for the admin's approval.")
         return False
@@ -94,6 +124,11 @@ async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = 
 
 
 async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /users (admins only): lists admins and users, with action buttons per user.
+
+    Sends one message for the admins, then one per non-empty group (allowed, pending, blocked) so each
+    group gets its own buttons. Non-admins get no reply at all, so the command's existence isn't revealed.
+    """
     user = update.effective_user
     if not access.is_admin(user.id):
         return
@@ -101,16 +136,27 @@ async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     users = access.all_users()
 
     def llm(u: dict) -> str:
+        """Describes a user's AI choice, e.g. "Codex · gpt-6-sol" or "default AI".
+
+        Args:
+            u: A users-table row.
+
+        Returns:
+            Short text for the user list.
+        """
         if not u.get("backend") and not u.get("model"):
             return "default AI"
         return f"{summarize.BACKEND_NAMES.get(u['backend'], u['backend'] or '')} · {u['model'] or 'default'}"
 
     admins = "\n".join(f"• {access.label(u['id'], u)}: {llm(u)}" for u in users["admin"])
+    # Admins have a users row too (status "admin", for their settings) but aren't one of the managed
+    # STATES; count only the managed ones, or the "no other users" hint would never show.
     others = sum(len(users[st]) for st in access.STATES)
     await update.message.reply_text(
         f"👑 Admins (set in .env)\n{admins}"
         + ("" if others else "\n\nNo other users yet. When someone sends the bot /start, "
                              "you'll get an access request here."))
+    # "remove" doubles as Unblock: forgetting a blocked user lets them /start a new request.
     actions = {"allowed": [("🗑 Remove", "remove")], "pending": [("✅ Allow", "allow"), ("❌ Deny", "block")],
                "blocked": [("↩️ Unblock", "remove")]}
     titles = {"allowed": "✅ Allowed", "pending": "⏳ Pending", "blocked": "⛔ Blocked"}
@@ -125,7 +171,15 @@ async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _current_llm(uid: int) -> tuple[str, str, bool]:
-    """(backend, model, is_default) this user's summaries use."""
+    """Resolves which backend and model a user's summaries use.
+
+    Args:
+        uid: Telegram user id.
+
+    Returns:
+        (backend, model, is_default): the effective backend and model, and whether the user is on the
+        defaults (made no choice, or their chosen backend is no longer installed).
+    """
     backend, model = db.get_user_llm(uid)
     if backend not in summarize.available_backends():
         backend, model = None, None  # their choice was uninstalled: fall back
@@ -134,7 +188,14 @@ def _current_llm(uid: int) -> tuple[str, str, bool]:
 
 
 def _llm_home(uid: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Step 1 of /models: pick a provider."""
+    """Builds step 1 of /models: the user's current AI and a button per installed provider.
+
+    Args:
+        uid: Telegram user id.
+
+    Returns:
+        Message text and its inline keyboard.
+    """
     b, m, is_default = _current_llm(uid)
     text = (f"🧠 You're using {summarize.BACKEND_NAMES[b]} · {m}" + (" (default)" if is_default else "")
             + "\n\nChoose a provider:")
@@ -150,7 +211,15 @@ def _llm_home(uid: int) -> tuple[str, InlineKeyboardMarkup]:
 
 
 def _llm_models(uid: int, backend: str) -> tuple[str, InlineKeyboardMarkup]:
-    """Step 2 of /models: pick a model of one provider."""
+    """Builds step 2 of /models: the models of one provider, the user's current one marked ✓.
+
+    Args:
+        uid: Telegram user id.
+        backend: The provider whose models to list.
+
+    Returns:
+        Message text and its inline keyboard (an error text with only a Back button if listing fails).
+    """
     b, m, _ = _current_llm(uid)
     try:
         models = summarize.list_models(backend)
@@ -163,6 +232,7 @@ def _llm_models(uid: int, backend: str) -> tuple[str, InlineKeyboardMarkup]:
         mark = "✓ " if (backend, model["id"]) == (b, m) else ""
         tag = " (default)" if model["id"] == default else ""
         lines.append(f"{mark}{model['id']}{tag}" + (f": {model['description']}" if model["description"] else ""))
+        # Telegram rejects callback_data longer than 64 bytes.
         rows.append([InlineKeyboardButton(f"{mark}{model['name'] or model['id']}{tag}",
                                           callback_data=f"llm:m:{backend}:{model['id']}"[:64])])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="llm:home")])
@@ -170,7 +240,19 @@ def _llm_models(uid: int, backend: str) -> tuple[str, InlineKeyboardMarkup]:
 
 
 def _set_llm(uid: int, backend: str | None, model: str | None) -> str:
-    """Validate and store a user's choice; returns the confirmation text."""
+    """Validates and stores a user's backend/model choice.
+
+    The choice is re-validated here rather than trusted from the button, because callback data comes
+    from the client and the model list can change between showing the buttons and the tap.
+
+    Args:
+        uid: Telegram user id.
+        backend: The chosen backend, or None to go back to the defaults.
+        model: The chosen model of that backend.
+
+    Returns:
+        The confirmation (or error) text to show the user.
+    """
     if backend is None:
         db.set_user_llm(uid, None, None)
         b = config.LLM_BACKEND
@@ -189,14 +271,21 @@ def _set_llm(uid: int, backend: str | None, model: str | None) -> str:
 
 
 async def on_models(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /models: shows step 1 of the provider/model picker."""
     if await guard(update, ctx):
         text, buttons = _llm_home(update.effective_user.id)
         await update.message.reply_text(text, reply_markup=buttons)
 
 
 async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles taps in the /models picker by editing the same message in place.
+
+    Callback data: `llm:home`, `llm:default`, `llm:b:<backend>` (open a provider's models) or
+    `llm:m:<backend>:<model>` (choose a model).
+    """
     q = update.callback_query
     uid = q.from_user.id
+    # Buttons can outlive access (e.g. the user was removed after /models was shown): re-check on every tap.
     if access.state(uid) not in ("admin", "allowed"):
         await q.answer()
         return
@@ -206,7 +295,7 @@ async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer()
     elif parts[1] in ("m", "default"):
         reply = _set_llm(uid, parts[2], parts[3]) if parts[1] == "m" else _set_llm(uid, None, None)
-        await q.answer(reply[:200])
+        await q.answer(reply[:200])  # Telegram caps callback answer (toast) text at 200 characters
         text, buttons = _llm_models(uid, parts[2]) if parts[1] == "m" else _llm_home(uid)
     else:
         text, buttons = _llm_home(uid)
@@ -218,7 +307,10 @@ async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Recent requests: admins see everyone's (with who sent them), users only their own."""
+    """Handles /history: recent requests, admins see everyone's (with who sent them), users only their own.
+
+    Who submitted what is private, so only admins get other users' rows and the ⚡ cache-hit marker.
+    """
     if not await guard(update, ctx):
         return
     uid = update.effective_user.id
@@ -246,7 +338,13 @@ async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the admins' user-management buttons (`allow:<id>`, `block:<id>`, `remove:<id>`).
+
+    Used by both the access-request message and /users. After the change the user's command menu is
+    re-synced, and a newly allowed user is told they're in.
+    """
     q = update.callback_query
+    # Only the admins get these buttons, but callback data can be forged: check on every tap.
     if not access.is_admin(q.from_user.id):
         await q.answer("Admins only.")
         return
@@ -255,6 +353,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer()
         return
     uid = int(uid_s)
+    # Admins come from .env; changing them here would be undone at the next restart anyway.
     if access.is_admin(uid):
         await q.answer("That's an admin (configured in .env).")
         return
@@ -264,7 +363,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     done = {"allow": f"✅ Allowed {who}", "block": f"⛔ Denied and blocked {who}",
             "remove": f"🗑 Removed {who}"}[action]
     log.info("admin %s: %s", q.from_user.id, done)
-    await q.answer(done[:200])
+    await q.answer(done[:200])  # Telegram caps callback answer (toast) text at 200 characters
     await q.edit_message_text(done)
     await sync_commands(ctx.bot, uid)
     if action == "allow":
@@ -275,6 +374,16 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def enqueue(update: Update, url: str | None, **opts) -> None:
+    """Acknowledges a link right away, logs the request, and queues the job.
+
+    The status message is sent before queueing so the user gets an answer immediately; the worker then
+    edits that same message as the job progresses.
+
+    Args:
+        update: The incoming update (an allowed user's message or command).
+        url: The link found in the message, or None.
+        **opts: Job options: `use_cache=False` for /again, `transcript_only=True` for /transcript.
+    """
     if not url:
         await update.message.reply_text("Send me a YouTube or TikTok link.")
         return
@@ -285,12 +394,15 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
     uid = update.effective_user.id
     req = db.add_request(uid, url, kind)  # logged the moment the link arrives
     b, m, is_default = _current_llm(uid)
+    # Users on the defaults pass None, so their jobs follow the default (and its later changes)
+    # instead of pinning whatever the default resolves to right now.
     b, m = (None, None) if is_default else (b, m)
     await queue.put(Job(url, update.effective_chat.id, status.message_id, queued_at=time.monotonic(),
                         user_id=uid, request_id=req, backend=b, model=m, **opts))
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles plain messages: summarizes the first link in the text or media caption."""
     if not await guard(update, ctx):
         return
     text = update.message.text or update.message.caption or ""
@@ -298,13 +410,26 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def command(**opts):
+    """Makes a handler for a `/command <url>` that queues the link with the given job options.
+
+    Args:
+        **opts: Job options, e.g. `use_cache=False` (/again) or `transcript_only=True` (/transcript).
+
+    Returns:
+        An async command handler.
+    """
     async def handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Queues the URL given as the command's argument, for allowed users."""
         if await guard(update, ctx):
             await enqueue(update, find_url(" ".join(ctx.args)), **opts)
     return handler
 
 
 async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /start: the help text for allowed users, an access request for strangers.
+
+    /start is the only way a stranger can file an access request (see `guard`).
+    """
     user = update.effective_user
     db.touch_user(user.id, user.full_name, user.username)  # known users: refresh name (no-op otherwise)
     if await guard(update, ctx, request=True):
@@ -312,6 +437,7 @@ async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /help: the help text, plus the admin commands for admins."""
     if await guard(update, ctx):
         await update.message.reply_text(HELP + (ADMIN_HELP if access.is_admin(update.effective_user.id) else ""))
 
@@ -319,12 +445,31 @@ async def on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------- output ----------
 
 def _secs(sec: float) -> str:
+    """Formats a duration for the footer: "42 s" under a minute, "m:ss" from there on.
+
+    Args:
+        sec: Duration in seconds.
+
+    Returns:
+        The formatted duration.
+    """
     sec = round(sec)
     return f"{sec} s" if sec < 60 else f"{sec // 60}:{sec % 60:02d}"
 
 
 def details(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> str:
-    """Footer: how long each step took and what was used."""
+    """Builds the footer: how long each step took and what was used (transcript, frames, LLM).
+
+    Args:
+        r: The pipeline result.
+        waited: Seconds the job waited in the queue; shown when it's 5 s or more.
+        reveal_cache: Whether this user may learn the result came from the cache. When False, a cached
+            result shows no timing line at all: the original run's timings would show it was cached,
+            revealing that someone else submitted the video.
+
+    Returns:
+        One or two lines of plain text (the caller HTML-escapes it).
+    """
     stats = (r.summary or {}).get("_stats") or {}
     if r.cached and not reveal_cache:
         timing = ""
@@ -345,12 +490,25 @@ def details(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) ->
         used = f"📝 transcript: {source}" + (f" ({r.language})" if r.language else "")
     if r.frames_used:
         used += " · 🖼 slides" if r.meta.get("is_carousel") else " · 🎞 video frames"
+    # The model saved with the summary, not the current default: a cached summary may be from another model.
     used += f" · 🧠 {stats.get('llm') or summarize.llm_label()}"
     return "\n".join(filter(None, [timing, used]))
 
 
 def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> list[str]:
-    """Build the reply in the Title / Clickbait answer / Summary layout, split to fit Telegram."""
+    """Builds the reply in the Title / Clickbait answer / Summary layout, split to fit Telegram.
+
+    All model and video text is HTML-escaped: messages are sent with parse_mode=HTML, and titles or
+    summaries containing `<` or `&` would otherwise break parsing (or inject markup).
+
+    Args:
+        r: The pipeline result (must have a summary).
+        waited: Seconds the job waited in the queue (for the footer).
+        reveal_cache: Whether this user may learn the result came from the cache (see `details`).
+
+    Returns:
+        One or more HTML messages, each at most TG_LIMIT characters.
+    """
     s = r.summary
     e = html.escape
     head = f"<b>Title:</b>\n{e(s['title'] or r.meta['title'])}\n\n<b>Clickbait answer:</b>\n"
@@ -364,6 +522,8 @@ def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> 
     # Too long for one message: split the summary on line boundaries.
     chunks, cur = [], head
     for line in body.split("\n"):
+        # A single line over the limit is cut hard; the 100-character margin leaves room for the
+        # newline and the chunk's other content.
         while len(line) > TG_LIMIT - 100:  # pathological single line
             chunks.append(cur)
             cur, line = line[:TG_LIMIT - 100], line[TG_LIMIT - 100:]
@@ -379,6 +539,17 @@ def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> 
 
 
 def _fmt_eta(sec: float) -> str:
+    """Formats the remaining-time estimate, deliberately coarse so it reads as an estimate.
+
+    Under a minute it's rounded *up* to 5 s (an optimistic ETA that keeps running out is worse than a
+    slightly pessimistic one); under 10 min to half minutes; beyond that to whole minutes.
+
+    Args:
+        sec: Estimated seconds left.
+
+    Returns:
+        E.g. "15 s", "2.5 min", "12 min".
+    """
     sec = max(int(sec), 0)
     if sec < 60:
         return f"{max(-(-sec // 5) * 5, 5)} s"  # round up to 5 s
@@ -392,9 +563,18 @@ class Progress:
     stage is never overwritten by an earlier one, and no stage is dropped.
     """
 
+    # Seconds between countdown refreshes. Edits count against Telegram's per-chat rate limit
+    # (about one message per second), so the countdown stays well below it.
     TICK = 15
 
     def __init__(self, app: Application, loop: asyncio.AbstractEventLoop, job: Job):
+        """Starts the countdown ticker for one job's status message.
+
+        Args:
+            app: The running application (for the bot).
+            loop: The bot's event loop; edits are scheduled onto it from the worker thread.
+            job: The job whose status message to edit.
+        """
         self.app, self.loop, self.job = app, loop, job
         self.lock = asyncio.Lock()
         self.text, self.eta, self.eta_at, self.shown, self.last_edit = "", None, 0.0, "", 0.0
@@ -402,7 +582,14 @@ class Progress:
         self.ticker = asyncio.run_coroutine_threadsafe(self._tick(), loop)
 
     def __call__(self, text: str, eta: float | None = None) -> None:
+        """Shows a new stage. Called by the pipeline from the worker thread.
+
+        Args:
+            text: The full status text (all lines).
+            eta: Estimated seconds until the summary is ready, or None if unknown.
+        """
         self.text, self.eta, self.eta_at = text, eta, time.monotonic()
+        # The pipeline runs in a worker thread; Telegram calls must run on the bot's event loop.
         asyncio.run_coroutine_threadsafe(self._edit(), self.loop)
 
     async def close(self) -> None:
@@ -412,20 +599,31 @@ class Progress:
             self.closed = True
 
     def _render(self) -> str:
+        """Builds the status text: the current stage plus elapsed time and the ETA countdown.
+
+        Returns:
+            The text for the status message.
+        """
         elapsed = time.monotonic() - self.started
         line = f"⏱ {int(elapsed) // 60}:{int(elapsed) % 60:02d} elapsed"
         if self.eta is not None:
+            # Count down from when the ETA was given, not from job start: each stage brings a new ETA.
             left = self.eta - (time.monotonic() - self.eta_at)
             line += f" · ~{_fmt_eta(left)} left" if left > 0 else " · taking longer than estimated…"
         return f"{self.text}\n\n{line}"
 
     async def _tick(self) -> None:
+        """Refreshes the countdown every TICK seconds until cancelled."""
         while True:
             await asyncio.sleep(self.TICK)
+            # Skip the refresh if a stage change just edited the message (TICK - 1 tolerates timer jitter):
+            # that avoids a second, redundant edit right after it.
             if self.text and time.monotonic() - self.last_edit >= self.TICK - 1:
                 await self._edit()
 
     async def _edit(self) -> None:
+        """Edits the status message to the current text, unless closed or unchanged."""
+        # The lock serializes edits in call order, so a stage edit can't overtake a later one.
         async with self.lock:
             if self.closed:
                 return
@@ -442,6 +640,13 @@ class Progress:
 
 
 async def worker(app: Application) -> None:
+    """Runs queued jobs one at a time, forever: pipeline, reply, request bookkeeping.
+
+    Any failure is reported to the user and recorded on the request; it never stops the worker.
+
+    Args:
+        app: The running application.
+    """
     loop = asyncio.get_running_loop()
     while True:
         job = await queue.get()
@@ -449,10 +654,13 @@ async def worker(app: Application) -> None:
         try:
             progress = Progress(app, loop, job)
             try:
+                # The pipeline blocks (downloads, Whisper, LLM subprocesses): run it off the event loop.
                 result = await asyncio.to_thread(
                     pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
                     backend=job.backend, model=job.model, transcript_only=job.transcript_only)
             finally:
+                # Before replying or deleting the status message: a late status edit must not land
+                # after the final result.
                 await progress.close()
             if job.transcript_only:
                 if not result.transcript:
@@ -483,6 +691,15 @@ async def worker(app: Application) -> None:
 
 
 async def _fail(app: Application, job: Job, msg: str) -> None:
+    """Shows an error in place of the job's status message.
+
+    Falls back to a new message if the status message can't be edited (e.g. it was deleted).
+
+    Args:
+        app: The running application.
+        job: The failed job.
+        msg: The error to show.
+    """
     try:
         await app.bot.edit_message_text(f"⚠️ {msg}", job.chat_id, job.status_id)
     except BadRequest:
@@ -492,6 +709,7 @@ async def _fail(app: Application, job: Job, msg: str) -> None:
 # The chat's "Menu" button and "/" autocomplete, per user: strangers only see /start, approved users the
 # normal commands, admins also /users.
 STRANGER_COMMANDS = [BotCommand("start", "Request access to this bot")]
+# /start isn't listed for approved users: they don't need it, and its menu entry says "request access".
 USER_COMMANDS = [
     BotCommand("help", "How to use the bot"),
     BotCommand("again", "Summarize again, ignoring the cache: /again <url>"),
@@ -499,13 +717,19 @@ USER_COMMANDS = [
     BotCommand("history", "Your recent requests"),
     BotCommand("models", "Show or choose the AI: Codex or Claude, then the model"),
 ]
+# Admin-specific commands first; /history is re-described ("all users"), so the user version is dropped.
 ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock"),
                   BotCommand("history", "Recent requests from all users")] + [
     c for c in USER_COMMANDS if c.command != "history"]
 
 
 async def sync_commands(bot, uid: int) -> None:
-    """Set the command menu for one user's chat to match their access."""
+    """Sets the command menu for one user's chat to match their access.
+
+    Args:
+        bot: The Telegram bot.
+        uid: Telegram user id (equal to the private chat id).
+    """
     st = access.state(uid)
     scope = BotCommandScopeChat(uid)
     try:
@@ -520,23 +744,40 @@ async def sync_commands(bot, uid: int) -> None:
 
 
 async def post_init(app: Application) -> None:
+    """Startup: registers the command menus and starts the worker and the update checker.
+
+    Menus are re-synced for every admin and allowed user on each start, so the menus match the database
+    and the code's command lists even after either changed while the bot was down.
+
+    Args:
+        app: The application being started.
+    """
     await app.bot.set_my_commands(STRANGER_COMMANDS, scope=BotCommandScopeDefault())
     for uid in [*access.ADMINS, *(u["id"] for u in access.all_users()["allowed"])]:
         await sync_commands(app.bot, uid)
+    # Keep references in bot_data: post_stop cancels them, and asyncio only weakly references tasks.
     app.bot_data["worker"] = asyncio.create_task(worker(app))
     app.bot_data["update_checker"] = asyncio.create_task(update_checker(app))
     log.info("bot ready; admins: %s, allowed users: %d", sorted(access.ADMINS) or "NONE (setup mode)",
              len(access.all_users()["allowed"]))
 
 
-UPDATE_CHECK_EVERY = 12 * 3600
+UPDATE_CHECK_EVERY = 12 * 3600  # seconds; CLI releases come at most a few times a week
 
 
 async def update_checker(app: Application) -> None:
-    """Tell the admins when a newer Codex / Claude Code is out (once per new version)."""
+    """Tells the admins when a newer Codex / Claude Code is out (once per new version).
+
+    The last version announced per tool is remembered in stats.json, so a restart or the next check
+    doesn't repeat the same notification.
+
+    Args:
+        app: The running application.
+    """
     await asyncio.sleep(60)  # let startup finish
     while True:
         try:
+            # Runs `--version` and `npm view` subprocesses: keep them off the event loop.
             for u in await asyncio.to_thread(updates.check):
                 key = f"update-notified:{u['tool']}"
                 if stats.recall(key) == u["latest"]:
@@ -552,21 +793,41 @@ async def update_checker(app: Application) -> None:
                 stats.remember(key, u["latest"])
                 log.info("notified admins: %s %s -> %s", u["tool"], u["installed"], u["latest"])
         except Exception:
+            # Network or npm hiccups must not kill the loop; try again next round.
             log.exception("update check failed")
         await asyncio.sleep(UPDATE_CHECK_EVERY)
 
 
 async def post_stop(app: Application) -> None:
+    """Shutdown: cancels the background tasks so they don't outlive the event loop.
+
+    Without this, the worker blocked in `queue.get()` was destroyed while pending, which logged
+    "Event loop is closed" errors on every stop.
+
+    Args:
+        app: The application being stopped.
+    """
     for name in ("worker", "update_checker"):
         if task := app.bot_data.get(name):
             task.cancel()
 
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Logs exceptions raised by handlers (python-telegram-bot's error-handler hook).
+
+    Args:
+        update: The update being handled, if any.
+        ctx: Handler context; `ctx.error` is the exception.
+    """
     log.error("update handling failed", exc_info=ctx.error)
 
 
 def main() -> None:
+    """Builds the application, registers the handlers and runs long polling until stopped.
+
+    Raises:
+        SystemExit: If TELEGRAM_BOT_TOKEN isn't set.
+    """
     if not config.TELEGRAM_BOT_TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN is not set (.env)")
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
@@ -578,6 +839,8 @@ def main() -> None:
     app.add_handler(CommandHandler("users", on_users))
     app.add_handler(CommandHandler("history", on_history))
     app.add_handler(CommandHandler("models", on_models))
+    # Order matters: the first matching handler wins, so the picker's `llm:` buttons must be registered
+    # before the catch-all admin-button handler.
     app.add_handler(CallbackQueryHandler(on_llm_button, pattern=r"^llm:"))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))

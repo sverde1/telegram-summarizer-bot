@@ -15,17 +15,40 @@ _lock = threading.Lock()  # one transcription at a time; the model stays loaded 
 
 
 def _load(device: str, compute_type: str):
-    from faster_whisper import WhisperModel
+    """Loads the Whisper model and proves it works with a real inference.
+
+    Args:
+        device: "cpu" or "cuda".
+        compute_type: ctranslate2 compute type, e.g. "int8" or "float16".
+
+    Returns:
+        The loaded `faster_whisper.WhisperModel`.
+
+    Raises:
+        Exception: Loading or the test inference failed (e.g. CUDA libraries missing).
+    """
+    from faster_whisper import WhisperModel  # imported here: slow import, only needed once a job transcribes
     m = WhisperModel(config.WHISPER_MODEL, device=device, compute_type=compute_type,
                      cpu_threads=config.WHISPER_CPU_THREADS)
     # Building the model succeeds even when CUDA libs are missing; the failure only shows at the
-    # first encode. So run a real 1-second inference now.
+    # first encode. So run a real 1-second inference now (16000 samples = 1 s at 16 kHz).
     segs, _ = m.transcribe(np.zeros(16000, dtype=np.float32), language=None)
-    list(segs)
+    list(segs)  # segments are a lazy generator: consuming it is what actually runs the model
     return m
 
 
 def get_model():
+    """Returns the Whisper model, loading it on first use.
+
+    It stays loaded for the life of the process: loading takes seconds, longer than transcribing a short
+    clip. If the configured GPU device fails, falls back to CPU int8 so transcription keeps working.
+
+    Returns:
+        The loaded `faster_whisper.WhisperModel`.
+
+    Raises:
+        Exception: The model couldn't be loaded on the CPU either.
+    """
     global _model
     if _model is None:
         device, ctype = config.WHISPER_DEVICE, config.WHISPER_COMPUTE_TYPE
@@ -42,7 +65,20 @@ def get_model():
 
 
 def _decode(path: str) -> np.ndarray:
-    """16 kHz mono float32 via ffmpeg (avoids faster-whisper's PyAV decoder, which breaks on new PyAV)."""
+    """Decodes an audio file to the 16 kHz mono float32 samples Whisper expects.
+
+    Uses ffmpeg rather than faster-whisper's own decoder: that one passes `metadata_errors` to
+    `av.open()`, which the PyAV version installed here no longer accepts.
+
+    Args:
+        path: Any audio or video file ffmpeg can read.
+
+    Returns:
+        The samples as a 1-D float32 array.
+
+    Raises:
+        RuntimeError: ffmpeg couldn't decode the file.
+    """
     p = subprocess.run([config.FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
                         "-ac", "1", "-ar", "16000", "-f", "f32le", "-"], capture_output=True, timeout=1800)
     if p.returncode != 0:
@@ -51,28 +87,51 @@ def _decode(path: str) -> np.ndarray:
 
 
 def transcribe(audio_path: str) -> tuple[list[tuple[float, str]], str, float]:
-    """Returns ([(start, text)], language, language_probability).
+    """Transcribes an audio file, detecting its language.
 
     Language is always auto-detected: forcing it (or using an English-only *.en model) on
     non-English audio makes whisper produce fluent, invented English instead of an error.
+    Also records the measured speed for ETA estimates.
+
+    Args:
+        audio_path: The audio file.
+
+    Returns:
+        ([(start_seconds, text)], language code, language probability). The list is empty when no
+        speech was found (e.g. music only).
+
+    Raises:
+        RuntimeError: The audio couldn't be decoded.
     """
     with _lock:
         model = get_model()
         t0 = time.monotonic()
         audio = _decode(audio_path)
+        # The voice-activity filter skips silence and music, where Whisper tends to hallucinate text.
         segments, info = model.transcribe(audio, language=None, vad_filter=True)
         cues = [(s.start, s.text.strip()) for s in segments if s.text.strip()]
         audio_sec = len(audio) / 16000
+        # Very short clips are dominated by fixed overhead and would skew the realtime factor.
         if audio_sec > 5:
             stats.record(speed_key(), (time.monotonic() - t0) / audio_sec)
     return cues, info.language, info.language_probability
 
 
 def speed_key() -> str:
+    """Returns the stats key for the measured speed of the configured device and model."""
     return f"whisper:{config.WHISPER_DEVICE}:{config.WHISPER_MODEL}"
 
 
 def estimate(audio_sec: float) -> float:
-    """Seconds to transcribe, from the measured realtime factor (+ model load if not loaded yet)."""
+    """Estimates how long transcribing will take.
+
+    Args:
+        audio_sec: Length of the audio in seconds.
+
+    Returns:
+        Seconds, from the measured realtime factor (+ model load if not loaded yet).
+    """
+    # Defaults until a real run is measured: rough realtime factors for `small` on CPU int8 vs a GPU.
+    # 15 s: a rough allowance for loading the model and its self-test, paid once per process.
     factor = stats.get(speed_key(), 0.5 if config.WHISPER_DEVICE == "cpu" else 0.05)
     return audio_sec * factor + (0 if _model else 15)
