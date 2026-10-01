@@ -35,6 +35,9 @@ CODEX_EFFORT = _env("CODEX_EFFORT", "medium")
 CLAUDE_CODE_MODEL = _env("CLAUDE_CODE_MODEL", "claude-opus-5-5")
 CLAUDE_MODEL = _env("CLAUDE_MODEL", "claude-opus-5-5")
 CLAUDE_EFFORT = _env("CLAUDE_EFFORT", "medium")
+# openai-api: OpenAI API key (pay per token, unlike the ChatGPT subscription Codex uses).
+OPENAI_MODEL = _env("OPENAI_MODEL", "gpt-6-sol")
+OPENAI_EFFORT = _env("OPENAI_EFFORT", "medium")
 
 # Whisper (speech-to-text). CPU by default; set WHISPER_DEVICE=cuda once a GPU is installed.
 WHISPER_DEVICE = _env("WHISPER_DEVICE", "cpu")  # cpu | cuda | auto

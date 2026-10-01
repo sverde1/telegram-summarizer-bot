@@ -192,6 +192,7 @@ BACKENDS = {  # id -> (display name, whose subscription/billing)
     "codex": ("Codex", "ChatGPT"),
     "claude-code": ("Claude Code", "Claude"),
     "api": ("Claude API", "Anthropic API key"),
+    "openai-api": ("OpenAI API", "OpenAI API key"),
 }
 BACKEND_NAMES = {k: v[0] for k, v in BACKENDS.items()}
 
@@ -207,13 +208,14 @@ CLAUDE_CODE_MODELS = [
 def available_backends() -> list[str]:
     """Returns the backends set up on this machine, default first.
 
-    Codex counts as set up once the bot's own login exists, Claude Code when `claude` is on PATH, the API
-    when a key is configured.
+    Codex counts as set up once the bot's own login exists, Claude Code when `claude` is on PATH, the APIs
+    when their key is configured.
     """
     ok = {
         "codex": (config.CODEX_HOME / "auth.json").exists(),
         "claude-code": shutil.which("claude") is not None,
         "api": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "openai-api": bool(os.environ.get("OPENAI_API_KEY")),
     }
     order = [config.LLM_BACKEND] + [b for b in BACKENDS if b != config.LLM_BACKEND]
     return [b for b in order if ok.get(b)]
@@ -227,7 +229,7 @@ def _backend(backend: str | None) -> str:
     """
     backend = backend or config.LLM_BACKEND
     if backend not in BACKENDS:
-        raise SummaryError(f"Unknown LLM backend {backend!r} (codex | claude-code | api)")
+        raise SummaryError(f"Unknown LLM backend {backend!r} (codex | claude-code | api | openai-api)")
     return backend
 
 
@@ -235,7 +237,7 @@ def conversation(backend: str | None = None, model: str | None = None) -> "Conve
     """Starts a conversation with a user's chosen backend and model.
 
     Args:
-        backend: "codex", "claude-code" or "api"; None = LLM_BACKEND.
+        backend: "codex", "claude-code", "api" or "openai-api"; None = LLM_BACKEND.
         model: Model id; None = that backend's default model.
 
     Returns:
@@ -245,7 +247,8 @@ def conversation(backend: str | None = None, model: str | None = None) -> "Conve
         SummaryError: Unknown backend, or Codex isn't logged in.
     """
     backend = _backend(backend)
-    conv = {"codex": CodexConversation, "claude-code": ClaudeCodeConversation, "api": ApiConversation}[backend]()
+    conv = {"codex": CodexConversation, "claude-code": ClaudeCodeConversation, "api": ApiConversation,
+            "openai-api": OpenAIConversation}[backend]()
     conv.backend, conv.requested = backend, model or ""
     return conv
 
@@ -259,7 +262,8 @@ def default_model(backend: str | None = None) -> str:
     from . import stats
     backend = _backend(backend)
     return ({"codex": config.CODEX_MODEL, "claude-code": config.CLAUDE_CODE_MODEL,
-             "api": config.CLAUDE_MODEL}.get(backend) or stats.recall(f"model:{backend}"))
+             "api": config.CLAUDE_MODEL, "openai-api": config.OPENAI_MODEL}.get(backend)
+            or stats.recall(f"model:{backend}"))
 
 
 def list_models(backend: str | None = None) -> list[dict]:
@@ -269,7 +273,7 @@ def list_models(backend: str | None = None) -> list[dict]:
         [{id, name, description}] dicts.
 
     Raises:
-        SummaryError: The Claude API model list couldn't be fetched.
+        SummaryError: An API's model list couldn't be fetched.
     """
     backend = _backend(backend)
     if backend == "codex":
@@ -288,12 +292,42 @@ def list_models(backend: str | None = None) -> list[dict]:
                  "description": m.get("description") or ""} for m in models]
     if backend == "claude-code":
         return CLAUDE_CODE_MODELS
+    if backend == "openai-api":
+        return _openai_models()
     import anthropic
     try:
         return [{"id": m.id, "name": m.display_name, "description": ""}
                 for m in anthropic.Anthropic().models.list(limit=50)]
     except anthropic.AnthropicError as e:
         raise SummaryError(f"Couldn't list Claude API models: {e}")
+
+
+# The OpenAI model list also holds embedding, speech, image and realtime models; none of these can
+# take a thumbnail and return a JSON summary.
+_OPENAI_NOT_CHAT = ("audio", "realtime", "tts", "transcribe", "image", "embedding", "search", "moderation",
+                    "instruct", "dall-e", "whisper", "babbage", "davinci")
+
+
+def _openai_models() -> list[dict]:
+    """Lists the OpenAI API models usable for summaries, best first.
+
+    The API's model list carries no descriptions or ranking, so models Codex also lists are taken in Codex's
+    order with its descriptions (same model family); other GPT models follow, newest first.
+
+    Raises:
+        SummaryError: The model list couldn't be fetched (e.g. invalid key).
+    """
+    import openai
+    try:
+        api = sorted(openai.OpenAI().models.list(), key=lambda m: m.created, reverse=True)
+    except openai.OpenAIError as e:
+        raise SummaryError(f"Couldn't list OpenAI API models: {e}")
+    ids = [m.id for m in api if m.id.startswith("gpt-") and not any(w in m.id for w in _OPENAI_NOT_CHAT)]
+    known = []
+    if config.LLM_BACKEND == "codex" or (config.CODEX_HOME / "models_cache.json").exists():
+        known = [m for m in list_models("codex") if m["id"] in ids]
+    seen = {m["id"] for m in known}
+    return known + [{"id": i, "name": i, "description": ""} for i in ids if i not in seen]
 
 
 def llm_label(backend: str | None = None, model: str = "") -> str:
@@ -672,3 +706,89 @@ class ApiConversation(Conversation):
         # stay valid on turn 2.
         self.messages.append({"role": "assistant", "content": msg.content})
         return _parse("".join(b.text for b in msg.content if b.type == "text"), schema)
+
+
+# ---------- openai-api (OpenAI API key) ----------
+
+_openai_client = None  # created on first use: the bot must start even without an API key
+
+
+class OpenAIConversation(Conversation):
+    """The OpenAI API (Responses API): no tools at all, so nothing to sandbox.
+
+    Turn 2 continues server-side with previous_response_id, so the transcript isn't sent (or billed as
+    fresh input) again. Responses are stored by OpenAI for that; close() deletes them.
+    """
+
+    def __init__(self):
+        """Prepares an empty conversation."""
+        self.response_ids: list[str] = []
+        self.system = ""
+
+    def _send(self, system, text, images, schema, first):
+        """Sends one turn and returns its parsed JSON answer.
+
+        Raises:
+            SummaryError: API error, refusal, or an incomplete answer.
+        """
+        import openai
+
+        global _openai_client
+        if first:
+            self.system = system
+        content: list[dict] = []
+        for path, label in images:
+            data = base64.standard_b64encode(path.read_bytes()).decode()
+            content += [{"type": "input_text", "text": f"Image ({label}):"},
+                        {"type": "input_image", "image_url": f"data:image/jpeg;base64,{data}", "detail": "auto"}]
+        content.append({"type": "input_text", "text": text})
+        try:
+            _openai_client = _openai_client or openai.OpenAI()  # reads OPENAI_API_KEY
+            resp = _openai_client.responses.create(
+                model=self.requested or config.OPENAI_MODEL,
+                # Instructions aren't carried over by previous_response_id, so every turn resends them.
+                instructions=self.system,
+                input=[{"role": "user", "content": content}],
+                previous_response_id=self.response_ids[-1] if self.response_ids else None,
+                store=True,  # needed for previous_response_id; deleted again in close()
+                reasoning={"effort": config.OPENAI_EFFORT},
+                text={"format": {"type": "json_schema", "name": "video_summary", "schema": schema,
+                                 "strict": True}},
+                max_output_tokens=16000,
+                timeout=900,
+            )
+        except openai.AuthenticationError:
+            raise SummaryError("OpenAI API key is missing or invalid (OPENAI_API_KEY in .env).")
+        except openai.BadRequestError as e:
+            raise SummaryError(f"OpenAI rejected the request: {e.message}")
+        except openai.RateLimitError:
+            raise SummaryError("OpenAI rate limit or quota hit; try again later.")
+        except openai.APIStatusError as e:
+            raise SummaryError(f"OpenAI API error {e.status_code}; try again later.")
+        except openai.APIConnectionError:
+            raise SummaryError("Couldn't reach the OpenAI API (network error).")
+        except openai.OpenAIError as e:  # e.g. no key configured at all
+            raise SummaryError(f"OpenAI client error: {e}")
+
+        self.response_ids.append(resp.id)
+        self.model = resp.model
+        u = resp.usage
+        log.info("openai %s: in=%s cached=%s out=%s status=%s", resp.model, u and u.input_tokens,
+                 u and u.input_tokens_details.cached_tokens, u and u.output_tokens, resp.status)
+        refusal = next((c.refusal for item in resp.output if item.type == "message"
+                        for c in item.content if c.type == "refusal"), None)
+        if refusal:
+            raise SummaryError(f"OpenAI declined to summarize this video: {refusal[:200]}")
+        if resp.status != "completed":
+            reason = resp.incomplete_details.reason if resp.incomplete_details else resp.status
+            raise SummaryError(f"OpenAI's answer is incomplete ({reason}).")
+        return _parse(resp.output_text, schema)
+
+    def close(self):
+        """Deletes the stored responses: video content shouldn't linger on OpenAI's side."""
+        import openai
+        for rid in self.response_ids:
+            try:
+                _openai_client.responses.delete(rid)
+            except openai.OpenAIError as e:
+                log.warning("couldn't delete OpenAI response %s: %s", rid, e)

@@ -29,7 +29,7 @@ running on your ChatGPT or Claude subscription, inside a sandbox.
   than said ("this book…"); they're sent in the same conversation and the summary is revised. Speechless
   videos get frames straight away; carousels send their slides.
 - **Choice of AI per user** (`/models`): Codex (ChatGPT subscription) or Claude Code (Claude
-  subscription), then a model. Default: Codex `gpt-6-sol`.
+  subscription), or the Claude / OpenAI APIs with an API key, then a model. Default: Codex `gpt-6-sol`.
 - **Live status with ETA** while it works; per-step timings under the result.
 - **Multi-user with admin approval**: `/start` sends the admin an Allow / Deny request.
 - **Cache**: a video is downloaded and transcribed once; summaries are kept per model.
@@ -42,7 +42,7 @@ running on your ChatGPT or Claude subscription, inside a sandbox.
 - At least one LLM:
   - [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) and a ChatGPT plan, or
   - [Claude Code](https://code.claude.com) logged in with a Claude plan, or
-  - an Anthropic API key.
+  - an Anthropic or OpenAI API key (billed per token).
 
 No system ffmpeg is needed (`imageio-ffmpeg` provides one; a system ffmpeg is used if present), and
 yt-dlp's YouTube JavaScript runtime (deno) comes from pip. No GPU needed.
@@ -101,7 +101,8 @@ sandboxed process never sees your own Codex sessions. Follow the printed link an
 **Claude Code (Claude plan):** install it from [code.claude.com](https://code.claude.com) and run
 `claude` once to log in. The bot uses the `claude` command on `PATH`.
 
-**Claude API:** set `ANTHROPIC_API_KEY` in `.env`.
+**Claude API / OpenAI API:** set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in `.env`. These bill per token
+on your API account, separately from ChatGPT or Claude plans.
 
 ### 6. First start and becoming admin
 
@@ -150,11 +151,13 @@ The database migrates itself on start.
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | – | Bot token (required). |
 | `ADMIN_USER_IDS` | – | Comma-separated admin user ids. Empty = setup mode. |
-| `LLM_BACKEND` | `codex` | Default provider: `codex`, `claude-code` or `api`. |
+| `LLM_BACKEND` | `codex` | Default provider: `codex`, `claude-code`, `api` (Claude) or `openai-api`. |
 | `CODEX_MODEL` | `gpt-6-sol` | Default Codex model (empty = Codex's own default). |
 | `CODEX_EFFORT` / `CLAUDE_EFFORT` | `medium` | Reasoning effort. |
 | `CLAUDE_CODE_MODEL` / `CLAUDE_MODEL` | `claude-opus-5-5` | Default model for Claude Code / the API. |
-| `ANTHROPIC_API_KEY` | – | Enables the `api` provider. |
+| `ANTHROPIC_API_KEY` | – | Enables the Claude API provider. |
+| `OPENAI_API_KEY` | – | Enables the OpenAI API provider. |
+| `OPENAI_MODEL` / `OPENAI_EFFORT` | `gpt-6-sol` / `medium` | Default model and reasoning effort for the OpenAI API. |
 | `SUMMARY_LANGUAGE` | `English` | Language of the summaries. |
 | `WHISPER_DEVICE` | `cpu` | `cpu` or `cuda`. |
 | `WHISPER_MODEL` | `small` | Multilingual models only (`small`, `medium`, `large-v3`). |
@@ -207,6 +210,7 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 | Codex | `codex exec` inside `bwrap`: read-only `/usr` and certificates, the bot's own `CODEX_HOME`, and this job's images. No `/home`, `.env` or repo. Browser, computer use, apps and web search disabled; Codex's own sandbox read-only. |
 | Claude Code | `claude -p --tools ""`: no tools, no MCP servers; images are sent inline. |
 | Claude API | A plain Messages call with no tools. |
+| OpenAI API | A plain Responses call with no tools. Turn 2 continues server-side via `previous_response_id`; the stored responses are deleted after each job. |
 
 - Who submitted what is visible only to admins. A user is told a result came from the cache only if
   they requested that video themselves before (a cached reply is still faster, which can hint at it).
