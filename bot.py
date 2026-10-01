@@ -16,8 +16,8 @@ from telegram import (BotCommand, BotCommandScopeChat, BotCommandScopeDefault, I
                       InlineKeyboardMarkup, Update)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
-from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
-                          filters)
+from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, CommandHandler, ContextTypes,
+                          MessageHandler, filters)
 
 import access
 from summarizer import config, db, pipeline, stats, summarize, updates
@@ -285,6 +285,40 @@ async def on_models(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(text, reply_markup=buttons)
 
 
+def _private(update: Update) -> bool:
+    """Whether the update comes from a private chat with the bot.
+
+    The bot is for private chats only: in a group, summaries, /history and /users would be shown to every
+    member. Message handlers filter on this; button handlers call it (buttons have no chat-type filter).
+    """
+    return bool(update.effective_chat and update.effective_chat.type == "private")
+
+
+async def on_my_chat_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Leaves any group or channel the bot is added to, and tells the admins who added it.
+
+    BotFather's "Allow Groups" setting should prevent this (see README); this is the fallback if it's on.
+    """
+    change = update.my_chat_member
+    chat = change.chat
+    if chat.type == "private" or change.new_chat_member.status in ("left", "kicked"):
+        return  # private chats are normal, and leaving needs no reaction
+    who = change.from_user
+    try:
+        await ctx.bot.leave_chat(chat.id)
+    except TelegramError as e:
+        log.error("couldn't leave chat %s: %s", chat.id, e)
+    log.warning("added to %s %r by %s; left", chat.type, chat.title, who and who.id)
+    text = (f"⚠️ {access.label(who.id, {'name': who.full_name, 'username': who.username}) if who else 'Someone'} "
+            f"added the bot to the {chat.type} “{chat.title or chat.id}”. I left it: the bot only works in "
+            "private chats.")
+    for admin in access.ADMINS:
+        try:
+            await ctx.bot.send_message(admin, text)
+        except TelegramError as e:
+            log.warning("couldn't notify admin %s: %s", admin, e)
+
+
 async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles taps in the /models picker by editing the same message in place.
 
@@ -294,7 +328,7 @@ async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     uid = q.from_user.id
     # Buttons can outlive access (e.g. the user was removed after /models was shown): re-check on every tap.
-    if access.state(uid) not in ("admin", "allowed"):
+    if not _private(update) or access.state(uid) not in ("admin", "allowed"):
         await q.answer()
         return
     parts = (q.data or "").split(":", 3)  # llm:home | llm:default | llm:b:<backend> | llm:m:<backend>:<model>
@@ -360,7 +394,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     q = update.callback_query
     # Only the admins get these buttons, but callback data can be forged: check on every tap.
-    if not access.is_admin(q.from_user.id):
+    if not _private(update) or not access.is_admin(q.from_user.id):
         await q.answer("Admins only.")
         return
     action, _, uid_s = (q.data or "").partition(":")
@@ -926,7 +960,9 @@ def add_handlers(app: Application) -> None:
     app.add_error_handler(on_error)
     # New messages only: an edited message would re-run a command (and edited ones carry no
     # update.message, which the handlers use to reply).
-    new = filters.UpdateType.MESSAGE
+    # Private chats only (see _private).
+    new = filters.UpdateType.MESSAGE & filters.ChatType.PRIVATE
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     for name, handler in [("start", on_start), ("help", on_help), ("again", command(use_cache=False)),
                           ("transcript", command(transcript_only=True)), ("users", on_users),
                           ("history", on_history), ("models", on_models)]:

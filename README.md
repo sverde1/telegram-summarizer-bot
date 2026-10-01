@@ -131,6 +131,9 @@ nothing else is needed system-wide. The Whisper model (~500 MB for `small`) down
 
 1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot` and follow the prompts.
 2. Copy the token it gives you.
+3. Turn off group chats, since the bot is for private chats only: in BotFather send `/mybots`, pick the bot,
+   then **Bot Settings → Allow Groups? → Turn groups off**. (If it's added to a group anyway, it leaves at
+   once and tells the admins who added it.)
 
 ### 4. Configure
 

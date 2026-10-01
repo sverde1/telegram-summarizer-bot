@@ -195,6 +195,14 @@ def callback_update(uid: int, data: str, *, chat_type: str = "private") -> dict:
                     "chat": {"id": uid if chat_type == "private" else -100, "type": chat_type}}}}
 
 
+def my_chat_member_update(by_uid: int, chat_type: str = "group", status: str = "member") -> dict:
+    """Builds the update Telegram sends when the bot is added to (or removed from) a chat."""
+    member = {"user": {"id": 999, "is_bot": True, "first_name": "Test bot"}}
+    return {"update_id": next(_update_ids), "my_chat_member": {
+        "chat": {"id": -100, "type": chat_type, "title": "Family chat"}, "from": _user(by_uid, "Eve"), "date": 0,
+        "old_chat_member": {**member, "status": "left"}, "new_chat_member": {**member, "status": status}}}
+
+
 @pytest.fixture
 async def app(telegram):
     """A real python-telegram-bot Application with the bot's handlers, talking to the fake Telegram.
