@@ -29,6 +29,26 @@ class NotProcessable(MediaError):
     """The video exists but can't be summarized (e.g. a live stream). The message is shown as-is."""
 
 
+class Blocked(MediaError):
+    """YouTube/TikTok is refusing this server's downloads (rate limit, bot check, IP block).
+
+    Never swallowed by the steps that carry on after a failed download: without it the bot would quietly
+    summarize with no transcript.
+    """
+
+
+# Error texts that mean the platform blocks or throttles this server (not a problem with the video itself).
+# Note "Sign in to confirm your age" is age-restriction, not a block: "not a bot" is the bot check.
+_BLOCKED_PATTERNS = ("http error 429", "too many requests", "not a bot", "ip address is blocked",
+                     "rate-limit", "rate limit", "blocked from accessing")
+
+
+def _is_blocked(message: str) -> bool:
+    """Whether a download error means the platform is blocking this server."""
+    text = message.lower().replace("’", "'")
+    return any(p in text for p in _BLOCKED_PATTERNS)
+
+
 def describe(e: MediaError) -> str:
     """Turns a download error (yt-dlp's raw last error line) into a message for the user.
 
@@ -74,7 +94,10 @@ def _run(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     if p.returncode != 0:
         err = (p.stderr or p.stdout).strip().splitlines()
         msg = next((ln for ln in reversed(err) if "ERROR" in ln), err[-1] if err else "unknown error")
-        raise MediaError(msg.replace("ERROR: ", ""))
+        msg = msg.replace("ERROR: ", "")
+        if _is_blocked(msg):
+            raise Blocked(msg)
+        raise MediaError(msg)
     return p
 
 
@@ -266,6 +289,8 @@ def fetch_captions(video: Video, meta: dict, workdir: Path) -> tuple[list[tuple[
     try:
         _ytdlp("--skip-download", flag, "--sub-langs", lang, "--sub-format", "vtt/best",
                "-o", str(workdir / "cap.%(ext)s"), video.url, timeout=120)
+    except Blocked:
+        raise  # a ban affects every download: report it instead of carrying on without captions
     except MediaError as e:
         log.warning("caption download failed: %s", e)
         return None
@@ -423,6 +448,8 @@ def download_carousel(video: Video, workdir: Path) -> list[Path]:
         # Zero-padded names so sorting by name keeps the slide order past 9 slides.
         _run([config.GALLERY_DL, "--sleep-request", "1", "-D", str(out),
               "-f", "{num:>02}.{extension}", video.url], timeout=300)  # also fetches the music; dropped below
+    except Blocked:
+        raise
     except MediaError as e:
         log.warning("gallery-dl failed: %s", e)
     imgs = sorted(p for p in out.iterdir() if p.suffix.lower() in IMAGE_EXTS)

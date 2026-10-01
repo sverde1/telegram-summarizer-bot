@@ -56,6 +56,15 @@ class PipelineError(RuntimeError):
         self.detail = detail
 
 
+class Blocked(PipelineError):
+    """The platform is blocking this server's downloads; the admins are told (see bot)."""
+
+    def __init__(self, message: str, detail: str | None = None, platform: str = ""):
+        """Stores the user message, the raw error and the platform that blocks."""
+        super().__init__(message, detail)
+        self.platform = platform
+
+
 def _fmt_duration(sec: float) -> str:
     """Format seconds as m:ss, or h:mm:ss from one hour up.
 
@@ -222,6 +231,11 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
     db.start_video(video.platform, video.video_id, video.url)
     try:
         return _process(video, progress, cached, transcript_only, t0, backend, model)
+    except media.Blocked as e:
+        db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
+        name = {"youtube": "YouTube", "tiktok": "TikTok"}.get(video.platform, video.platform)
+        raise Blocked(f"🚫 {name} is currently blocking downloads from this bot's server (too many requests). "
+                      "Please try again later.", detail=str(e), platform=video.platform)
     except Exception as e:
         db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
         raise
@@ -264,6 +278,8 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         meta = media.probe(video)
         took("lookup", t)
         db.update_video(video.platform, video.video_id, meta=meta, title=meta["title"][:300])
+    except media.Blocked:
+        raise  # handled in run(): a ban has its own message and admin notice
     except media.MediaError as e:
         raise PipelineError(media.describe(e), detail=str(e))
     dur = meta["duration"] or 0
@@ -443,6 +459,8 @@ def _frames(video, meta, cues, moments: list[dict], workdir, st: Status, notes, 
         # Phrase matches ("this book", "as you can see") back up the LLM's choice of moments.
         images = frames.extract(vid, dur, times + frames.regex_moments(cues), workdir, sweep=sweep)
         vid.unlink(missing_ok=True)
+    except media.Blocked:
+        raise
     except media.MediaError as e:
         notes.append(f"frames unavailable: {e}")
         st.ok("⚠️ Couldn't get video frames, keeping the transcript-only summary")
@@ -473,6 +491,8 @@ def _whisper(video, meta, workdir, st: Status, notes, why: str, rest: float) -> 
             _eta_audio(dur) + transcribe.estimate(dur) + rest)
     try:
         audio = media.download_audio(video, workdir)
+    except media.Blocked:
+        raise
     except media.MediaError as e:
         notes.append(f"audio download failed: {e}")
         return None

@@ -823,6 +823,8 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
         if detail:
             log.warning("job %s failed: %s (%s)", job.request_id, e, detail)
         await _fail(app, job, str(e), detail if access.is_admin(job.user_id) else None)
+        if isinstance(e, pipeline.Blocked):
+            await _notify_admins_of_block(app, e)
     except Exception as e:  # report, don't crash the worker
         log.exception("job failed: %s", job.url)
         detail = f"{type(e).__name__}: {e}"
@@ -876,6 +878,28 @@ async def _notify_admins_of_error(app: Application, job: Job, e: Exception) -> N
     _admin_error_noticed[kind] = now
     who = access.label(job.user_id, db.get_user(job.user_id))
     text = f"⚠️ Unexpected error in a job for {who}\nLink: {job.url}\nDetails: {kind}: {str(e)[:500]}"
+    for admin in access.ADMINS:
+        try:
+            await app.bot.send_message(admin, text, disable_web_page_preview=True)
+        except TelegramError as err:
+            log.warning("couldn't notify admin %s: %s", admin, err)
+
+
+BLOCK_NOTICE_EVERY = 6 * 3600  # seconds: a block lasts hours; one notice per platform in that time is enough
+_block_noticed: dict[str, float] = {}  # platform -> when the admins were last told
+
+
+async def _notify_admins_of_block(app: Application, e: "pipeline.Blocked") -> None:
+    """Tells the admins that YouTube/TikTok is blocking the server (at most once per platform per 6 h).
+
+    They may need to wait it out, update yt-dlp, or set up cookies/a proxy.
+    """
+    now = time.monotonic()
+    if now - _block_noticed.get(e.platform, -BLOCK_NOTICE_EVERY) < BLOCK_NOTICE_EVERY:
+        return
+    _block_noticed[e.platform] = now
+    text = (f"🚫 {e.platform} is blocking downloads from this server. Users are being told to try later.\n"
+            f"Raw error: {(e.detail or '')[:500]}\nOptions: wait, update yt-dlp, or add cookies/a proxy.")
     for admin in access.ADMINS:
         try:
             await app.bot.send_message(admin, text, disable_web_page_preview=True)

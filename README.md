@@ -307,6 +307,8 @@ Also there: `codex-home/` (the bot's Codex login), `stats.json` (measured speeds
 
 ## Maintenance
 
+- **Blocks:** if YouTube or TikTok throttle or block the server ("too many requests", "confirm you're not a
+  bot"), users are told to try later and the admins get the raw error, at most once per platform every 6 h.
 - **yt-dlp / gallery-dl** break when YouTube or TikTok change. The weekly timer runs
   `deploy/update-extractors.sh` to upgrade them; no restart needed.
 - **Codex / Claude Code** are installed outside the venv. Every 12 h the bot checks npm for newer
