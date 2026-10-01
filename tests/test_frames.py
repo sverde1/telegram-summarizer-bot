@@ -29,3 +29,20 @@ def test_extract_moments_and_sweep(tiny_video, tmp_path):
 def test_identical_frames_collapse(blue_video, tmp_path):
     got = frames.extract(blue_video, 4.0, [0.2, 1.0, 2.0], tmp_path, sweep=True)
     assert len(got) == 1
+
+
+def test_moments_are_capped_before_any_grab():
+    many = [i * 0.5 for i in range(10000)]  # e.g. "look at this" every half second for over an hour
+    planned = frames.plan_moments(many, duration=5000)
+    assert len(planned) <= config.MAX_FRAMES
+    assert planned == sorted(planned) and planned[0] == 0 and planned[-1] > 4000  # spread, not truncated
+    assert all(b - a >= frames.MOMENT_GAP for a, b in zip(planned, planned[1:]))
+    assert frames.plan_moments([-5, 1, 2, 9999], duration=100) == [1]
+
+
+def test_grabs_are_bounded(tiny_video, tmp_path, monkeypatch):
+    calls = []
+    real = frames._grab
+    monkeypatch.setattr(frames, "_grab", lambda *a: calls.append(1) or real(*a))
+    frames.extract(tiny_video, 4.0, [0.1 * i for i in range(500)], tmp_path, sweep=False)
+    assert len(calls) <= 2 * config.MAX_FRAMES

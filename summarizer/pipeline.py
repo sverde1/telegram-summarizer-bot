@@ -468,7 +468,8 @@ def _frames(video, meta, cues, moments: list[dict], workdir, st: Status, notes, 
     try:
         vid = media.download_video(video, workdir)
         # Phrase matches ("this book", "as you can see") back up the LLM's choice of moments.
-        images = frames.extract(vid, dur, times + frames.regex_moments(cues), workdir, sweep=sweep)
+        moments_ = times[:frames.MAX_MOMENTS_EACH] + frames.regex_moments(cues)[:frames.MAX_MOMENTS_EACH]
+        images = frames.extract(vid, dur, moments_, workdir, sweep=sweep)
         vid.unlink(missing_ok=True)
     except media.Blocked:
         raise

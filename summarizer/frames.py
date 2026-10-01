@@ -89,7 +89,8 @@ def _sweep(video: Path, interval: float, fdir: Path) -> list[tuple[float, Path]]
     try:
         proc.run([config.FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
                   "-vf", f"fps=1/{interval:.3f},scale='min(1280,iw)':-2", "-q:v", "2",
-                  str(fdir / "s_%04d.jpg")], timeout=900)
+                  # Safety net on top of the interval choice: never write more than this many files.
+                  "-frames:v", str(SWEEP_FRAMES + 5), str(fdir / "s_%04d.jpg")], timeout=900)
     except proc.ProcTimeout:
         pass  # keep whatever frames were written before the time ran out
     return [(i * interval, p) for i, p in enumerate(sorted(fdir.glob("s_*.jpg")))]
@@ -113,6 +114,31 @@ def _spread(items: list, n: int) -> list:
     if n <= 1:
         return items[:n]
     return [items[round(i * (len(items) - 1) / (n - 1))] for i in range(n)]
+
+
+SWEEP_FRAMES = 40
+MAX_MOMENTS_EACH = 12  # from the LLM and from phrase matching, each (the prompt also asks the LLM for ≤ 12)
+MOMENT_GAP = 3.0  # seconds: moments closer than this would grab overlapping frames
+
+
+def plan_moments(moments: list[float], duration: float) -> list[float]:
+    """Turns raw moments into the few worth grabbing, before any ffmpeg call.
+
+    Without this, a video that keeps saying "look at this" (or an LLM listing dozens of moments) would start
+    two ffmpeg processes per moment, thousands for a long video, before the frame limit applied.
+
+    Args:
+        moments: Seconds from the LLM and from phrase matching (any order, maybe duplicated).
+        duration: Video length; moments outside it are dropped.
+
+    Returns:
+        At most config.MAX_FRAMES moments, sorted, at least MOMENT_GAP apart, spread over the video.
+    """
+    kept: list[float] = []
+    for m in sorted(t for t in moments if 0 <= t < duration):
+        if not kept or m - kept[-1] >= MOMENT_GAP:
+            kept.append(m)
+    return _spread(kept, config.MAX_FRAMES)
 
 
 def extract(video: Path, duration: float, moments: list[float], workdir: Path,
@@ -139,14 +165,15 @@ def extract(video: Path, duration: float, moments: list[float], workdir: Path,
     fdir.mkdir(exist_ok=True)
 
     targeted: list[tuple[float, Path]] = []
-    for m in sorted(set(moments)):
+    for m in plan_moments(moments, duration):
         for t in (m + 1, m + 3):
             out = fdir / f"t_{t:08.2f}.jpg"
             if t < duration and _grab(video, t, out):
                 targeted.append((t, out))
-    # About 40 frames over the whole video, but never denser than every 2 s (a 10-second clip would
-    # otherwise give frames 0.25 s apart, all identical) or sparser than every 20 s.
-    swept = _sweep(video, min(max(duration / 40, 2), 20), fdir) if sweep else []
+    # About 40 frames spread over the whole video, but never denser than every 2 s (a 10-second clip would
+    # otherwise give frames 0.25 s apart, all identical). No upper limit on the interval: a fixed maximum
+    # would give a long video hundreds of frames, or, capped, only cover its beginning.
+    swept = _sweep(video, max(duration / SWEEP_FRAMES, 2), fdir) if sweep else []
 
     def dedup(frames, against):
         """Drops frames that look like an already kept one.
