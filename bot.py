@@ -75,6 +75,11 @@ class Job:
 queue: asyncio.Queue[Job] = asyncio.Queue()
 
 
+MAX_PENDING = 10  # open access requests; more is a flood of throwaway accounts, not family and friends
+PENDING_REPLY_EVERY = 600  # seconds between "still waiting for approval" replies to the same user
+_pending_replied: dict[int, float] = {}  # user id -> when they last got that reply
+
+
 async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = False) -> bool:
     """Checks whether the user may use the bot, and handles everyone who may not.
 
@@ -101,17 +106,23 @@ async def guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE, request: bool = 
             await msg.reply_text(f"Setup: your Telegram user id is {user.id}. Add ADMIN_USER_IDS={user.id} "
                                  "to .env and restart the bot.")
         return False
+    # Below, everyone who can't use the bot is answered sparingly: each reply costs a Telegram call on the
+    # single update-processing path, so a spammer would otherwise slow the bot down for everyone.
     if st == "blocked":
-        log.info("ignored blocked user %s", user.id)
-        return False
+        return False  # silently, and without a log line per message
     if st == "pending":
-        # Already asked: don't notify the admins a second time.
-        if msg:
+        # Already asked (admins were notified once); remind them at most every PENDING_REPLY_EVERY seconds.
+        now = time.monotonic()
+        if msg and now - _pending_replied.get(user.id, -PENDING_REPLY_EVERY) >= PENDING_REPLY_EVERY:
+            _pending_replied[user.id] = now
             await msg.reply_text("⏳ Your access request is waiting for the admin's approval.")
         return False
     if not request:
+        return False  # strangers only get an answer to /start, the one command their menu shows
+    if len(access.all_users()["pending"]) >= MAX_PENDING:
+        log.warning("access request from %s refused: %d requests already pending", user.id, MAX_PENDING)
         if msg:
-            await msg.reply_text("🔒 This is a private bot. Send /start to request access.")
+            await msg.reply_text("🔒 This bot isn't accepting new access requests right now. Please try later.")
         return False
     info = access.set_state(user.id, "pending", user.full_name, user.username)
     log.warning("access request from %s", access.label(user.id, info))

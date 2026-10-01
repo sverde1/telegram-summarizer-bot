@@ -68,6 +68,7 @@ def fresh_state(tmp_path, monkeypatch):
     db.sync_admins(access.ADMINS)
     monkeypatch.setattr(stats, "_FILE", tmp_path / "stats.json")
     monkeypatch.setattr(bot, "queue", asyncio.Queue())
+    monkeypatch.setattr(bot, "_pending_replied", {})
 
 
 @pytest.fixture(autouse=True)

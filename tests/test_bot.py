@@ -14,9 +14,10 @@ STRANGER, FRIEND = 50, 60
 
 # ---------- access flows ----------
 
-async def test_stranger_message_is_told_to_send_start(app, telegram):
+async def test_stranger_messages_other_than_start_get_no_reply(app, telegram):
     await send(app, msg_update(STRANGER, "hello"))
-    assert telegram.texts() == ["🔒 This is a private bot. Send /start to request access."]
+    await send(app, msg_update(STRANGER, "/history"))
+    assert telegram.texts() == []
     assert access.state(STRANGER) is None
 
 
