@@ -541,11 +541,12 @@ async def update_checker(app: Application) -> None:
                 key = f"update-notified:{u['tool']}"
                 if stats.recall(key) == u["latest"]:
                     continue
-                text = (f"⬆️ {u['tool']} update available: {u['installed']} → {u['latest']}\n"
-                        f"New models may need it. On the bot's machine run:\n{u['command']}")
+                text = (f"⬆️ {html.escape(u['tool'])} update available: {u['installed']} → {u['latest']}\n"
+                        f"New models may need it. On the bot's machine run:\n"
+                        f"<pre>{html.escape(u['command'])}</pre>")  # tap to copy, and no @openai link
                 for admin in access.ADMINS:
                     try:
-                        await app.bot.send_message(admin, text)
+                        await app.bot.send_message(admin, text, parse_mode=ParseMode.HTML)
                     except (BadRequest, Forbidden) as e:
                         log.warning("couldn't notify admin %s: %s", admin, e)
                 stats.remember(key, u["latest"])
