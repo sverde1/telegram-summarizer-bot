@@ -149,9 +149,12 @@ def sync_admins(admin_ids: set[int]) -> None:
         for uid in admin_ids:
             c.execute("""INSERT INTO users (id, status, created_at, updated_at) VALUES (?, 'admin', ?, ?)
                          ON CONFLICT(id) DO UPDATE SET status='admin'""", (uid, now, now))
-        # With no admins (setup mode) the list would be empty, and "NOT IN ()" is a syntax error.
-        # "NOT IN (NULL)" is never true, so nothing is deleted then.
-        placeholders = ",".join("?" * len(admin_ids)) or "NULL"
+        if not admin_ids:
+            # Setup mode: nobody is admin. (Can't use the query below: "NOT IN ()" is a syntax error, and
+            # "NOT IN (NULL)" is never true, so it would keep former admins' rows.)
+            c.execute("DELETE FROM users WHERE status='admin'")
+            return
+        placeholders = ",".join("?" * len(admin_ids))
         c.execute(f"DELETE FROM users WHERE status='admin' AND id NOT IN ({placeholders})", tuple(admin_ids))
 
 

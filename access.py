@@ -37,7 +37,9 @@ def state(uid: int) -> str | None:
     if uid in ADMINS:
         return "admin"
     u = db.get_user(uid)
-    return u["status"] if u else None
+    if not u or u["status"] == "admin":  # an admin row for someone no longer in .env grants nothing
+        return None
+    return u["status"]
 
 
 def set_state(uid: int, new: str | None, name: str | None = None, username: str | None = None) -> dict | None:
