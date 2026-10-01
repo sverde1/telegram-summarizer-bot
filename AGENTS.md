@@ -32,20 +32,28 @@ service on a single machine with no GPU.
 ## Running and checking changes
 
 ```bash
-.venv/bin/python -c "import bot"                       # imports cleanly
+.venv/bin/pip install -r requirements-dev.txt          # once: pytest, pytest-xdist, pytest-asyncio
+.venv/bin/pytest                                       # the suite, in parallel on all cores
+.venv/bin/pytest -n0 tests/test_bot.py -k progress     # one test, no parallelism (debugging, --pdb)
+.venv/bin/pytest -m slow                               # real ffmpeg/Whisper work
+.venv/bin/pytest -m network -n0                        # real downloads/LLM calls (owner's limits!)
 systemctl --user restart telegram-summarizer-bot       # apply changes to the live bot
 journalctl --user -u telegram-summarizer-bot -n 50 -o cat
 ```
 
-There is no test suite. Check changes the way existing work was checked:
+Every change adds or updates tests, and the whole suite must pass before committing.
 
-- Call `summarizer.pipeline.run(url, progress)` directly from Python with a print/no-op `progress`
-  callback. A cached video returns instantly without LLM calls; `use_cache=False` forces a full run.
-- Exercise handlers with stand-in objects (`types.SimpleNamespace` updates, a fake `reply_text`)
-  instead of real Telegram traffic.
-- Real LLM calls use the owner's ChatGPT / Claude subscription limits. Keep test runs few and small;
-  prefer the short test videos already in the cache.
-- Remove any test rows you add to `data/bot.sqlite3`, and back the database up before migrations.
+How the tests are isolated (`tests/conftest.py`):
+- The real `.env` is never loaded and every test gets its own database and stats file in a temp dir;
+  tests never touch `data/`.
+- Network access and external programs are blocked (only ffmpeg and the test's own Python may run), so
+  no test can reach YouTube, Telegram or an LLM unless it's marked `network`.
+- Telegram is faked behind a real python-telegram-bot `Application` with the bot's own handlers
+  (`telegram` and `app` fixtures, `msg_update` / `callback_update` / `send` helpers): filters, handler
+  order and Telegram errors behave like in production.
+- LLMs are faked with `tests/helpers.FakeConversation`; media with monkeypatched `summarizer.media`
+  functions; `tiny_video` / `blue_video` are generated locally with ffmpeg.
+- `network` tests use the owner's ChatGPT / Claude limits: keep them few and small.
 
 ## Rules that must hold
 

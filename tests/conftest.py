@@ -7,6 +7,7 @@ before anything from the bot is imported.
 import asyncio
 import atexit
 import itertools
+import json
 import os
 import shutil
 import socket
@@ -212,6 +213,22 @@ async def send(app, update_json: dict) -> None:
     """Feeds one update (built by msg_update/callback_update) through the application's handlers."""
     from telegram import Update
     await app.process_update(Update.de_json(update_json, app.bot))
+
+
+@pytest.fixture
+def codex_home():
+    """A logged-in bot Codex home with a model list like Codex keeps it."""
+    config.CODEX_HOME.mkdir(parents=True, exist_ok=True)
+    (config.CODEX_HOME / "auth.json").write_text("{}")
+    models = [{"slug": "gpt-a", "display_name": "GPT-A", "description": "best", "visibility": "list",
+               "priority": 2, "input_modalities": ["text", "image"]},
+              {"slug": "gpt-hidden", "visibility": "hide", "priority": 1},
+              {"slug": "gpt-b", "display_name": "GPT-B", "visibility": "list", "priority": 3,
+               "input_modalities": ["text"]}]
+    (config.CODEX_HOME / "models_cache.json").write_text(json.dumps({"models": models}))
+    yield config.CODEX_HOME
+    for f in ("auth.json", "models_cache.json"):
+        (config.CODEX_HOME / f).unlink(missing_ok=True)
 
 
 # ---------- media ----------
