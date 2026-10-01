@@ -6,6 +6,7 @@ seconds until the summary is ready (None when unknown).
 import logging
 import re
 import shutil
+from pathlib import Path
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -564,3 +565,29 @@ def _transcript(video, meta, workdir, st: Status, notes, transcript_only: bool) 
         st.ok(f"✅ Transcript: TikTok captions ({caps[1]})")
         return caps[0], "tiktok-webvtt", caps[1]
     return [], "none", got[2] if got else ""
+
+
+def cleanup_leftovers() -> int:
+    """Removes what a crashed or killed run left behind; call only while no job is running (startup).
+
+    Each job normally deletes its downloads and LLM session files itself, but a kill, out-of-memory or power
+    loss skips that: downloads would clutter the disk and session files would keep video content around.
+
+    Returns:
+        How many files and folders were removed.
+    """
+    removed = 0
+    targets = list((config.DATA_DIR / "work").glob("*"))      # per-video download folders
+    targets += list(config.DATA_DIR.glob("tmp*"))               # LLM job folders (tempfile, prefix "tmp")
+    targets += list((config.CODEX_HOME / "sessions").rglob("*.jsonl"))  # Codex conversations
+    cwd = summarize.ClaudeCodeConversation.CWD                   # Claude Code names its project dir after it
+    targets += list(Path.home().glob(f".claude/projects/{str(cwd).replace('/', '-')}/*.jsonl"))
+    for path in targets:
+        try:
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+            removed += 1
+        except OSError as e:
+            log.warning("couldn't remove leftover %s: %s", path, e)
+    if removed:
+        log.info("removed %d leftover file(s)/folder(s) from earlier runs", removed)
+    return removed

@@ -1143,6 +1143,8 @@ async def post_init(app: Application) -> None:
     for uid in [*access.ADMINS, *(u["id"] for u in access.all_users()["allowed"])]:
         await sync_commands(app.bot, uid)
     # Keep references in bot_data: post_stop cancels them, and asyncio only weakly references tasks.
+    # Before the worker starts: nothing is running, so everything in the job folders is a leftover.
+    await asyncio.to_thread(pipeline.cleanup_leftovers)
     app.bot_data["worker"] = asyncio.create_task(worker(app))
     app.bot_data["update_checker"] = asyncio.create_task(update_checker(app))
     log.info("bot ready; admins: %s, allowed users: %d", sorted(access.ADMINS) or "NONE (setup mode)",
