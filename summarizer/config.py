@@ -68,8 +68,11 @@ MAX_DOC_CHARS = int(_env("MAX_DOC_CHARS", "3000000"))
 # Characters of book text sent to the AI in one call (~75k tokens; fits every backend's context with room for
 # the answer). Longer books and chapters are summarized in pieces, then combined.
 BOOK_CHUNK_CHARS = int(_env("BOOK_CHUNK_CHARS", "300000"))
-# Text recognition for scanned documents. tesseract (system package) or rapidocr (Python, ONNX).
-OCR_ENGINE = _env("OCR_ENGINE", "tesseract")
+# Text recognition for scanned documents: rapidocr (Python/ONNX, can use a GPU) or tesseract (system package,
+# CPU only). Tesseract, when installed, is also used to check a scan's script.
+OCR_ENGINE = _env("OCR_ENGINE", "rapidocr")
+# cpu or cuda (NVIDIA GPU, RapidOCR only; needs onnxruntime-gpu, falls back to the CPU when CUDA isn't there).
+OCR_DEVICE = _env("OCR_DEVICE", "cpu")
 # Scanned documents a non-admin may have read per rolling 24 h (0 = no limit); /limit ocr overrides it.
 OCR_DAILY_LIMIT = int(_env("OCR_DAILY_LIMIT", "5"))
 # Longest scan read without an admin's approval (pages needing OCR).

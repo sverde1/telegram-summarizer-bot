@@ -17,7 +17,7 @@ MEMORY_LIMIT = 6 * 1024 ** 3  # address-space cap; generous because onnxruntime 
 
 
 def command(job: Path, args: list[str], *, ro_binds: dict[Path, str] | None = None,
-            memory: int = MEMORY_LIMIT, env: dict[str, str] | None = None) -> list[str]:
+            memory: int | None = MEMORY_LIMIT, env: dict[str, str] | None = None, gpu: bool = False) -> list[str]:
     """Builds the full command that runs `args` sandboxed, with `job` as the only writable directory.
 
     Args:
@@ -25,8 +25,11 @@ def command(job: Path, args: list[str], *, ro_binds: dict[Path, str] | None = No
         args: The command to run inside, e.g. ["python", "-m", "summarizer.docparse", ...]. A first
             element "python" is replaced by the bot's interpreter.
         ro_binds: Extra host paths to mount read-only, mapped to their path inside (e.g. OCR models).
-        memory: Address-space limit in bytes (prlimit), so a decompression bomb can't take the machine.
+        memory: Address-space limit in bytes (prlimit), so a decompression bomb can't take the machine; None
+            for no limit.
         env: Extra environment variables inside (the environment is otherwise empty).
+        gpu: Give the process the NVIDIA GPU (its /dev/nvidia* devices). No address-space limit then: CUDA
+            reserves far more address space than it uses, and any cap breaks it.
 
     Returns:
         The command for proc.run.
@@ -49,6 +52,11 @@ def command(job: Path, args: list[str], *, ro_binds: dict[Path, str] | None = No
     ]
     for host, inside in (ro_binds or {}).items():
         cmd += ["--ro-bind", str(host), inside]
+    if gpu:
+        for device in sorted(Path("/dev").glob("nvidia*")):
+            cmd += ["--dev-bind", str(device), str(device)]
+        cmd += ["--ro-bind-try", "/sys", "/sys"]  # CUDA reads the PCI topology from here
+        memory = None
     cmd += [
         "--chdir", "/job",
         # No inherited environment: no tokens or keys from the bot's process.
@@ -59,5 +67,6 @@ def command(job: Path, args: list[str], *, ro_binds: dict[Path, str] | None = No
     ]
     for key, value in (env or {}).items():
         cmd += ["--setenv", key, value]
-    cmd += ["prlimit", f"--as={memory}", "--"]
+    if memory:
+        cmd += ["prlimit", f"--as={memory}", "--"]
     return cmd + args

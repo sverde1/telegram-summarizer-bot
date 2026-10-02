@@ -36,6 +36,10 @@ os.environ.update({
     "ADMIN_USER_IDS": "1",
     "LLM_BACKEND": "codex",
     "CODEX_MODEL": "gpt-test",
+    # Tests that run real OCR use Tesseract: it starts in a fraction of RapidOCR's time. RapidOCR and the GPU
+    # path have their own tests.
+    "OCR_ENGINE": "tesseract",
+    "OCR_DEVICE": "cpu",
     "TELEGRAM_BOT_TOKEN": "",
     "ANTHROPIC_API_KEY": "",
     "OPENAI_API_KEY": "",

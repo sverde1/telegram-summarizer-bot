@@ -1,8 +1,9 @@
 """Text recognition (OCR) for scanned PDFs: page rendering, the two engines, language check, estimates.
 
 Pages are rendered with poppler and read by Tesseract (default) or RapidOCR, every step in the sandbox (the
-PDF is untrusted, and so is what the engines parse). Several processes run side by side (OCR_WORKERS), one
-thread each, in batches of pages; finished pages are stored right away, so a cancelled or interrupted run
+PDF is untrusted, and so is what the engines parse). On the CPU several processes run side by side
+(OCR_WORKERS), one thread each; on a GPU (RapidOCR with OCR_DEVICE=cuda) one process does it all. Pages go in
+batches; finished pages are stored right away, so a cancelled or interrupted run
 continues where it stopped.
 
 Languages: Tesseract needs a trained model per language (`data/tessdata`, seeded with the system's English
@@ -27,7 +28,8 @@ RENDER_EDGE = 2500    # pixels on the longer side: plenty for OCR, and bounds me
 SAMPLE_PAGES = 3
 LOW_CONFIDENCE = 65   # Tesseract mean word confidence (0-100) below which a language mismatch is believed
 TIMEOUT = 900         # seconds per batch
-SPEED_DEFAULT = {"tesseract": 1.5, "rapidocr": 4.0}  # seconds per page with all workers busy, until measured
+# Seconds per page with all workers busy, until measured on this machine.
+SPEED_DEFAULT = {"tesseract": 1.5, "rapidocr": 4.0, "rapidocr-cuda": 0.3}
 TESSDATA_SYSTEM = sorted(Path("/usr/share/tesseract-ocr").glob("*/tessdata"))
 
 # code (Tesseract's) -> (name, ISO 639-1 as py3langid reports it, script as Tesseract's OSD names it,
@@ -71,7 +73,35 @@ class UnsupportedLanguage(Exception):
 
 def engine() -> str:
     """The configured OCR engine."""
-    return config.OCR_ENGINE if config.OCR_ENGINE in ("tesseract", "rapidocr") else "tesseract"
+    return config.OCR_ENGINE if config.OCR_ENGINE in ("tesseract", "rapidocr") else "rapidocr"
+
+
+_cuda_ok: bool | None = None  # whether onnxruntime can use CUDA here (checked once)
+
+
+def device() -> str:
+    """Where OCR runs: "cuda" when asked for, RapidOCR is the engine and CUDA works; else "cpu".
+
+    Like Whisper, a missing GPU or CUDA runtime means the CPU, with a warning, not a broken OCR.
+    """
+    global _cuda_ok
+    if config.OCR_DEVICE != "cuda" or engine() != "rapidocr":
+        return "cpu"
+    if _cuda_ok is None:
+        try:
+            import onnxruntime
+            _cuda_ok = "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+        except ImportError:
+            _cuda_ok = False
+        if not _cuda_ok:
+            log.warning("OCR_DEVICE=cuda, but onnxruntime has no CUDA support (install onnxruntime-gpu); "
+                        "OCR runs on the CPU")
+    return "cuda" if _cuda_ok else "cpu"
+
+
+def _speed_key() -> str:
+    """Stats key for the OCR speed of the engine and device in use (a GPU is much faster)."""
+    return engine() + ("-cuda" if device() == "cuda" else "")
 
 
 def available() -> bool:
@@ -130,7 +160,7 @@ def rapid_models() -> Path:
 
 def seconds_per_page() -> float:
     """Measured wall-clock seconds per page with all workers busy (a starting guess until measured)."""
-    return stats.get(f"ocr:{engine()}", SPEED_DEFAULT[engine()])
+    return stats.get(f"ocr:{_speed_key()}", SPEED_DEFAULT[_speed_key()])
 
 
 def estimate(pages: int) -> float:
@@ -188,9 +218,9 @@ def _rapidocr(images: list[Path], langs: str, workdir: Path, tag: str) -> list[t
             raise RuntimeError(f"RapidOCR model {model} isn't installed")
         rec, binds = f"/models/{path.name}", {rapid_models(): "/models"}
     out = workdir / f"rapid-{tag}.json"
-    args = ["python", "-m", "summarizer.rapid_ocr", f"/job/{out.name}", rec,
+    args = ["python", "-m", "summarizer.rapid_ocr", f"/job/{out.name}", rec, device(),
             *[f"/job/{p.relative_to(workdir)}" for p in images]]
-    run = proc.run(sandbox.command(workdir, args, ro_binds=binds), timeout=TIMEOUT)
+    run = proc.run(sandbox.command(workdir, args, ro_binds=binds, gpu=device() == "cuda"), timeout=TIMEOUT)
     if not out.exists():
         raise RuntimeError(f"rapidocr exited {run.returncode}: {run.stderr[-300:]}")
     return [(r["text"], r["score"]) for r in json.loads(out.read_text())]
@@ -228,7 +258,8 @@ def run(pdf: Path, sha256: str, pages: list[int], langs: str, workdir: Path,
     batches = [pages[i:i + BATCH] for i in range(0, len(pages), BATCH)]
     done, started = 0, time.monotonic()
     status(f"🔍 Recognizing text (OCR): page 1 of {len(pages)}…", estimate(len(pages)))
-    with ThreadPoolExecutor(max_workers=max(1, config.OCR_WORKERS)) as pool:
+    workers = 1 if device() == "cuda" else max(1, config.OCR_WORKERS)  # a GPU is fed by one process
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         pending = {pool.submit(_read_batch, pdf, batch, langs, workdir, str(k)): batch
                    for k, batch in enumerate(batches)}
         try:
@@ -249,7 +280,7 @@ def run(pdf: Path, sha256: str, pages: list[int], langs: str, workdir: Path,
             proc.current_job_cancel.set()  # stop the batches still running (their programs get killed)
             raise
     if len(pages) >= 5:  # tiny runs are dominated by start-up time
-        stats.record(f"ocr:{engine()}", (time.monotonic() - started) / len(pages))
+        stats.record(f"ocr:{_speed_key()}", (time.monotonic() - started) / len(pages))
 
 
 # ---------- language check ----------
