@@ -65,6 +65,9 @@ DAILY_LIMIT = int(_env("DAILY_LIMIT", "100"))
 # caps keep a single upload from tying up the bot for hours).
 MAX_DOC_PAGES = int(_env("MAX_DOC_PAGES", "2000"))
 MAX_DOC_CHARS = int(_env("MAX_DOC_CHARS", "3000000"))
+# Characters of book text sent to the AI in one call (~75k tokens; fits every backend's context with room for
+# the answer). Longer books and chapters are summarized in pieces, then combined.
+BOOK_CHUNK_CHARS = int(_env("BOOK_CHUNK_CHARS", "300000"))
 MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
 SHORT_VIDEO_SEC = int(_env("SHORT_VIDEO_SEC", "180"))  # up to this long: denser frame sampling
 # Whisper may use at most this share of the machine's RAM; a video that doesn't fit right now waits (other

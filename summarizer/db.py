@@ -107,6 +107,16 @@ CREATE TABLE IF NOT EXISTS document_pages (
     source  TEXT NOT NULL,                     -- text | ocr-<engine>; OCR pages are saved as they finish
     PRIMARY KEY (sha256, page)
 );
+CREATE TABLE IF NOT EXISTS doc_summaries (
+    sha256   TEXT NOT NULL,
+    part     TEXT NOT NULL,                    -- "book", or a chapter index
+    style    TEXT NOT NULL,                    -- short | full (chapters); full (book)
+    backend  TEXT NOT NULL,
+    model    TEXT NOT NULL,
+    result   TEXT NOT NULL,                    -- JSON: {summary} for chapters, {title, author, summary, _stats}
+    created_at REAL NOT NULL,
+    PRIMARY KEY (sha256, part, style, backend, model)
+);
 CREATE INDEX IF NOT EXISTS requests_user ON requests (user_id, created_at);
 CREATE INDEX IF NOT EXISTS requests_video ON requests (platform, video_id);
 """
@@ -524,6 +534,21 @@ def get_pages(sha256: str) -> dict[int, str]:
     with _db() as c:
         return {r["page"]: r["text"] for r in c.execute(
             "SELECT page, text FROM document_pages WHERE sha256=? ORDER BY page", (sha256,))}
+
+
+def get_doc_summaries(sha256: str, style: str, backend: str, model: str) -> dict[str, dict]:
+    """Cached summaries of a document in one style by one model, by part ("book" or a chapter index)."""
+    with _db() as c:
+        return {r["part"]: json.loads(r["result"]) for r in c.execute(
+            "SELECT part, result FROM doc_summaries WHERE sha256=? AND style=? AND backend=? AND model=?",
+            (sha256, style, backend, model))}
+
+
+def save_doc_summary(sha256: str, part: str, style: str, backend: str, model: str, result: dict) -> None:
+    """Caches one summary of a document part (written as each is produced, so a re-run continues)."""
+    with _db() as c:
+        c.execute("INSERT OR REPLACE INTO doc_summaries VALUES (?,?,?,?,?,?,?)",
+                  (sha256, part, style, backend, model, json.dumps(result, ensure_ascii=False), time.time()))
 
 
 def fail_stale_requests() -> int:

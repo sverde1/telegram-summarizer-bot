@@ -30,6 +30,7 @@ service on a single machine with no GPU.
 | `summarizer/memory.py` | Whisper memory estimate and the RAM checks behind the memory guard. |
 | `summarizer/sandbox.py` | bwrap command for code that touches untrusted files: no network, no repo, no environment. |
 | `summarizer/docparse.py` | Reads PDF/EPUB/DOCX/TXT into pages + chapters. Runs **inside** the sandbox; imports no bot module. |
+| `summarizer/books.py` | Book summaries: chapters batched per call, long chapters in parts, whole book (map-reduce), cached in `doc_summaries`. |
 | `summarizer/documents.py` | Bot side of docparse: runs it sandboxed, maps errors to user messages, stores pages by SHA-256. |
 | `tests/` | pytest suite; `conftest.py` isolates tests from the real bot (see above), `helpers.py` has the fake LLM. |
 | `deploy/` | systemd units and the weekly extractor-upgrade script. |
@@ -70,6 +71,8 @@ How the tests are isolated (`tests/conftest.py`):
 - Prompts treat titles, descriptions, transcripts and image text as data, never as instructions.
 - Codex's tool features are switched off (`summarize.CODEX_DISABLED_FEATURES`, filtered against the
   installed Codex, which rejects unknown names). New Codex tool features must be added to that list.
+- Book calls go through `summarize.ask`: a fresh conversation per call, always closed (never reuse one
+  across chapters: APIs would resend everything, Claude Code would reuse a session id).
 - Continue Codex conversations by the exact session id from the first turn, never `--last`; jobs
   from different users must not mix.
 - Run external programs only through `proc.run` (never `subprocess` directly): it kills the whole

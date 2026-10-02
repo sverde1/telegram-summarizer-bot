@@ -36,3 +36,33 @@ class FakeConversation(summarize.Conversation):
     def close(self):
         """Records that the pipeline cleaned up."""
         self.closed = True
+
+
+class BookAI(summarize.Conversation):
+    """A fake LLM for book summaries: answers by schema, using the chapter indices it was sent.
+
+    Every instance is one conversation; the class keeps a log of all of them (`calls`) to check that each
+    question got a fresh, closed conversation.
+    """
+
+    calls: list["BookAI"] = []
+
+    def __init__(self, model: str = "fake-model"):
+        """Starts an unused conversation."""
+        self.text, self.schema, self.closed, self._model = "", None, False, model
+        BookAI.calls.append(self)
+
+    def _send(self, system, text, images, schema, first):
+        """Answers in the requested schema: "S<i>" per chapter, a merged text, or a book summary."""
+        import re
+        assert first and not images  # books are single-turn, text-only
+        self.text, self.schema, self.model = text, schema, self._model
+        if "chapters" in schema["properties"]:
+            return {"chapters": [{"index": int(i), "summary": f"S{i}"} for i in re.findall(r'index="(\d+)"', text)]}
+        if "title" in schema["properties"]:
+            return {"title": "Book T", "author": "Ana", "summary": "Whole book."}
+        return {"summary": "merged"}
+
+    def close(self):
+        """Records that the conversation was closed."""
+        self.closed = True
