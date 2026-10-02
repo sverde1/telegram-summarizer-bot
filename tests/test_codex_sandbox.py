@@ -12,6 +12,31 @@ def test_only_known_features_are_disabled(monkeypatch):
     assert summarize.codex_disabled_features() == ["shell_tool", "unified_exec"]
 
 
+@pytest.mark.parametrize("returncode,stdout", [(1, ""), (0, ""), (0, "something unexpected\n"),
+                                               (0, '{"features": ["shell_tool"]}'), (1, "shell_tool stable true\n")])
+def test_unusable_feature_list_fails_closed(monkeypatch, returncode, stdout):
+    calls = []
+    monkeypatch.setattr(summarize, "_codex_known_features", None)
+    monkeypatch.setattr(summarize.proc, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(
+        cmd, returncode, stdout, "error"))
+    assert summarize.codex_disabled_features() == list(summarize.CODEX_DISABLED_FEATURES)
+    assert summarize._codex_known_features is None  # not cached: the next call asks Codex again
+    summarize.codex_disabled_features()
+    assert len(calls) == 2
+
+
+def test_cancel_during_feature_discovery_is_not_swallowed(monkeypatch):
+    monkeypatch.setattr(summarize, "_codex_known_features", None)
+
+    def cancelled(cmd, **kw):
+        """The job is cancelled while Codex lists its features."""
+        raise proc.ProcCancelled("cancelled")
+
+    monkeypatch.setattr(summarize.proc, "run", cancelled)
+    with pytest.raises(proc.ProcCancelled):
+        summarize.codex_disabled_features()
+
+
 def test_feature_list_is_read_once_from_codex(monkeypatch):
     calls = []
     monkeypatch.setattr(summarize, "_codex_known_features", None)

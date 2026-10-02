@@ -452,21 +452,40 @@ CODEX_DISABLED_FEATURES = (
 _codex_known_features: set[str] | None = None
 
 
+# A feature every Codex version so far lists. If it's missing, the list wasn't understood (an error, or a new
+# output format), and trusting it would silently switch the lockdown off.
+_CODEX_FEATURE_SENTINEL = "shell_tool"
+
+
 def codex_disabled_features() -> list[str]:
     """The tool features to switch off, limited to the ones the installed Codex knows.
 
     Codex refuses to start on an unknown `--disable` name ("Unknown feature flag"), so a feature that a future
     Codex version drops or renames would otherwise break every summary. The installed list is read once (on
     first use, not at import, so tests and startup don't spawn Codex) and cached.
+
+    Fails closed: if the list can't be read or doesn't look right, nothing is cached and the full list is
+    returned. Codex then refuses to start rather than running with its tools on, and the next call tries
+    reading the list again.
+
+    Raises:
+        proc.ProcCancelled: The job was cancelled meanwhile.
     """
     global _codex_known_features
     if _codex_known_features is None:
         try:
-            out = proc.run(["codex", "features", "list"], timeout=30).stdout
-            _codex_known_features = {line.split()[0] for line in out.splitlines() if line.strip()}
+            p = proc.run(["codex", "features", "list"], timeout=30)
+        except proc.ProcCancelled:
+            raise
         except (OSError, proc.ProcError) as e:
             log.warning("couldn't list Codex features (%s); disabling the full list", e)
             return list(CODEX_DISABLED_FEATURES)
+        known = {line.split()[0] for line in p.stdout.splitlines() if line.strip()}
+        if p.returncode != 0 or _CODEX_FEATURE_SENTINEL not in known:
+            log.warning("`codex features list` gave no usable answer (exit %s); disabling the full list",
+                        p.returncode)
+            return list(CODEX_DISABLED_FEATURES)
+        _codex_known_features = known
     missing = [f for f in CODEX_DISABLED_FEATURES if f not in _codex_known_features]
     if missing:
         log.warning("installed Codex doesn't know these features (skipped): %s", ", ".join(missing))
