@@ -1,6 +1,7 @@
 """Telegram bot: send a YouTube/TikTok link, get back title, clickbait answer and summary."""
 import asyncio
 import collections
+import dataclasses
 import math
 import datetime as dt
 import html
@@ -26,7 +27,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
 
 import access
 from summarizer import (config, db, documents, links, memory, ocr, pipeline, proc, stats, summarize, transcribe,
-                        tts, updates)
+                        tts, units, updates)
 from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -1093,7 +1094,8 @@ def _pack(pieces: list[str]) -> list[str]:
     return chunks
 
 
-def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> list[str]:
+def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True,
+           units_: tuple[str, str] = ("metric", "c")) -> list[str]:
     """Builds the reply in the Title / Clickbait answer / Summary layout, split to fit Telegram.
 
     All model and video text is HTML-escaped: messages are sent with parse_mode=HTML, and titles or
@@ -1116,12 +1118,12 @@ def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> 
 
     title = _cap(s.get("title") or r.meta.get("title", ""), FIELD_LIMITS["title"])
     if s.get("is_clickbait") and s.get("clickbait_answer"):
-        answer = _cap(s["clickbait_answer"], FIELD_LIMITS["clickbait_answer"])
+        answer = _cap(units.convert(s["clickbait_answer"], *units_), FIELD_LIMITS["clickbait_answer"])
     else:
         answer = "✅ Not clickbait - the title matches the content."
     footer = _cap(details(r, waited, reveal_cache), 1000) + "\n" + r.url
     pieces = ["<b>Title:</b>", *text(title), "", "<b>Clickbait answer:</b>", *text(answer), "",
-              "<b>Summary:</b>", *text(_cap(s.get("summary", ""), FIELD_LIMITS["summary"])), ""]
+              "<b>Summary:</b>", *text(_cap(units.convert(s.get("summary", ""), *units_), FIELD_LIMITS["summary"])), ""]
     # The footer is one italic piece: an <i> split across two messages would break both.
     pieces.append(f"<i>{html.escape(_cap(footer, 1500))}</i>")
     return _pack(pieces)
@@ -1154,7 +1156,8 @@ def _doc_details(r: documents.DocResult, waited: float, reveal_cache: bool) -> s
     return "\n".join(filter(None, [timing, used]))
 
 
-def render_document(r: documents.DocResult, waited: float = 0, reveal_cache: bool = True) -> list[str]:
+def render_document(r: documents.DocResult, waited: float = 0, reveal_cache: bool = True,
+                    units_: tuple[str, str] = ("metric", "c")) -> list[str]:
     """Builds the messages for a document summary, each at most TG_LIMIT characters.
 
     Whole book: Title / Author / Summary. All chapters short: one block per chapter, packed into as few
@@ -1167,9 +1170,11 @@ def render_document(r: documents.DocResult, waited: float = 0, reveal_cache: boo
         pieces = ["<b>Title:</b>", *_text(_cap(b.get("title") or r.name, FIELD_LIMITS["title"]))]
         if b.get("author"):
             pieces += ["", "<b>Author:</b>", *_text(_cap(b["author"], FIELD_LIMITS["title"]))]
-        pieces += ["", "<b>Summary:</b>", *_text(_cap(b.get("summary", ""), FIELD_LIMITS["summary"])), "", footer]
+        pieces += ["", "<b>Summary:</b>", *_text(_cap(units.convert(b.get("summary", ""), *units_),
+                                                    FIELD_LIMITS["summary"])), "", footer]
         return _pack(pieces)
-    blocks = [[f"<b>{html.escape(_cap(title, 200))}</b>", *_text(_cap(summary, FIELD_LIMITS["summary"]))]
+    blocks = [[f"<b>{html.escape(_cap(title, 200))}</b>",
+               *_text(_cap(units.convert(summary, *units_), FIELD_LIMITS["summary"]))]
               for _, title, summary in r.chapters]
     if r.kind == "short":
         pieces = [f"<b>📑 {html.escape(r.name[:80])}</b>", ""]
@@ -1849,11 +1854,12 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
     if isinstance(result, documents.DocResult):
         reveal = access.is_admin(job.user_id) or db.user_saw_video(job.user_id, "document", result.video_id,
                                                                     job.request_id)
-        chunks = render_document(result, waited, reveal)
+        units_ = db.get_user_units(job.user_id)
+        chunks = render_document(result, waited, reveal, units_)
         # Under a whole-book summary: the chapter options, for a reader who wants more detail.
         more = (_book_menu(job.upload_id, chapters=True, back=False)
                 if result.kind == "book" and len(result.doc.get("chapters") or []) > 1 else None)
-        more = _with_listen(more, job, *tts.document_text(result))
+        more = _with_listen(more, job, *tts.document_text(_spoken_document(result, units_)))
         for k, chunk in enumerate(chunks, 1):
             await _send_with_retry(lambda chunk=chunk, k=k: bot_.send_message(
                 job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
@@ -1874,12 +1880,28 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
     # would reveal what other users submit.
     reveal = access.is_admin(job.user_id) or db.user_saw_video(
         job.user_id, result.platform, result.video_id, job.request_id)
-    chunks = render(result, waited, reveal_cache=reveal)
-    listen = _with_listen(None, job, *tts.video_text(result.summary or {}, (result.meta or {}).get("title", "")))
+    units_ = db.get_user_units(job.user_id)
+    chunks = render(result, waited, reveal_cache=reveal, units_=units_)
+    listen = _with_listen(None, job, *tts.video_text(_spoken_summary(result.summary or {}, units_),
+                                                     (result.meta or {}).get("title", "")))
     for k, chunk in enumerate(chunks, 1):
         await _send_with_retry(lambda chunk=chunk, k=k: bot_.send_message(
             job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
             reply_markup=listen if k == len(chunks) else None), job)
+
+
+def _spoken_summary(summary: dict, units_: tuple[str, str]) -> dict:
+    """A copy of a video summary as it's read aloud: the reader's units, written as words. Titles stay."""
+    return {**summary, **{k: units.convert(summary.get(k, ""), *units_, spoken=True)
+                          for k in ("clickbait_answer", "summary")}}
+
+
+def _spoken_document(result: documents.DocResult, units_: tuple[str, str]) -> documents.DocResult:
+    """A copy of a document result as it's read aloud (see _spoken_summary); the original isn't changed."""
+    book = ({**result.book, "summary": units.convert(result.book.get("summary", ""), *units_, spoken=True)}
+            if result.book else None)
+    chapters = [(i, t, units.convert(s, *units_, spoken=True)) for i, t, s in result.chapters]
+    return dataclasses.replace(result, book=book, chapters=chapters)
 
 
 def _with_listen(markup: InlineKeyboardMarkup | None, job: Job, title: str, text: str) -> InlineKeyboardMarkup | None:

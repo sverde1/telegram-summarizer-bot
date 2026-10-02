@@ -196,6 +196,9 @@ def init() -> None:
             c.execute("ALTER TABLE users ADD COLUMN ocr_limit INTEGER")
         if "tts_limit" not in cols:  # …and before the voice-message limit
             c.execute("ALTER TABLE users ADD COLUMN tts_limit INTEGER")
+        for col in ("unit_system", "temperature"):  # …and before per-user units (NULL = the default)
+            if col not in cols:
+                c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
         if "ocr" not in {r["name"] for r in c.execute("PRAGMA table_info(requests)")}:
             c.execute("ALTER TABLE requests ADD COLUMN ocr INTEGER DEFAULT 0")  # 1: this request ran OCR
         if "source_url" not in {r["name"] for r in c.execute("PRAGMA table_info(uploads)")}:
@@ -653,6 +656,24 @@ def get_page_sources(sha256: str) -> dict[int, str]:
     with _db() as c:
         return {r["page"]: r["source"] for r in c.execute(
             "SELECT page, source FROM document_pages WHERE sha256=?", (sha256,))}
+
+
+def get_user_units(uid: int) -> tuple[str, str]:
+    """A user's units: (metric|imperial, c|f), the configured defaults where unset."""
+    with _db() as c:
+        row = c.execute("SELECT unit_system, temperature FROM users WHERE id=?", (uid,)).fetchone()
+    system = (row["unit_system"] if row else None) or config.UNIT_SYSTEM
+    temperature = (row["temperature"] if row else None) or config.TEMPERATURE
+    return (system if system in ("metric", "imperial") else "metric", temperature if temperature in ("c", "f") else "c")
+
+
+def set_user_units(uid: int, system: str | None = None, temperature: str | None = None) -> None:
+    """Changes a user's measurement system and/or temperature scale (only the values given)."""
+    with _db() as c:
+        if system:
+            c.execute("UPDATE users SET unit_system=? WHERE id=?", (system, uid))
+        if temperature:
+            c.execute("UPDATE users SET temperature=? WHERE id=?", (temperature, uid))
 
 
 def set_user_tts_limit(uid: int, limit: int | None) -> bool:

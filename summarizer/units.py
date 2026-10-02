@@ -91,6 +91,8 @@ _QTY = re.compile(
 # A height: 6 feet 2 inches, 6 ft 2 in, 6'2", 6-foot-2.
 _HEIGHT = re.compile(r"(?<![\w.])(?P<ft>[4-8])(?:\s*(?:feet|foot|ft|['′])\s*|-foot-)(?P<in>1[01]|\d)"
                      r"(?:\s*(?:inches|inch|in(?![A-Za-z])|[\"″]))?(?![\d.])", re.I)
+_EXPLICIT_F = re.compile(r"\d\s?°\s?F(?![A-Za-z])|\d\s?(?:degrees\s+)?Fahrenheit", re.I)
+_BARE_F = re.compile(r"(?<![\w.,/$£€])(-?\d+(?:\.\d+)?)F(?![\w-])")
 _DELTA_BEFORE = re.compile(r"\b(?:by|difference of|swing of|swings? by|rise of|drop of|change of)\s*$", re.I)
 _DELTA_AFTER = re.compile(r"^\s*(?:warmer|cooler|hotter|colder|higher|lower|difference|swing|rise|drop)\b", re.I)
 _WEIGHT_CUE = re.compile(r"weigh|weight|\blost\b|\bgained?\b|\blift|heavy|squat|bench|press|deadlift|\bbody\b|"
@@ -202,6 +204,10 @@ def convert(text: str, system: str = "metric", temperature: str = "c", spoken: b
     """
     if not text:
         return text
+    # "32F" (no degree sign) is a temperature only when the text already gives temperatures in °F: a bare F
+    # is otherwise a grade, a size or part of a name, so it's left alone.
+    if _EXPLICIT_F.search(text):
+        text = _BARE_F.sub(lambda m: f"{m[1]} °F", text)
     if system == "metric":
         def height(m: re.Match) -> str:
             """A feet-and-inches height as one metric value."""

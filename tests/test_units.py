@@ -106,3 +106,60 @@ def test_prompts_ask_for_measurements_as_in_the_source():
     from summarizer import summarize
     for prompt in (summarize.SYSTEM, summarize.BOOK_SYSTEM):
         assert "don't convert them" in prompt and "75 °F" in prompt
+
+
+# ---------- in the bot ----------
+
+async def test_the_same_summary_in_each_readers_units(app, telegram, monkeypatch):
+    import asyncio
+    import copy
+    import access
+    import bot
+    from summarizer import db, pipeline, tts
+    from conftest import msg_update, send
+    for uid in (60, 61):
+        access.set_state(uid, "allowed")
+    db.set_user_units(61, "imperial", "f")
+    monkeypatch.setattr(tts, "_ready", True)
+    summary = {"title": "I Drove 1,000 Miles at 75° F", "is_clickbait": True,
+               "clickbait_answer": "It ran at 95 Fahrenheit for 300 miles.",
+               "summary": "• Stored at 75° F\n• Lost 20 pounds of weight", "_stats": {}}
+    stored = copy.deepcopy(summary)
+    monkeypatch.setattr(pipeline, "run", lambda url, *a, **k: pipeline.Result(
+        "youtube", "abcdefghijk", url, {"title": "T"}, "", "captions", "en", summary))
+    for uid in (60, 61):
+        await send(app, msg_update(uid, "https://youtu.be/abcdefghijk"))
+    task = asyncio.create_task(bot.worker(app))
+    await asyncio.wait_for(bot.queue.join(), 10)
+    task.cancel()
+    ana, bob = ([m["text"] for m in telegram.sent("sendMessage") if m["chat_id"] == uid][-1] for uid in (60, 61))
+    assert "35 °C for 480 km" in ana and "Stored at 24 °C" in ana and "9.1 kg" in ana
+    assert "95 Fahrenheit for 300 miles" in bob and "75° F" in bob
+    assert "I Drove 1,000 Miles at 75° F" in ana  # titles are names, not measurements
+    assert summary == stored  # the cached summary itself never changes
+    spoken = db.get_spoken(db.recent_requests(60)[0]["id"])["text"]
+    assert "35 degrees Celsius" in spoken and "480 kilometres" in spoken
+
+
+def test_chapters_are_converted_for_display():
+    import bot
+    from summarizer import documents
+    r = documents.DocResult("each", "b.pdf", {"format": "pdf", "pages": 3},
+                            chapters=[(0, "The 100-Mile Walk", "We walked 100 miles at 90 °F.")], llm="x")
+    text = bot.render_document(r, units_=("metric", "c"))[0]
+    assert "We walked 160 km at 32 °C." in text and "The 100-Mile Walk" in text
+
+
+def test_defaults_and_migration():
+    import sqlite3
+    from summarizer import config, db
+    assert db.get_user_units(12345) == ("metric", "c")  # unknown user: the defaults
+    cols = {r[1] for r in sqlite3.connect(db.PATH).execute("PRAGMA table_info(users)")}
+    assert {"unit_system", "temperature"} <= cols
+    assert config.UNIT_SYSTEM == "metric" and config.TEMPERATURE == "c"
+
+
+def test_bare_f_only_where_the_text_already_uses_fahrenheit():
+    assert metric("survives -76° F, but freezes at 32F.") == "survives -60 °C, but freezes at 0 °C."
+    assert metric("It got an F and a 5F rating.") == "It got an F and a 5F rating."  # no °F context
+    assert metric("At 75 °F the F-150 starts.") == "At 24 °C the F-150 starts."

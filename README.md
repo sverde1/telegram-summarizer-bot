@@ -339,6 +339,17 @@ chapter you tap is a request. Files are parsed in a sandbox without network acce
 SHA-256, like video transcripts), so the same file is read once; summaries are cached per model. Admins see
 file names in `/history`.
 
+### Units
+
+Measurements in summaries are shown in each reader's units: metric and °C by default, or imperial / °F.
+Summaries keep the video's units in the cache (shared by everyone); the text is converted for each reader
+when it's shown, by fixed rules, without the AI. Only the converted value is shown, so only clear cases are
+converted: a number in digits right before an unambiguous unit (°F/°C, miles/km, feet/metres, inches,
+mph/km/h, lb/kg, gallons/litres, fl oz/ml, sq ft/m²; heights like 6'2" become one value). Things that are
+often not measurements stay as written: titles ("500 Miles"), quoted prices, compound units (mpg, lb-ft),
+fractions, nominal sizes ("65-inch TV", "3.5 mm jack"), "pounds" without a weight context (a UK price),
+airline miles. Voice messages use the converted values, read as words.
+
 ### Voice messages (🔊 Listen)
 
 Every summary (videos, books, chapters) has a **🔊 Listen** button. Tapping it makes a Telegram voice
