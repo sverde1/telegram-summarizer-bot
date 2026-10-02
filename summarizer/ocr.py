@@ -16,7 +16,7 @@ import logging
 import shutil
 import statistics
 from collections.abc import Callable
-from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import config, db, fetch, proc, sandbox, stats
@@ -259,26 +259,44 @@ def run(pdf: Path, sha256: str, pages: list[int], langs: str, workdir: Path,
     done, started = 0, time.monotonic()
     status(f"🔍 Recognizing text (OCR): page 1 of {len(pages)}…", estimate(len(pages)))
     workers = 1 if device() == "cuda" else max(1, config.OCR_WORKERS)  # a GPU is fed by one process
+    error: BaseException | None = None
+
+    def save(future, batch) -> bool:
+        """Stores a finished batch's pages; False if the batch failed (its error is kept)."""
+        nonlocal done, error
+        if future.cancelled():
+            return False
+        if exc := future.exception():
+            error = error or exc
+            return False
+        db.save_pages(sha256, future.result(), f"ocr-{engine()}")
+        done += len(batch)
+        return True
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         pending = {pool.submit(_read_batch, pdf, batch, langs, workdir, str(k)): batch
                    for k, batch in enumerate(batches)}
-        try:
-            while pending:
-                finished, _ = wait(pending, return_when=FIRST_EXCEPTION)
-                for future in finished:
-                    batch = pending.pop(future)
-                    texts = future.result()  # re-raises a batch's error (or cancel) here
-                    db.save_pages(sha256, texts, f"ocr-{engine()}")
-                    done += len(batch)
-                    left = len(pages) - done
-                    per_page = (time.monotonic() - started) / done
-                    if left:
-                        status(f"🔍 Recognizing text (OCR): page {done + 1} of {len(pages)}…", left * per_page)
-        except BaseException:
+        # FIRST_COMPLETED, not FIRST_EXCEPTION: the latter returns only once every batch is done (unless one
+        # fails), so nothing was saved and the progress line stood still until the very end.
+        while pending and error is None:
+            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in finished:
+                save(future, pending.pop(future))
+            if error is None and (left := len(pages) - done):
+                try:  # also the cancel checkpoint (Status.show raises ProcCancelled)
+                    status(f"🔍 Recognizing text (OCR): page {done + 1} of {len(pages)}…",
+                           left * (time.monotonic() - started) / max(done, 1))
+                except BaseException as e:  # noqa: BLE001  (re-raised below, after saving what's done)
+                    error = e
+        if error is not None:
             for future in pending:
-                future.cancel()
+                future.cancel()  # not started yet
             proc.current_job_cancel.set()  # stop the batches still running (their programs get killed)
-            raise
+    # The pool has waited for the running batches: keep any that finished before they could be stopped.
+    for future, batch in pending.items():
+        save(future, batch)
+    if error is not None:
+        raise error
     if len(pages) >= 5:  # tiny runs are dominated by start-up time
         stats.record(f"ocr:{_speed_key()}", (time.monotonic() - started) / len(pages))
 

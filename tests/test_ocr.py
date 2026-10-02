@@ -244,3 +244,72 @@ def test_rapidocr_reads_a_page_in_the_sandbox(tmp_path, monkeypatch):
     scan = make_scan(tmp_path / "s.pdf", [TEXT])
     texts = ocr._read_batch(scan, [0], "eng", tmp_path, "t")
     assert "quick brown fox" in texts[0].lower()
+
+
+# ---------- batches saved as they finish ----------
+
+def _batched_run(monkeypatch, tmp_path, read):
+    """Runs ocr.run over 4 one-page batches with `read` as the batch reader; returns (status lines, error)."""
+    import threading
+    monkeypatch.setattr(ocr, "BATCH", 1)
+    monkeypatch.setattr(config, "OCR_WORKERS", 2)
+    monkeypatch.setattr(ocr, "_read_batch", read)
+    db.save_document("d" * 64, name="s.pdf", status="needs-ocr")
+    lines = []
+    lock = threading.Lock()
+
+    def status(text, eta=None):
+        """Records progress lines."""
+        with lock:
+            lines.append(text)
+
+    try:
+        ocr.run(tmp_path / "s.pdf", "d" * 64, [0, 1, 2, 3], "eng", tmp_path, status)
+        return lines, None
+    except BaseException as e:  # noqa: BLE001
+        return lines, e
+    finally:
+        proc.current_job_cancel.clear()
+
+
+def test_progress_advances_batch_by_batch(monkeypatch, tmp_path):
+    import time
+
+    def read(pdf, batch, langs, wd, tag):
+        """Each page takes a little longer than the one before, so they finish one by one."""
+        time.sleep(0.05 * (batch[0] + 1))
+        return {batch[0]: f"p{batch[0]}"}
+
+    lines, error = _batched_run(monkeypatch, tmp_path, read)
+    assert error is None and db.get_pages("d" * 64) == {0: "p0", 1: "p1", 2: "p2", 3: "p3"}
+    assert len(lines) >= 4 and lines[-1].startswith("🔍 Recognizing text (OCR): page 4 of 4")
+
+
+def test_a_failing_batch_keeps_the_finished_ones(monkeypatch, tmp_path):
+    import time
+
+    def read(pdf, batch, langs, wd, tag):
+        """Page 2 fails after pages 0 and 1 are done; page 3 would be slow."""
+        if batch[0] == 2:
+            time.sleep(0.05)
+            raise RuntimeError("tesseract crashed")
+        if batch[0] == 3:
+            time.sleep(0.2)
+        return {batch[0]: f"p{batch[0]}"}
+
+    _, error = _batched_run(monkeypatch, tmp_path, read)
+    assert isinstance(error, RuntimeError)
+    assert {0: "p0", 1: "p1"}.items() <= db.get_pages("d" * 64).items()
+
+
+def test_cancel_keeps_the_finished_pages(monkeypatch, tmp_path):
+    def read(pdf, batch, langs, wd, tag):
+        """The first batch finishes; then the job is cancelled."""
+        if batch[0] > 0:
+            proc.current_job_cancel.wait(2)
+            raise proc.ProcCancelled("cancelled")
+        proc.current_job_cancel.set()
+        return {0: "p0"}
+
+    _, error = _batched_run(monkeypatch, tmp_path, read)
+    assert isinstance(error, proc.ProcCancelled) and db.get_pages("d" * 64).get(0) == "p0"
