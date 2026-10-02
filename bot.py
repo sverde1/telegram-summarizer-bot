@@ -854,21 +854,32 @@ class UserBlockedBot(Exception):
     """Telegram refuses to deliver to the user (they blocked the bot or deleted the chat)."""
 
 
-async def _send_with_retry(make_call):
+def _check_not_cancelled(job: "Job | None") -> None:
+    """Raises ProcCancelled if the job was cancelled: nothing more may be sent for it."""
+    if job is not None and job.cancel_reason:
+        raise proc.ProcCancelled("cancelled")
+
+
+async def _send_with_retry(make_call, job: "Job | None" = None):
     """Runs one Telegram send, waiting out flood control once.
 
     Args:
         make_call: Zero-argument function returning the API coroutine (a coroutine can only be awaited once,
             so a retry needs a fresh one).
+        job: The job the send belongs to. Checked before each attempt: a user removed while we waited out
+            flood control must not get the result anyway.
 
     Raises:
         UserBlockedBot: Telegram says the user can't be reached.
         TelegramError: Any other Telegram failure, including a second flood-control refusal.
+        proc.ProcCancelled: The job was cancelled before the send.
     """
+    _check_not_cancelled(job)
     try:
         return await make_call()
     except RetryAfter as e:
         await asyncio.sleep(_retry_seconds(e))
+        _check_not_cancelled(job)
         return await make_call()
     except Forbidden as e:
         raise UserBlockedBot(str(e))
@@ -1118,6 +1129,8 @@ async def _deliver_later(app: Application, job: Job, result: pipeline.Result, wa
             await app.bot.delete_message(job.chat_id, job.status_id)
         except TelegramError:
             pass
+    except proc.ProcCancelled:
+        await _report_cancel(app, job)  # cancelled between parts of the summary
     except UserBlockedBot:
         db.update_request(job.request_id, status="failed", error="user blocked the bot")
     except Exception:
@@ -1137,13 +1150,14 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
     bot_ = app.bot
     if job.transcript_only:
         if not result.transcript:
-            await _send_with_retry(lambda: bot_.send_message(job.chat_id, "No transcript available for this video."))
+            await _send_with_retry(lambda: bot_.send_message(job.chat_id, "No transcript available for this video."),
+                                   job)
         else:
             data = result.transcript.encode()
             # A long transcript is a sizeable upload; PTB's default 5 s write timeout is too short for it.
             await _send_with_retry(lambda: bot_.send_document(
                 job.chat_id, io.BytesIO(data), filename=f"{result.video_id}.txt",
-                caption=f"Transcript ({result.transcript_source})", write_timeout=60))
+                caption=f"Transcript ({result.transcript_source})", write_timeout=60), job)
         return
     # Only admins, or the user who asked for this video before, may learn it was cached: otherwise it
     # would reveal what other users submit.
@@ -1151,7 +1165,7 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
         job.user_id, result.platform, result.video_id, job.request_id)
     for chunk in render(result, waited, reveal_cache=reveal):
         await _send_with_retry(lambda chunk=chunk: bot_.send_message(
-            job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True))
+            job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True), job)
 
 
 INTERNAL_ERROR = "⚠️ Something went wrong on the bot's side."
