@@ -76,6 +76,8 @@ OCR_DAILY_LIMIT = int(_env("OCR_DAILY_LIMIT", "5"))
 OCR_MAX_PAGES = int(_env("OCR_MAX_PAGES", "400"))
 # OCR processes run in parallel; leave a core for the bot and Telegram.
 OCR_WORKERS = int(_env("OCR_WORKERS", "3"))
+# Largest document downloaded from a Google Drive / Dropbox link (Telegram itself stops bots at 20 MB).
+MAX_LINK_DOWNLOAD_MB = int(_env("MAX_LINK_DOWNLOAD_MB", "100"))
 MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
 SHORT_VIDEO_SEC = int(_env("SHORT_VIDEO_SEC", "180"))  # up to this long: denser frame sampling
 # Whisper may use at most this share of the machine's RAM; a video that doesn't fit right now waits (other

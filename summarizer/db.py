@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS requests (
 CREATE TABLE IF NOT EXISTS uploads (
     id          INTEGER PRIMARY KEY AUTOINCREMENT, -- used in the upload's buttons (book:<id>:...)
     user_id     INTEGER NOT NULL,
-    file_id     TEXT NOT NULL,                 -- Telegram's id to download the file again
+    file_id     TEXT NOT NULL,                 -- Telegram's id to download the file again ("" for links)
     file_unique_id TEXT,
     name        TEXT NOT NULL,                 -- file name as sent (shown to the user and in /history)
     size        INTEGER,
@@ -181,6 +181,8 @@ def init() -> None:
             c.execute("ALTER TABLE users ADD COLUMN ocr_limit INTEGER")
         if "ocr" not in {r["name"] for r in c.execute("PRAGMA table_info(requests)")}:
             c.execute("ALTER TABLE requests ADD COLUMN ocr INTEGER DEFAULT 0")  # 1: this request ran OCR
+        if "source_url" not in {r["name"] for r in c.execute("PRAGMA table_info(uploads)")}:
+            c.execute("ALTER TABLE uploads ADD COLUMN source_url TEXT")  # a Drive/Dropbox link instead of a file
         if "toc" not in {r["name"] for r in c.execute("PRAGMA table_info(documents)")}:
             c.execute("ALTER TABLE documents ADD COLUMN toc INTEGER DEFAULT 0")  # chapters from a contents list
         vcols = {r["name"] for r in c.execute("PRAGMA table_info(videos)")}
@@ -501,6 +503,19 @@ def add_upload(user_id: int, file_id: str, file_unique_id: str | None, name: str
     with _db() as c:
         return c.execute("INSERT INTO uploads (user_id, file_id, file_unique_id, name, size, created_at) "
                          "VALUES (?,?,?,?,?,?)", (user_id, file_id, file_unique_id, name, size, time.time())).lastrowid
+
+
+def add_link_upload(user_id: int, url: str, name: str) -> int:
+    """Records a document shared by link (Google Drive / Dropbox). Returns the upload id."""
+    with _db() as c:
+        return c.execute("INSERT INTO uploads (user_id, file_id, name, source_url, created_at) VALUES (?,?,?,?,?)",
+                         (user_id, "", name, url, time.time())).lastrowid
+
+
+def set_upload_name(upload_id: int, name: str) -> None:
+    """Sets an upload's file name once it is known (a Drive link only reveals it when downloaded)."""
+    with _db() as c:
+        c.execute("UPDATE uploads SET name=? WHERE id=?", (name, upload_id))
 
 
 def get_upload(upload_id: int) -> dict | None:

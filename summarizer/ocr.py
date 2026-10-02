@@ -18,7 +18,7 @@ from collections.abc import Callable
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from pathlib import Path
 
-from . import config, db, proc, sandbox, stats
+from . import config, db, fetch, proc, sandbox, stats
 
 log = logging.getLogger(__name__)
 
@@ -351,52 +351,22 @@ class LanguageError(Exception):
 
 
 def _download(url: str, dest: Path, sha256: str | None = None) -> None:
-    """Downloads a model file with size, host and (optionally) checksum checks, written atomically.
+    """Downloads a model file from the allowed hosts (see fetch.download).
 
     Raises:
         LanguageError: The download failed or the file isn't what was expected.
     """
-    import hashlib
-    import urllib.error
-    import urllib.parse
-    import urllib.request
+    def allowed(host: str) -> bool:
+        """GitHub's hosts, and ModelScope with its regional CDN hosts (the SHA-256 checks the content)."""
+        return host in DOWNLOAD_HOSTS or host.endswith(".modelscope.cn")
 
-    class Checked(urllib.request.HTTPRedirectHandler):
-        """Follows redirects only to the allowed hosts over HTTPS."""
-
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            """Refuses a redirect off the allowed hosts."""
-            target = urllib.parse.urlsplit(urllib.parse.urljoin(req.full_url, newurl))
-            host = target.hostname or ""
-            # ModelScope serves files from regional CDN hosts; the pinned SHA-256 checks the content anyway.
-            if target.scheme != "https" or not (host in DOWNLOAD_HOSTS or host.endswith(".modelscope.cn")):
-                raise LanguageError(f"download redirected to an unexpected place ({target.hostname})")
-            return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-    tmp = dest.with_name(dest.name + ".part")
-    digest = hashlib.sha256()
     try:
-        with urllib.request.build_opener(Checked()).open(url, timeout=60) as r:
-            if int(r.headers.get("Content-Length") or 0) > MAX_DOWNLOAD:
-                raise LanguageError("the file is too large")
-            size = 0
-            with tmp.open("wb") as f:
-                while chunk := r.read(1 << 16):
-                    size += len(chunk)
-                    if size > MAX_DOWNLOAD:
-                        raise LanguageError("the file is too large")
-                    digest.update(chunk)
-                    f.write(chunk)
-    except (urllib.error.URLError, OSError) as e:
-        tmp.unlink(missing_ok=True)
-        raise LanguageError(f"download failed: {e}")
-    except LanguageError:
-        tmp.unlink(missing_ok=True)
-        raise
-    if sha256 and digest.hexdigest() != sha256:
-        tmp.unlink(missing_ok=True)
-        raise LanguageError("the downloaded file doesn't match its checksum")
-    tmp.replace(dest)
+        fetch.download(url, dest, allowed=allowed, max_bytes=MAX_DOWNLOAD, sha256=sha256)
+    except fetch.FetchError as e:
+        raise LanguageError({"too_large": "the file is too large",
+                             "checksum": "the downloaded file doesn't match its checksum",
+                             "blocked": f"download redirected to an unexpected place ({e.detail})"}.get(
+                                 e.code, f"download failed: {e.detail}"))
 
 
 def _rapid_model_source(model: str) -> tuple[str, str]:

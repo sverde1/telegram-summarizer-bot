@@ -25,7 +25,8 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
                           MessageHandler, filters)
 
 import access
-from summarizer import config, db, documents, memory, ocr, pipeline, proc, stats, summarize, transcribe, updates
+from summarizer import (config, db, documents, links, memory, ocr, pipeline, proc, stats, summarize, transcribe,
+                        updates)
 from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -42,8 +43,9 @@ HELP = (
     "/history - your recent requests\n"
     "/models - show or choose the AI (Codex or Claude) and model\n"
     "/limit - how many requests you can still send today\n\n"
-    "📄 You can also send a book or document (PDF, EPUB, DOCX or TXT, up to 20 MB): I'll summarize the whole "
-    "thing or chapter by chapter."
+    "📄 You can also send a book or document (PDF, EPUB, DOCX or TXT, up to 20 MB), or a Google Drive or "
+    "Dropbox link to one (shared as \"Anyone with the link\"): I'll summarize the whole thing or chapter by "
+    "chapter."
 )
 ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n"
               "/history - recent requests from all users (who sent what, cache hits)\n"
@@ -779,8 +781,9 @@ TG_DOWNLOAD_LIMIT = 20 * 1024 ** 2  # the most a bot may download from Telegram 
 DOC_EXTENSIONS = {".pdf", ".epub", ".docx", ".txt"}
 CONVERT_EXTENSIONS = {".doc", ".mobi", ".azw", ".azw3", ".rtf", ".odt", ".fb2", ".djvu"}
 DOC_FORMATS = "PDF, EPUB, DOCX or TXT"
-TOO_BIG = ("⚠️ This file is larger than 20 MB, the most Telegram lets bots download. Send a smaller version "
-           "(e.g. a PDF without images, or an EPUB).")
+TOO_BIG = ("⚠️ This file is larger than 20 MB, the most Telegram lets bots download. Upload it to Google Drive "
+           "or Dropbox, share it as \"Anyone with the link\" and send me the link (or send a smaller version, e.g. "
+           "an EPUB).")
 DOWNLOAD_FAILED = "⚠️ Couldn't download the file from Telegram. Please send it again."
 BOOK_MODES = {"whole": ("book", "📖 Whole book"), "short": ("chapters-short", "All chapters, short"),
               "each": ("chapters", "All chapters, one per message"), "pick": ("chapter-list", "Pick a chapter")}
@@ -845,6 +848,24 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                                     reply_markup=_book_menu(upload_id))
 
 
+async def _offer_link(update: Update, url: str, link: links.FileLink) -> None:
+    """A Google Drive / Dropbox link: records it like an upload and asks how to summarize it.
+
+    Nothing is downloaded yet: that happens in the job, once the user picks (and the limits allow it).
+    """
+    name = link.name or f"{link.service} file"
+    ext = Path(link.name).suffix.lower()
+    if ext in CONVERT_EXTENSIONS:
+        await update.message.reply_text(f"⚠️ I can't read {ext} files. Convert it to PDF or EPUB and send it again.")
+        return
+    if link.name and ext not in DOC_EXTENSIONS:
+        await update.message.reply_text(f"⚠️ I can summarize {DOC_FORMATS} files, and YouTube or TikTok links.")
+        return
+    upload_id = db.add_link_upload(update.effective_user.id, url, name)
+    await update.message.reply_text(f"📄 {name} ({link.service})\nHow should I summarize it?",
+                                    reply_markup=_book_menu(upload_id))
+
+
 async def on_book_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the buttons under an upload and in its chapter list (`book:<upload id>:<action>[:<n>]`).
 
@@ -897,7 +918,16 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, ctx):
         return
     text = update.message.text or update.message.caption or ""
-    await enqueue(update, find_url(text))
+    url = find_url(text)
+    try:
+        link = links.parse(url) if url else None
+    except links.LinkError as e:
+        await update.message.reply_text(str(e))
+        return
+    if link:
+        await _offer_link(update, url, link)
+        return
+    await enqueue(update, url)
 
 
 def command(**opts):
@@ -1652,6 +1682,32 @@ async def on_ocr_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     await q.answer()
 
 
+async def _download_link(upload: dict, path: Path, head: str, progress: "Progress") -> dict:
+    """Downloads a Drive/Dropbox-linked document (in a thread: it can take minutes), showing the progress.
+
+    Returns:
+        The upload row, with the file's real name once the service revealed it.
+
+    Raises:
+        documents.DocumentError: Not shared publicly, too large, or the download failed.
+    """
+    link = links.parse(upload["source_url"])  # parsed again: only the bot-built URL is ever fetched
+
+    def shown(done: int, total: int | None) -> None:
+        """Download progress in the status message."""
+        of = f" of {_fmt_size(total)}" if total else ""
+        progress(f"{head}\n📥 Downloading the file… {_fmt_size(done)}{of}", None)
+
+    try:
+        name = await asyncio.to_thread(links.download, link, path, shown)
+    except links.LinkError as e:
+        raise documents.DocumentError(str(e), e.detail)
+    if name and name != upload["name"]:
+        db.set_upload_name(upload["id"], name)
+        upload = db.get_upload(upload["id"])
+    return upload
+
+
 async def _run_document(app: Application, job: Job, progress: "Progress") -> documents.DocResult:
     """Runs a document job: downloads the file from Telegram unless its text is stored, then documents.run.
 
@@ -1668,15 +1724,19 @@ async def _run_document(app: Application, job: Job, progress: "Progress") -> doc
         path = None
         doc = db.get_document(upload["sha256"]) if upload["sha256"] else None
         if not doc or doc["status"] != "done":
-            progress(f"📄 {upload['name'][:80]}\n📥 Downloading the file…", None)
+            head = f"📄 {upload['name'][:80]}"
+            progress(f"{head}\n📥 Downloading the file…", None)
             path = workdir / "upload"  # no extension: the format is told from the bytes
-            try:
-                tg_file = await app.bot.get_file(upload["file_id"])
-                await tg_file.download_to_drive(path)
-            except BadRequest as e:
-                raise documents.DocumentError(TOO_BIG if "too big" in str(e).lower() else DOWNLOAD_FAILED, str(e))
-            except TelegramError as e:
-                raise documents.DocumentError(DOWNLOAD_FAILED, str(e))
+            if upload["source_url"]:
+                upload = await _download_link(upload, path, head, progress)
+            else:
+                try:
+                    tg_file = await app.bot.get_file(upload["file_id"])
+                    await tg_file.download_to_drive(path)
+                except BadRequest as e:
+                    raise documents.DocumentError(TOO_BIG if "too big" in str(e).lower() else DOWNLOAD_FAILED, str(e))
+                except TelegramError as e:
+                    raise documents.DocumentError(DOWNLOAD_FAILED, str(e))
             if job.cancel_reason:
                 raise proc.ProcCancelled("cancelled")
         return await asyncio.to_thread(

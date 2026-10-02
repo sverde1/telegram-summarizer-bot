@@ -33,6 +33,8 @@ service on a single machine with no GPU.
 | `summarizer/books.py` | Book summaries: chapters batched per call, long chapters in parts, whole book (map-reduce), cached in `doc_summaries`. |
 | `summarizer/ocr.py` | OCR of scanned PDFs: rendering, Tesseract/RapidOCR in the sandbox, parallel batches, language check, estimates. |
 | `summarizer/rapid_ocr.py` | RapidOCR entry point **inside** the sandbox (offline: models by path only). |
+| `summarizer/links.py` | Google Drive / Dropbox share links: parsed into a bot-built download URL, downloaded via `fetch`. |
+| `summarizer/fetch.py` | The only way to download a file by URL: HTTPS, allowed hosts checked on every redirect, size cap, optional SHA-256. |
 | `summarizer/documents.py` | Bot side of docparse: runs it sandboxed, maps errors to user messages, stores pages by SHA-256. |
 | `tests/` | pytest suite; `conftest.py` isolates tests from the real bot (see above), `helpers.py` has the fake LLM. |
 | `deploy/` | systemd units and the weekly extractor-upgrade script. |
@@ -88,6 +90,8 @@ How the tests are isolated (`tests/conftest.py`):
 - OCR models are downloaded only by `ocr.add_language` (admins' `/ocrlang`): fixed URLs, HTTPS redirects
   only to the allowed hosts, size caps, SHA-256 for RapidOCR, a sandboxed test run for Tesseract models.
   The OCR sandbox is offline: nothing may download at OCR time.
+- Document share links go only through `links.parse` (the download URL is rebuilt from the file id/path,
+  never the user's URL) and `fetch.download` with the service's host allow-list.
 - Links are accepted only through `urls.check` / `urls.classify` (host allow-list; TikTok short-link
   redirects validated hop by hop). Never fetch a user-supplied URL any other way.
 - The bot answers only in private chats; every message/command handler is filtered to private chats and

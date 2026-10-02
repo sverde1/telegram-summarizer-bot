@@ -235,6 +235,7 @@ The database migrates itself on start.
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |
 | `MAX_DOC_PAGES` | `2000` | Most pages read from an uploaded document (EPUB/DOCX/TXT count ~2000 characters as a page). |
 | `MAX_DOC_CHARS` | `3000000` | Most characters read from an uploaded document. |
+| `MAX_LINK_DOWNLOAD_MB` | `100` | Largest document downloaded from a Google Drive / Dropbox link. |
 | `OCR_ENGINE` | `tesseract` | Text recognition for scanned PDFs: `tesseract` (system package, most accurate for Latin-script languages) or `rapidocr` (Python/ONNX, no system install). |
 | `OCR_DAILY_LIMIT` | `5` | Scanned documents a user may have read per rolling 24 h (admins: no limit; `0` = no limit). Once changed with `/limit ocr`, the stored value wins. |
 | `OCR_MAX_PAGES` | `400` | Longest scan read without an admin's approval (pages needing OCR). |
@@ -276,7 +277,9 @@ The command menu adapts per user: strangers only see `/start`.
 
 ### Books and documents
 
-Send a **PDF, EPUB, DOCX or TXT** file (up to 20 MB, the most Telegram lets bots download) and pick:
+Send a **PDF, EPUB, DOCX or TXT** file (up to 20 MB, the most Telegram lets bots download), or a **Google
+Drive or Dropbox link** to one (up to `MAX_LINK_DOWNLOAD_MB`, default 100 MB; shared as "Anyone with the
+link"; Google Docs documents work too), and pick:
 
 - **📖 Whole book**: title, author and a summary of the whole thing.
 - **📑 By chapter**, then one of:
