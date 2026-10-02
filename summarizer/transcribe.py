@@ -2,10 +2,11 @@
 import logging
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 
-from . import config, proc, stats
+from . import config, proc, sandbox, stats
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ def get_model():
     return _model
 
 
-def _decode(path: str) -> np.ndarray:
+def _decode(path: str, sandbox_dir: Path | None = None) -> np.ndarray:
     """Decodes an audio file to the 16 kHz mono float32 samples Whisper expects.
 
     Uses ffmpeg rather than faster-whisper's own decoder: that one passes `metadata_errors` to
@@ -76,6 +77,8 @@ def _decode(path: str) -> np.ndarray:
 
     Args:
         path: Any audio or video file ffmpeg can read.
+        sandbox_dir: For a file a user sent (inside this job directory): ffmpeg runs in the sandbox and
+            writes the samples to a file there, read back here; nothing of the file is parsed in the bot.
 
     Returns:
         The samples as a 1-D float32 array.
@@ -83,6 +86,21 @@ def _decode(path: str) -> np.ndarray:
     Raises:
         RuntimeError: ffmpeg couldn't decode the file.
     """
+    if sandbox_dir is not None:
+        out = Path(sandbox_dir) / "decoded.f32"
+        args = [config.FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", sandbox.inside(Path(path), Path(sandbox_dir)), "-ac", "1", "-ar", "16000", "-f", "f32le",
+                sandbox.inside(out, Path(sandbox_dir))]
+        try:
+            p = proc.run(sandbox.command(Path(sandbox_dir), args, memory=2 * 1024 ** 3), timeout=1800)
+        except proc.ProcTimeout:
+            raise RuntimeError("decoding the audio timed out")
+        if p.returncode != 0 or not out.exists():
+            raise RuntimeError(f"ffmpeg could not decode audio: {p.stderr[-300:]}")
+        try:
+            return np.fromfile(out, dtype="<f4")
+        finally:
+            out.unlink(missing_ok=True)
     try:
         p = proc.run([config.FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
                       "-ac", "1", "-ar", "16000", "-f", "f32le", "-"], timeout=1800, text=False)
@@ -93,7 +111,7 @@ def _decode(path: str) -> np.ndarray:
     return np.frombuffer(p.stdout, dtype=np.float32)
 
 
-def transcribe(audio_path: str) -> tuple[list[tuple[float, str]], str, float]:
+def transcribe(audio_path: str, sandbox_dir: Path | None = None) -> tuple[list[tuple[float, str]], str, float]:
     """Transcribes an audio file, detecting its language.
 
     Language is always auto-detected: forcing it (or using an English-only *.en model) on
@@ -102,6 +120,7 @@ def transcribe(audio_path: str) -> tuple[list[tuple[float, str]], str, float]:
 
     Args:
         audio_path: The audio file.
+        sandbox_dir: For a file a user sent: decode it in the sandbox (see _decode).
 
     Returns:
         ([(start_seconds, text)], language code, language probability). The list is empty when no
@@ -113,7 +132,7 @@ def transcribe(audio_path: str) -> tuple[list[tuple[float, str]], str, float]:
     with _lock:
         model = get_model()
         t0 = time.monotonic()
-        audio = _decode(audio_path)
+        audio = _decode(audio_path, sandbox_dir)
         # The voice-activity filter skips silence and music, where Whisper tends to hallucinate text.
         segments, info = model.transcribe(audio, language=None, vad_filter=True)
         cues = []

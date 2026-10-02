@@ -16,6 +16,11 @@ APP = "/app"  # where the summarizer package appears inside the sandbox
 MEMORY_LIMIT = 6 * 1024 ** 3  # address-space cap; generous because onnxruntime reserves big arenas
 
 
+def inside(path: Path, job: Path) -> str:
+    """A path in the job's directory as the sandbox sees it (/job/...)."""
+    return f"/job/{Path(path).relative_to(job)}"
+
+
 def command(job: Path, args: list[str], *, ro_binds: dict[Path, str] | None = None,
             memory: int | None = MEMORY_LIMIT, env: dict[str, str] | None = None, gpu: bool = False) -> list[str]:
     """Builds the full command that runs `args` sandboxed, with `job` as the only writable directory.

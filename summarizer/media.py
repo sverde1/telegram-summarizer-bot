@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from . import config, proc
+from . import config, proc, sandbox
 from .urls import Video
 
 log = logging.getLogger(__name__)
@@ -395,6 +395,59 @@ def download_video(video: Video, workdir: Path) -> Path:
     if not files:
         raise MediaError("video download produced no file")
     return files[0]
+
+
+COVER_CODECS = {"mjpeg", "png", "bmp", "gif", "webp"}  # a still image in an audio file is cover art
+
+
+def probe_file(path: Path, workdir: Path) -> dict:
+    """Length and streams of a file a user sent, read in the sandbox (the file is untrusted).
+
+    Cover art (an attached picture, or a single still image) doesn't count as video: an mp3 with a cover is
+    audio.
+
+    Args:
+        path: The file, inside workdir.
+        workdir: The job's directory (the sandbox's /job).
+
+    Returns:
+        {"duration": seconds (0 if unknown), "has_audio": bool, "has_video": bool}.
+
+    Raises:
+        MediaError: The file can't be read as audio or video.
+    """
+    target = sandbox.inside(path, workdir)
+    if config.FFPROBE:
+        p = proc.run(sandbox.command(workdir, [config.FFPROBE, "-v", "error", "-show_format", "-show_streams",
+                                               "-of", "json", target], memory=2 * 1024 ** 3), timeout=120)
+        try:
+            info = json.loads(p.stdout or "{}")
+        except ValueError:
+            info = {}
+        streams = info.get("streams") or []
+        if p.returncode != 0 or not streams:
+            raise MediaError(f"unreadable media: {p.stderr[-200:]}")
+        has_audio = any(s.get("codec_type") == "audio" for s in streams)
+        has_video = any(s.get("codec_type") == "video" and not (s.get("disposition") or {}).get("attached_pic")
+                        and not (s.get("codec_name") in COVER_CODECS and str(s.get("nb_frames", "1")) in ("0", "1"))
+                        for s in streams)
+        try:
+            duration = float((info.get("format") or {}).get("duration") or 0)
+        except ValueError:
+            duration = 0.0
+        return {"duration": duration, "has_audio": has_audio, "has_video": has_video}
+    # No ffprobe (the imageio ffmpeg build): "ffmpeg -i" lists the streams and fails for want of an output.
+    p = proc.run(sandbox.command(workdir, [config.FFMPEG, "-hide_banner", "-i", target], memory=2 * 1024 ** 3),
+                 timeout=120)
+    text = p.stderr or ""
+    streams = re.findall(r"Stream #\S+.*?: (Audio|Video): (\w+)(.*)", text)
+    if not streams:
+        raise MediaError("unreadable media")
+    m = re.search(r"Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)", text)
+    duration = int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3]) if m else 0.0
+    has_video = any(kind == "Video" and not (codec in COVER_CODECS or "attached pic" in rest)
+                    for kind, codec, rest in streams)
+    return {"duration": duration, "has_audio": any(k == "Audio" for k, _, _ in streams), "has_video": has_video}
 
 
 def has_audio_stream(path: Path) -> bool:

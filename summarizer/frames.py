@@ -6,7 +6,7 @@ from pathlib import Path
 import imagehash
 from PIL import Image
 
-from . import config, proc
+from . import config, proc, sandbox
 
 log = logging.getLogger(__name__)
 
@@ -51,13 +51,25 @@ def _mmss(t: float) -> str:
     return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
 
 
-def _grab(video: Path, t: float, out: Path) -> bool:
+def _ffmpeg(args: list, sandbox_dir: Path | None) -> list[str]:
+    """An ffmpeg command, run in the sandbox for a user's file (sandbox_dir: the job's directory).
+
+    Path arguments are rewritten to where the sandbox sees them.
+    """
+    if sandbox_dir is None:
+        return [config.FFMPEG, *(str(a) for a in args)]
+    args = [sandbox.inside(a, sandbox_dir) if isinstance(a, Path) else a for a in args]
+    return sandbox.command(sandbox_dir, [config.FFMPEG, *args], memory=2 * 1024 ** 3)
+
+
+def _grab(video: Path, t: float, out: Path, sandbox_dir: Path | None = None) -> bool:
     """Saves the single frame at `t` seconds as a JPEG.
 
     Args:
         video: The video file.
         t: Time in seconds.
         out: Where to write the JPEG.
+        sandbox_dir: For a file a user sent: run ffmpeg in the sandbox (the job's directory).
 
     Returns:
         True if a non-empty image was written (False e.g. past the end of the video).
@@ -65,15 +77,15 @@ def _grab(video: Path, t: float, out: Path) -> bool:
     # -ss before -i seeks on keyframes first: fast even deep into a long video. Width is capped at
     # 1280 px: enough to read on-screen text, smaller to send; -2 keeps the aspect ratio (even height).
     try:
-        p = proc.run([config.FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.2f}",
-                      "-i", str(video), "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2",
-                      "-q:v", "2", str(out)], timeout=120)
+        p = proc.run(_ffmpeg(["-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.2f}",
+                              "-i", Path(video), "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2",
+                              "-q:v", "2", Path(out)], sandbox_dir), timeout=120)
     except proc.ProcTimeout:
         return False  # a frame that can't be grabbed in time is just skipped
     return p.returncode == 0 and out.exists() and out.stat().st_size > 0
 
 
-def _sweep(video: Path, interval: float, fdir: Path) -> list[tuple[float, Path]]:
+def _sweep(video: Path, interval: float, fdir: Path, sandbox_dir: Path | None = None) -> list[tuple[float, Path]]:
     """Grabs a frame every `interval` seconds in a single ffmpeg pass.
 
     One pass decodes the video once, which is much faster than seeking for each frame.
@@ -82,15 +94,16 @@ def _sweep(video: Path, interval: float, fdir: Path) -> list[tuple[float, Path]]
         video: The video file.
         interval: Seconds between frames.
         fdir: Directory for the frames (s_0001.jpg, ...).
+        sandbox_dir: For a file a user sent: run ffmpeg in the sandbox (the job's directory).
 
     Returns:
         [(approximate time in seconds, path)] in order. The fps filter's first frame is at 0 s.
     """
     try:
-        proc.run([config.FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
-                  "-vf", f"fps=1/{interval:.3f},scale='min(1280,iw)':-2", "-q:v", "2",
-                  # Safety net on top of the interval choice: never write more than this many files.
-                  "-frames:v", str(SWEEP_FRAMES + 5), str(fdir / "s_%04d.jpg")], timeout=900)
+        proc.run(_ffmpeg(["-hide_banner", "-loglevel", "error", "-y", "-i", Path(video),
+                          "-vf", f"fps=1/{interval:.3f},scale='min(1280,iw)':-2", "-q:v", "2",
+                          # Safety net on top of the interval choice: never write more than this many files.
+                          "-frames:v", str(SWEEP_FRAMES + 5), fdir / "s_%04d.jpg"], sandbox_dir), timeout=900)
     except proc.ProcTimeout:
         pass  # keep whatever frames were written before the time ran out
     return [(i * interval, p) for i, p in enumerate(sorted(fdir.glob("s_*.jpg")))]
@@ -142,7 +155,7 @@ def plan_moments(moments: list[float], duration: float) -> list[float]:
 
 
 def extract(video: Path, duration: float, moments: list[float], workdir: Path,
-            sweep: bool) -> list[tuple[Path, str]]:
+            sweep: bool, sandboxed: bool = False) -> list[tuple[Path, str]]:
     """Grabs distinct frames at the given moments, plus an optional even sweep.
 
     Near-duplicates are dropped, and at most `config.MAX_FRAMES` are kept, preferring the targeted ones.
@@ -156,6 +169,8 @@ def extract(video: Path, duration: float, moments: list[float], workdir: Path,
         workdir: The job's temp directory; frames go to workdir/frames.
         sweep: Also sample the whole video evenly (short or speechless videos, or when the LLM asked to
             see the video without naming moments).
+        sandboxed: The video is a file a user sent: ffmpeg runs in the sandbox (the file and the frames are
+            in workdir).
 
     Returns:
         [(path, label)] in time order, the label being "t=m:ss" for the LLM.
@@ -168,12 +183,12 @@ def extract(video: Path, duration: float, moments: list[float], workdir: Path,
     for m in plan_moments(moments, duration):
         for t in (m + 1, m + 3):
             out = fdir / f"t_{t:08.2f}.jpg"
-            if t < duration and _grab(video, t, out):
+            if t < duration and _grab(video, t, out, workdir if sandboxed else None):
                 targeted.append((t, out))
     # About 40 frames spread over the whole video, but never denser than every 2 s (a 10-second clip would
     # otherwise give frames 0.25 s apart, all identical). No upper limit on the interval: a fixed maximum
     # would give a long video hundreds of frames, or, capped, only cover its beginning.
-    swept = _sweep(video, max(duration / SWEEP_FRAMES, 2), fdir) if sweep else []
+    swept = _sweep(video, max(duration / SWEEP_FRAMES, 2), fdir, workdir if sandboxed else None) if sweep else []
 
     def dedup(frames, against):
         """Drops frames that look like an already kept one.

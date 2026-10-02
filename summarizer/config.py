@@ -158,6 +158,8 @@ def _ffmpeg() -> str:
 
 
 FFMPEG = _ffmpeg()
+# ffprobe comes with a system ffmpeg only (the imageio build has none); without it, ffmpeg -i is parsed.
+FFPROBE = __import__("shutil").which("ffprobe")
 
 
 def secure_files() -> None:
