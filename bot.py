@@ -48,7 +48,8 @@ HELP = (
 ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n"
               "/history - recent requests from all users (who sent what, cache hits)\n"
               "/limit - daily limits: /limit 50 (everyone), /limit <user id> 200 (one user), "
-              "/limit <user id> default, /limit 0 (no limit); /limit ocr … for scanned documents")
+              "/limit <user id> default, /limit 0 (no limit); /limit ocr … for scanned documents\n"
+              "/ocrlang - OCR languages: /ocrlang add slv, /ocrlang remove slv")
 
 
 @dataclass
@@ -536,6 +537,36 @@ async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text("Usage: /limit · /limit 50 · /limit <user id> 200 · /limit <user id> default "
                                     "(add \"ocr\" first for the OCR limit)")
+
+
+async def on_ocrlang(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /ocrlang (admins only): lists, adds or removes the languages OCR can read.
+
+    `/ocrlang` lists the installed and available languages; `/ocrlang add <code>` downloads the model for
+    the current engine (from fixed sources only) and adds it; `/ocrlang remove <code>` drops one.
+    Non-admins get no reply, so the command's existence isn't revealed.
+    """
+    uid = update.effective_user.id
+    if not access.is_admin(uid):
+        return
+    args = [a.lower() for a in ctx.args]
+    if len(args) == 2 and args[0] in ("add", "remove"):
+        if args[0] == "add" and args[1] in ocr.LANGUAGES and args[1] not in ocr.installed():
+            await update.message.reply_text(f"⏳ Downloading the {ocr.LANGUAGES[args[1]][0]} model…")
+        try:
+            fn = ocr.add_language if args[0] == "add" else ocr.remove_language
+            reply = await asyncio.to_thread(fn, args[1])  # a download takes a while: off the event loop
+        except ocr.LanguageError as e:
+            reply = f"⚠️ {e}"
+        await update.message.reply_text(reply)
+        return
+    have = ocr.installed()
+    others = ", ".join(f"{code} {name}" for code, (name, *_rest) in ocr.LANGUAGES.items() if code not in have)
+    engine = {"tesseract": "Tesseract", "rapidocr": "RapidOCR"}[ocr.engine()]
+    status = "" if ocr.available() else " (not installed!)"
+    await update.message.reply_text(
+        f"🔍 OCR engine: {engine}{status}\nInstalled: " + ", ".join(f"{ocr.LANGUAGES[c][0]} ({c})" for c in have)
+        + f"\n\nAdd: /ocrlang add <code> · remove: /ocrlang remove <code>\nAvailable: {others}")
 
 
 async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1821,7 +1852,8 @@ USER_COMMANDS = [
 # Admin-specific commands first; /history is re-described ("all users"), so the user version is dropped.
 ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock"),
                   BotCommand("history", "Recent requests from all users"),
-                  BotCommand("limit", "Daily limits: show or set")] + [
+                  BotCommand("limit", "Daily limits: show or set"),
+                  BotCommand("ocrlang", "Languages for scanned documents (OCR)")] + [
     c for c in USER_COMMANDS if c.command not in ("history", "limit")]
 
 
@@ -1959,7 +1991,8 @@ def add_handlers(app: Application) -> None:
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     for name, handler in [("start", on_start), ("help", on_help), ("again", command(use_cache=False)),
                           ("transcript", command(transcript_only=True)), ("users", on_users),
-                          ("history", on_history), ("models", on_models), ("limit", on_limit)]:
+                          ("history", on_history), ("models", on_models), ("limit", on_limit),
+                          ("ocrlang", on_ocrlang)]:
         app.add_handler(CommandHandler(name, handler, filters=new))
     # Order matters: the first matching handler wins, so the picker's `llm:` buttons must be registered
     # before the catch-all admin-button handler.

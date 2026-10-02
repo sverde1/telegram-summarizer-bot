@@ -268,6 +268,7 @@ The bot test-runs the model when it loads and falls back to the CPU if CUDA isn'
 | `/models` | users | Show or choose the AI: provider first, then model. |
 | `/limit` | users | Your daily limit: used in the last 24 h and how many are left. |
 | `/limit` | admins | Show the daily and OCR limits and per-user overrides. `/limit 50` sets the daily limit for everyone, `/limit <user id> 200` for one user, `/limit <user id> default` removes the override; `0` = no limit. The same with `ocr` first (`/limit ocr 5`) for the OCR limit. |
+| `/ocrlang` | admins | Languages for scanned documents: `/ocrlang` lists them, `/ocrlang add slv` downloads and installs one (Tesseract: from tesseract-ocr's `tessdata_fast` on GitHub, checked with a test run; RapidOCR: the script's model, checked against RapidOCR's pinned SHA-256), `/ocrlang remove slv`. |
 | `/users` | admins | Users with Allow / Deny / Remove / Unblock buttons, their AI choice and daily limit with today's usage. |
 | `/start` | strangers | Request access. |
 

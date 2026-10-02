@@ -187,7 +187,8 @@ def _ocr(digest: str, doc: dict, path: Path | None, workdir: Path, st: "pipeline
         try:
             langs = ocr.choose_languages(path, need, workdir)
         except ocr.UnsupportedLanguage as e:
-            raise DocumentError(str(e), "unsupported OCR language")
+            # Admins see the detail: how to add the language.
+            raise DocumentError(str(e), f"add it with /ocrlang add {e.code}" if e.code else "unsupported script")
         db.save_document(digest, language=langs)
         doc["language"] = langs
         steps.append(("language check", time.monotonic() - t))

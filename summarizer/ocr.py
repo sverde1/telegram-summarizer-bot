@@ -61,7 +61,12 @@ NO_ENGINE = "⚠️ Text recognition (OCR) isn't set up on this bot, so I can't 
 
 
 class UnsupportedLanguage(Exception):
-    """A scan in a language that isn't installed. str() is the user message."""
+    """A scan in a language that isn't installed. str() is the user message; `code` the language, if known."""
+
+    def __init__(self, message: str, code: str | None = None):
+        """Stores the user message and the detected language's code."""
+        super().__init__(message)
+        self.code = code
 
 
 def engine() -> str:
@@ -80,10 +85,21 @@ def available() -> bool:
         return False
 
 
+def _usable(code: str) -> bool:
+    """Whether the current engine has what it needs to read this language."""
+    if engine() == "tesseract":
+        return (tessdata() / f"{code}.traineddata").exists()
+    model = LANGUAGES[code][3]
+    return model == "" or (model is not None and (rapid_models() / f"{model}.onnx").exists())
+
+
 def installed() -> list[str]:
-    """The installed OCR languages (codes), English by default."""
+    """The installed OCR languages (codes) the current engine can read; English by default.
+
+    A language added for one engine isn't usable by the other until added again (switching OCR_ENGINE).
+    """
     stored = db.get_setting("ocr_languages")
-    codes = [c for c in (stored or "eng").split(",") if c in LANGUAGES]
+    codes = [c for c in (stored or "eng").split(",") if c in LANGUAGES and _usable(c)]
     return codes or ["eng"]
 
 
@@ -312,10 +328,162 @@ def choose_languages(pdf: Path, pages: list[int], workdir: Path) -> str:
         return "+".join(usable)
     if detected and confidence < LOW_CONFIDENCE:
         raise UnsupportedLanguage(f"⚠️ This scan looks like {LANGUAGES[detected[0]][0]}, which text recognition "
-                                  f"doesn't support yet. {supported}")
+                                  f"doesn't support yet. {supported}", detected[0])
     return "+".join(have)
 
 
 def available_tesseract() -> bool:
     """Whether Tesseract is installed (also used for script detection when RapidOCR reads the pages)."""
     return shutil.which("tesseract") is not None
+
+
+# ---------- adding languages (/ocrlang) ----------
+
+TESSDATA_URL = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/{code}.traineddata"
+# Downloads go only to these hosts over HTTPS, redirects included (GitHub serves raw files from a CDN host).
+DOWNLOAD_HOSTS = {"github.com", "raw.githubusercontent.com", "objects.githubusercontent.com",
+                  "www.modelscope.cn", "modelscope.cn"}
+MAX_DOWNLOAD = 60 * 1024 ** 2  # the biggest model in question is ~25 MB
+
+
+class LanguageError(Exception):
+    """Adding or removing a language failed; str() is the message for the admin."""
+
+
+def _download(url: str, dest: Path, sha256: str | None = None) -> None:
+    """Downloads a model file with size, host and (optionally) checksum checks, written atomically.
+
+    Raises:
+        LanguageError: The download failed or the file isn't what was expected.
+    """
+    import hashlib
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    class Checked(urllib.request.HTTPRedirectHandler):
+        """Follows redirects only to the allowed hosts over HTTPS."""
+
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            """Refuses a redirect off the allowed hosts."""
+            target = urllib.parse.urlsplit(urllib.parse.urljoin(req.full_url, newurl))
+            host = target.hostname or ""
+            # ModelScope serves files from regional CDN hosts; the pinned SHA-256 checks the content anyway.
+            if target.scheme != "https" or not (host in DOWNLOAD_HOSTS or host.endswith(".modelscope.cn")):
+                raise LanguageError(f"download redirected to an unexpected place ({target.hostname})")
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    tmp = dest.with_name(dest.name + ".part")
+    digest = hashlib.sha256()
+    try:
+        with urllib.request.build_opener(Checked()).open(url, timeout=60) as r:
+            if int(r.headers.get("Content-Length") or 0) > MAX_DOWNLOAD:
+                raise LanguageError("the file is too large")
+            size = 0
+            with tmp.open("wb") as f:
+                while chunk := r.read(1 << 16):
+                    size += len(chunk)
+                    if size > MAX_DOWNLOAD:
+                        raise LanguageError("the file is too large")
+                    digest.update(chunk)
+                    f.write(chunk)
+    except (urllib.error.URLError, OSError) as e:
+        tmp.unlink(missing_ok=True)
+        raise LanguageError(f"download failed: {e}")
+    except LanguageError:
+        tmp.unlink(missing_ok=True)
+        raise
+    if sha256 and digest.hexdigest() != sha256:
+        tmp.unlink(missing_ok=True)
+        raise LanguageError("the downloaded file doesn't match its checksum")
+    tmp.replace(dest)
+
+
+def _rapid_model_source(model: str) -> tuple[str, str]:
+    """URL and SHA-256 of a RapidOCR recognition model, from the table that ships with RapidOCR itself."""
+    import rapidocr
+    import yaml
+    table = yaml.safe_load((Path(rapidocr.__file__).parent / "default_models.yaml").read_text())
+    for version in table["onnxruntime"].values():
+        for name, info in (version.get("rec") or {}).items():
+            if name.startswith(f"{model}_PP-OCR") and name.endswith("_mobile"):
+                return info["model_dir"], info["SHA256"]
+    raise LanguageError(f"RapidOCR has no model for {model}")
+
+
+def _check_tesseract_model(path: Path, code: str) -> None:
+    """Runs Tesseract with a new language model on a tiny image, in the sandbox, to prove the file works.
+
+    Raises:
+        LanguageError: Tesseract can't use it.
+    """
+    from PIL import Image, ImageDraw
+    work = config.DATA_DIR / "work" / f"ocrlang-{code}"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    try:
+        img = Image.new("L", (400, 80), 255)
+        ImageDraw.Draw(img).text((10, 30), "Test 123", fill=0)
+        img.save(work / "t.png")
+        models = work / "tessdata"
+        models.mkdir()
+        shutil.copy(path, models / f"{code}.traineddata")
+        run = proc.run(sandbox.command(work, ["tesseract", "/job/t.png", "-", "-l", code],
+                                       ro_binds={models: "/tessdata"}, env={"TESSDATA_PREFIX": "/tessdata"}),
+                       timeout=120)
+        if run.returncode != 0:
+            raise LanguageError(f"Tesseract can't use the downloaded model: {run.stderr[-200:]}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def add_language(code: str) -> str:
+    """Installs an OCR language for the current engine and adds it to the installed list.
+
+    Returns:
+        A confirmation for the admin.
+
+    Raises:
+        LanguageError: Unknown code, not available for the engine, or the download failed.
+    """
+    if code not in LANGUAGES:
+        raise LanguageError(f"Unknown language code {code!r}. Send /ocrlang for the list.")
+    name, _, _, model = LANGUAGES[code]
+    if engine() == "tesseract":
+        target = tessdata() / f"{code}.traineddata"
+        if not target.exists():
+            tmp = tessdata() / f"{code}.download"
+            try:
+                _download(TESSDATA_URL.format(code=code), tmp)
+                _check_tesseract_model(tmp, code)
+                tmp.replace(target)
+            finally:
+                tmp.unlink(missing_ok=True)
+    elif model is None:
+        raise LanguageError(f"RapidOCR can't read {name}. Use OCR_ENGINE=tesseract for it.")
+    elif model and not (rapid_models() / f"{model}.onnx").exists():
+        url, sha = _rapid_model_source(model)
+        _download(url, rapid_models() / f"{model}.onnx", sha)
+    codes = [c for c in (db.get_setting("ocr_languages") or "eng").split(",") if c in LANGUAGES]
+    if code not in codes:
+        codes.append(code)
+    db.set_setting("ocr_languages", ",".join(codes))
+    return f"✅ {name} ({code}) added. Text recognition now reads: {names(installed())}."
+
+
+def remove_language(code: str) -> str:
+    """Removes an OCR language from the installed list (the last one can't be removed).
+
+    Raises:
+        LanguageError: Not installed, or the last language.
+    """
+    codes = [c for c in (db.get_setting("ocr_languages") or "eng").split(",") if c in LANGUAGES]
+    if code not in codes:
+        raise LanguageError(f"{code!r} isn't installed.")
+    if len(codes) == 1:
+        raise LanguageError("That's the only language; add another one first.")
+    codes.remove(code)
+    db.set_setting("ocr_languages", ",".join(codes))
+    if code not in ("eng", "osd"):
+        (tessdata() / f"{code}.traineddata").unlink(missing_ok=True)
+    return f"✅ {LANGUAGES[code][0]} ({code}) removed. Text recognition reads: {names(installed())}."

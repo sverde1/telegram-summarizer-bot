@@ -85,6 +85,9 @@ How the tests are isolated (`tests/conftest.py`):
   process. The sandbox mounts `summarizer/` alone, never the repo (`.env` is there); code running inside
   (`docparse`) must not import `summarizer.config` or other bot modules. EPUB/DOCX members are read only
   through `docparse._read` (size and compression-ratio caps).
+- OCR models are downloaded only by `ocr.add_language` (admins' `/ocrlang`): fixed URLs, HTTPS redirects
+  only to the allowed hosts, size caps, SHA-256 for RapidOCR, a sandboxed test run for Tesseract models.
+  The OCR sandbox is offline: nothing may download at OCR time.
 - Links are accepted only through `urls.check` / `urls.classify` (host allow-list; TikTok short-link
   redirects validated hop by hop). Never fetch a user-supplied URL any other way.
 - The bot answers only in private chats; every message/command handler is filtered to private chats and
