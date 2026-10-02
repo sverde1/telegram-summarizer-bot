@@ -274,7 +274,8 @@ The command menu adapts per user: strangers only see `/start`.
 7. **Reply** in Telegram (HTML, split at 4096 characters). Downloaded media and LLM session files are
    deleted after each job (and any leftovers of a crashed run at the next start).
 
-Jobs run one at a time from a queue; the status message shows the queue position, each stage and an ETA
+Jobs run one at a time from a queue; the status message shows an estimated wait while queued (never the position, which would
+reveal how busy others are), then each stage and an ETA
 learned from this machine's measured speeds. Every external program runs in its own process group, so a
 timeout, a cancelled job or a removed user stops it at once.
 

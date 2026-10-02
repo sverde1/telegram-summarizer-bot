@@ -530,6 +530,23 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             log.warning("couldn't notify user %s: %s", uid, e)
 
 
+JOB_SECONDS_DEFAULT = 60  # assumed time per job until real jobs have been measured
+
+
+def _queued_message() -> str:
+    """The first reply to a link: "working" if it starts now, else an estimated wait.
+
+    The wait is shown instead of a queue position: a position would tell users how busy the others are.
+    Jobs ahead are the queued ones plus the running one; jobs waiting for memory or replaying a cached
+    answer don't hold the queue up.
+    """
+    ahead = queue.qsize() + (1 if _running is not None else 0)
+    if not ahead:
+        return "⏳ Got it, working…"
+    wait = ahead * stats.get("job", JOB_SECONDS_DEFAULT)
+    return f"⏳ Got it, you're in the queue. Estimated wait: about {_fmt_eta(wait)}."
+
+
 async def enqueue(update: Update, url: str | None, **opts) -> None:
     """Acknowledges a link right away, logs the request, and queues the job.
 
@@ -561,9 +578,7 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
         if len(_jobs) >= config.MAX_QUEUE:
             await update.message.reply_text("⏳ The bot is busy right now. Please try again in a few minutes.")
             return
-    ahead = queue.qsize()
-    status = await update.message.reply_text(
-        "⏳ Got it" + (f", queued (position {ahead + 1})" if ahead else ", working…"))
+    status = await update.message.reply_text(_queued_message())
     kind = "transcript" if opts.get("transcript_only") else "again" if opts.get("use_cache") is False else "summary"
     req = db.add_request(uid, url, kind)  # logged the moment the link arrives
     b, m, is_default = _current_llm(uid)
@@ -1087,6 +1102,11 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             return True
         await _deliver(app, job, result, waited)
         db.update_request(job.request_id, status="done", cached=int(result.cached))
+        if not result.cached and not job.transcript_only:
+            # Only fresh summaries teach the wait estimate: cache hits (~1 s) and transcripts would drag
+            # the average far below what a queued link really waits for.
+            if total := (result.summary or {}).get("_stats", {}).get("total"):
+                stats.record("job", total)
         try:
             await app.bot.delete_message(job.chat_id, job.status_id)
         except TelegramError:
