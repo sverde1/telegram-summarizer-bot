@@ -18,7 +18,7 @@ service on a single machine with no GPU.
 | `access.py` | Who may use the bot (admins from `.env`, others from the `users` table). |
 | `summarizer/pipeline.py` | URL in, `Result` out: cache lookup, transcript, frames, LLM turns, timings. Blocking; runs in a worker thread. |
 | `summarizer/summarize.py` | Prompts, JSON schemas, the three LLM backends as `Conversation` classes, model lists. |
-| `summarizer/media.py` | yt-dlp / gallery-dl calls: probe, captions, audio, video, thumbnail, carousel slides. |
+| `summarizer/media.py` | yt-dlp / gallery-dl calls: probe, captions, audio, video, thumbnail, carousel slides; `probe_file` reads a sent recording's streams in the sandbox. |
 | `summarizer/transcribe.py` | faster-whisper (model load + self-test, ffmpeg decode, speed stats). |
 | `summarizer/frames.py` | Frame grabbing at given moments, sweeps, near-duplicate removal. |
 | `summarizer/db.py` | SQLite schema, migrations (in `init()`), all queries. |
@@ -34,7 +34,7 @@ service on a single machine with no GPU.
 | `summarizer/ocr.py` | OCR of scanned PDFs: rendering, Tesseract/RapidOCR in the sandbox, parallel batches, language check, estimates. |
 | `summarizer/rapid_ocr.py` | RapidOCR entry point **inside** the sandbox (offline: models by path only). |
 | `summarizer/links.py` | Google Drive / Dropbox share links: parsed into a bot-built download URL, downloaded via `fetch`. |
-| `summarizer/fetch.py` | The only way to download a file by URL: HTTPS, allowed hosts checked on every redirect, size cap, optional SHA-256. |
+| `summarizer/fetch.py` | The only way to download a file by URL: HTTPS, allowed hosts checked on every redirect, size cap, optional SHA-256; `peek` reads the first 64 KB (name, type, size). |
 | `summarizer/tts.py` | Voice messages: text preparation, Kokoro run in the sandbox, Opus encoding for Telegram. |
 | `summarizer/tts_run.py` | Kokoro entry point **inside** the sandbox (system espeak-ng passed explicitly; imports no bot module). |
 | `summarizer/units.py` | Measurements shown in each reader's units (rules, display-only; the cached text is never changed). |
