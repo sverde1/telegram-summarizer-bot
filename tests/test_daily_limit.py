@@ -2,10 +2,10 @@
 import pytest
 
 import access
-import bot
 from summarizer import config, db
 
 from conftest import ADMIN_ID, msg_update, send
+from tgbot import limits, render, state
 
 ANA, BOB = 60, 61
 LINK = "https://youtu.be/abcdefghijk"
@@ -31,13 +31,13 @@ async def test_global_limit_refuses_without_creating_a_request(app, telegram):
     _use(ANA, 3)
     await send(app, msg_update(ANA, LINK))
     assert telegram.texts()[-1].startswith("⏳ You've reached today's limit of 3 requests. You can send more in about")
-    assert db.usage(ANA, "daily")[0] == 3 and bot.queue.qsize() == 0
+    assert db.usage(ANA, "daily")[0] == 3 and state.queue.qsize() == 0
 
 
 async def test_under_the_limit_is_accepted_and_counts(app, telegram):
     _use(ANA, 2)
     await send(app, msg_update(ANA, LINK))
-    assert bot.queue.qsize() == 1 and db.usage(ANA, "daily")[0] == 3
+    assert state.queue.qsize() == 1 and db.usage(ANA, "daily")[0] == 3
 
 
 async def test_override_takes_precedence_both_ways(app, telegram):
@@ -47,7 +47,7 @@ async def test_override_takes_precedence_both_ways(app, telegram):
     db.set_user_limit(BOB, "daily", 1)
     await send(app, msg_update(ANA, LINK))
     await send(app, msg_update(BOB, LINK))
-    assert bot.queue.qsize() == 1 and "limit of 1 requests" in telegram.texts()[-1]
+    assert state.queue.qsize() == 1 and "limit of 1 requests" in telegram.texts()[-1]
 
 
 async def test_zero_means_no_limit_and_admins_are_exempt(app, telegram):
@@ -56,7 +56,7 @@ async def test_zero_means_no_limit_and_admins_are_exempt(app, telegram):
     db.set_setting("daily_limit", "0")
     _use(ANA, 5)
     await send(app, msg_update(ANA, LINK))
-    assert bot.queue.qsize() == 2
+    assert state.queue.qsize() == 2
 
 
 async def test_admin_sets_global_and_per_user_limits_and_they_persist(app, telegram):
@@ -104,8 +104,8 @@ def test_usage_window_and_reset_time():
     count, oldest = db.usage(ANA, "daily")
     assert count == 2 and oldest is not None
     assert db.usage(ANA, "daily", window=0)[0] == 0
-    assert bot._fmt_until(30) == "1 min" and bot._fmt_until(3599) == "60 min" and bot._fmt_until(3601) == "2 h"
+    assert render.fmt_until(30) == "1 min" and render.fmt_until(3599) == "60 min" and render.fmt_until(3601) == "2 h"
 
 
 def test_every_limit_has_a_usage_query_and_a_ui():
-    assert set(db.USAGE_FILTERS) == set(access.LIMITS) == set(bot.LIMIT_UI)
+    assert set(db.USAGE_FILTERS) == set(access.LIMITS) == set(limits.LIMIT_UI)

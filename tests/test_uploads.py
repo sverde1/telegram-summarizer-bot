@@ -6,12 +6,12 @@ import pytest
 from telegram.error import BadRequest
 
 import access
-import bot
 from summarizer import books, db, documents, summarize
 
 from conftest import ADMIN_ID, callback_update, doc_update, send
 from docs import make_epub, make_pdf, make_scan
 from helpers import BookAI
+from tgbot import jobs, render, state, texts
 
 ANA, BOB = 60, 61
 
@@ -35,10 +35,10 @@ async def _upload(app, telegram, uid, path, file_id="F1", name=None) -> int:
 
 async def _work(app):
     """Runs the worker until the queue and any replays are done."""
-    task = asyncio.create_task(bot.worker(app))
-    await asyncio.wait_for(bot.queue.join(), 20)
+    task = asyncio.create_task(jobs.worker(app))
+    await asyncio.wait_for(state.queue.join(), 20)
     for _ in range(300):
-        if not bot._delayed:
+        if not state.delayed:
             break
         await asyncio.sleep(0.02)
     task.cancel()
@@ -85,7 +85,7 @@ async def test_buttons_of_someone_elses_upload_are_refused(app, telegram, tmp_pa
     up = await _upload(app, telegram, ANA, _book_pdf(tmp_path))
     await send(app, callback_update(BOB, f"book:{up}:whole"))
     assert telegram.sent("answerCallbackQuery")[-1]["text"] == "This isn't available."
-    assert bot.queue.qsize() == 0
+    assert state.queue.qsize() == 0
 
 
 # ---------- summaries ----------
@@ -165,7 +165,7 @@ async def test_pick_is_immediate_once_the_upload_was_read(app, telegram, tmp_pat
     await send(app, callback_update(ANA, f"book:{up}:pick"))  # no worker running: it must not need one
     listing = telegram.sent("sendMessage")[-1]
     assert "pick a chapter" in listing["text"] and f"book:{up}:ch:1" in str(listing["reply_markup"])
-    assert bot.queue.qsize() == 0 and len(db.recent_requests(ANA)) == requests  # nothing queued or counted
+    assert state.queue.qsize() == 0 and len(db.recent_requests(ANA)) == requests  # nothing queued or counted
     await send(app, callback_update(ANA, f"book:{up}:ch:1"))
     await _work(app)
     assert "<b>Dogs</b>\nS1" in telegram.sent("sendMessage")[-1]["text"]
@@ -179,7 +179,7 @@ async def test_pick_on_someone_elses_copy_still_reads_it_first(app, telegram, tm
     await _work(app)
     up2 = await _upload(app, telegram, BOB, pdf, file_id="F2")
     await send(app, callback_update(BOB, f"book:{up2}:pick"))
-    assert bot.queue.qsize() == 1  # a job, like a fresh upload: nothing reveals the file was known
+    assert state.queue.qsize() == 1  # a job, like a fresh upload: nothing reveals the file was known
 
 
 async def test_chapter_list_pages(app, telegram, tmp_path):
@@ -198,7 +198,7 @@ async def test_short_mode_fits_three_messages_for_thirty_chapters():
     summary = "w " * (books.short_budget(30) // 2)
     r = documents.DocResult("short", "big.pdf", doc, chapters=[(i, f"Chapter {i}", summary) for i in range(30)],
                             llm="Codex (x)")
-    assert len(bot.render_document(r)) <= 3
+    assert len(render.render_document(r)) <= 3
 
 
 # ---------- failures ----------
@@ -216,7 +216,7 @@ async def test_download_failure(app, telegram, tmp_path):
     telegram.fail["getFile"] = BadRequest("File is too big")
     await send(app, callback_update(ANA, f"book:{up}:whole"))
     await _work(app)
-    assert telegram.texts()[-1] == bot.TOO_BIG
+    assert telegram.texts()[-1] == texts.TOO_BIG
 
 
 # ---------- cache and privacy ----------
@@ -233,7 +233,7 @@ async def test_second_request_reuses_the_text_and_summary(app, telegram, tmp_pat
 
 async def test_same_file_from_someone_else_is_replayed_like_a_fresh_run(app, telegram, tmp_path, monkeypatch):
     real_sleep = asyncio.sleep
-    monkeypatch.setattr(bot.asyncio, "sleep", lambda s: real_sleep(s / 1000))
+    monkeypatch.setattr(asyncio, "sleep", lambda s: real_sleep(s / 1000))
     pdf = _book_pdf(tmp_path)
     up = await _upload(app, telegram, ADMIN_ID, pdf)
     await send(app, callback_update(ADMIN_ID, f"book:{up}:whole"))
@@ -250,7 +250,7 @@ async def test_same_file_from_someone_else_is_replayed_like_a_fresh_run(app, tel
 
 async def test_pick_on_a_known_file_shows_the_list_after_the_pacing(app, telegram, tmp_path, monkeypatch):
     real_sleep = asyncio.sleep
-    monkeypatch.setattr(bot.asyncio, "sleep", lambda s: real_sleep(s / 1000))
+    monkeypatch.setattr(asyncio, "sleep", lambda s: real_sleep(s / 1000))
     pdf = _book_pdf(tmp_path)
     up = await _upload(app, telegram, ADMIN_ID, pdf)
     await send(app, callback_update(ADMIN_ID, f"book:{up}:whole"))

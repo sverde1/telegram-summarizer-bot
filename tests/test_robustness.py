@@ -2,16 +2,16 @@
 import asyncio
 import threading
 
-import bot
 from summarizer import summarize
 
 from conftest import ADMIN_ID, callback_update, msg_update, send
+from tgbot import handlers, sending, state
 
 
 async def test_edited_commands_and_messages_are_ignored(app, telegram):
     await send(app, msg_update(ADMIN_ID, "/help", edited=True))
     await send(app, msg_update(ADMIN_ID, "https://youtu.be/abcdefghijk", edited=True))
-    assert telegram.texts() == [] and bot.queue.qsize() == 0
+    assert telegram.texts() == [] and state.queue.qsize() == 0
 
 
 async def test_malformed_model_buttons_show_the_first_step(app, telegram, codex_home):
@@ -30,7 +30,7 @@ async def test_model_lists_are_fetched_off_the_event_loop(monkeypatch):
         return [{"id": "m", "name": "M", "description": ""}]
 
     monkeypatch.setattr(summarize, "list_models", list_models)
-    await bot._llm_models(ADMIN_ID, "codex")
+    await handlers.llm_models(ADMIN_ID, "codex")
     assert seen == [False]
 
 
@@ -43,8 +43,8 @@ def test_api_model_lists_are_cached(monkeypatch):
 
 
 async def test_every_stage_is_shown_even_when_stages_come_fast(app, telegram):
-    job = bot.Job("u", chat_id=60, status_id=7)
-    progress = bot.Progress(app, asyncio.get_running_loop(), job)
+    job = state.Job("u", chat_id=60, status_id=7)
+    progress = sending.Progress(app, asyncio.get_running_loop(), job)
     await asyncio.to_thread(lambda: (progress("step one", 30), progress("step two", 20)))
     await asyncio.sleep(0.1)
     await progress.close()

@@ -6,10 +6,10 @@ import time
 import pytest
 
 import access
-import bot
 from summarizer import db, pipeline, proc
 
 from conftest import ADMIN_ID, callback_update, msg_update, send
+from tgbot import delivery, jobs, state, texts
 
 FRIEND = 60
 LINK = "https://youtu.be/abcdefghijk"
@@ -27,13 +27,13 @@ async def test_removing_a_user_cancels_their_queued_jobs(app, telegram, monkeypa
     await send(app, msg_update(FRIEND, LINK))
     await send(app, msg_update(FRIEND, "https://youtu.be/bbbbbbbbbbb"))
     await send(app, callback_update(ADMIN_ID, f"remove:{FRIEND}"))
-    cancelled = [d for d in telegram.sent("editMessageText") if d["text"] == bot.ACCESS_REMOVED]
+    cancelled = [d for d in telegram.sent("editMessageText") if d["text"] == texts.ACCESS_REMOVED]
     assert len(cancelled) == 2
     assert {r["status"] for r in db.recent_requests(FRIEND)} == {"cancelled"}
-    task = asyncio.create_task(bot.worker(app))
-    await asyncio.wait_for(bot.queue.join(), 5)
+    task = asyncio.create_task(jobs.worker(app))
+    await asyncio.wait_for(state.queue.join(), 5)
     task.cancel()
-    assert ran == [] and bot._user_jobs[FRIEND] == 0 and bot._jobs == {}
+    assert ran == [] and state.user_jobs[FRIEND] == 0 and state.jobs == {}
 
 
 async def test_a_running_job_is_killed_and_the_worker_moves_on(app, telegram, monkeypatch):
@@ -50,20 +50,20 @@ async def test_a_running_job_is_killed_and_the_worker_moves_on(app, telegram, mo
         return done
 
     monkeypatch.setattr(pipeline, "run", slow_pipeline)
-    monkeypatch.setattr(bot, "_deliver", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(delivery, "deliver", lambda *a, **k: asyncio.sleep(0))
     access.set_state(70, "allowed")
     await send(app, msg_update(FRIEND, LINK))
     await send(app, msg_update(70, "https://youtu.be/ccccccccccc"))
-    task = asyncio.create_task(bot.worker(app))
+    task = asyncio.create_task(jobs.worker(app))
     await asyncio.wait_for(started.wait(), 5)
     t0 = time.monotonic()
-    await bot.cancel_user_jobs(app, FRIEND, bot.ACCESS_REMOVED)
-    await asyncio.wait_for(bot.queue.join(), 5)
+    await jobs.cancel_user_jobs(app, FRIEND, texts.ACCESS_REMOVED)
+    await asyncio.wait_for(state.queue.join(), 5)
     task.cancel()
     assert time.monotonic() - t0 < 3  # killed, not waited out
     assert db.recent_requests(FRIEND)[0]["status"] == "cancelled"
     assert db.recent_requests(70)[0]["status"] == "done"  # the next user's job still ran
-    assert any(d["text"] == bot.ACCESS_REMOVED for d in telegram.sent("editMessageText"))
+    assert any(d["text"] == texts.ACCESS_REMOVED for d in telegram.sent("editMessageText"))
 
 
 def test_stage_changes_are_checkpoints(monkeypatch):

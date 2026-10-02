@@ -4,10 +4,10 @@ import asyncio
 import pytest
 
 import access
-import bot
 from summarizer import db, pipeline, updates
 
 from conftest import ADMIN_ID, callback_update, msg_update, send
+from tgbot import lifecycle, render, sending, state
 
 STRANGER, FRIEND = 50, 60
 
@@ -63,7 +63,7 @@ async def test_users_lists_admins_and_groups(app, telegram):
 async def test_link_from_allowed_user_is_queued_and_logged(app, telegram):
     access.set_state(FRIEND, "allowed")
     await send(app, msg_update(FRIEND, "check https://youtu.be/abcdefghijk"))
-    assert bot.queue.qsize() == 1
+    assert state.queue.qsize() == 1
     assert telegram.texts()[-1].startswith("⏳ Got it")
     assert db.recent_requests(FRIEND)[0]["url"] == "https://youtu.be/abcdefghijk"
 
@@ -98,32 +98,32 @@ def _result(summary_text: str, cached=False, stats=None) -> pipeline.Result:
 
 
 def test_render_escapes_html_and_splits_long_messages():
-    chunks = bot.render(_result("• point & <i>\n" * 600))
-    assert len(chunks) > 1 and all(len(c) <= bot.TG_LIMIT for c in chunks)
+    chunks = render.render(_result("• point & <i>\n" * 600))
+    assert len(chunks) > 1 and all(len(c) <= render.TG_LIMIT for c in chunks)
     assert "&lt;b&gt;T&lt;/b&gt;" in chunks[0] and "&amp; &lt;i&gt;" in chunks[0]
 
 
 def test_footer_hides_cache_from_first_time_requesters():
     stats = {"steps": [["lookup", 2.0], ["summary", 9.0]], "total": 11.0, "llm": "Codex (gpt-test)"}
-    assert "from cache" in bot.details(_result("x", cached=True, stats=stats), reveal_cache=True)
+    assert "from cache" in render.details(_result("x", cached=True, stats=stats), reveal_cache=True)
     replayed = _result("x", cached=True, stats=stats)
     replayed.replay_steps, replayed.replay_total = [("lookup", 1.0), ("captions", 2.0), ("summary", 4.0)], 7.0
-    hidden = bot.details(replayed, reveal_cache=False)
+    hidden = render.details(replayed, reveal_cache=False)
     assert "cache" not in hidden and "⏱ 7 s total: lookup 1 s · captions 2 s · summary 4 s" in hidden
-    backstop = bot.details(_result("x", cached=True, stats=stats), reveal_cache=False)  # no replay planned
+    backstop = render.details(_result("x", cached=True, stats=stats), reveal_cache=False)  # no replay planned
     assert "cache" not in backstop and "⏱" not in backstop
-    assert "11 s total" in bot.details(_result("x", stats=stats))
+    assert "11 s total" in render.details(_result("x", stats=stats))
 
 
 @pytest.mark.parametrize("sec,text", [(3, "5 s"), (42, "45 s"), (65, "1 min"), (95, "1.5 min"), (900, "15 min")])
 def test_eta_format(sec, text):
-    assert bot._fmt_eta(sec) == text
+    assert render.fmt_eta(sec) == text
 
 
 async def test_progress_edits_in_order_and_stops(app, telegram, monkeypatch):
-    monkeypatch.setattr(bot.Progress, "TICK", 0.05)
-    job = bot.Job("u", chat_id=FRIEND, status_id=7)
-    progress = bot.Progress(app, asyncio.get_running_loop(), job)
+    monkeypatch.setattr(sending.Progress, "TICK", 0.05)
+    job = state.Job("u", chat_id=FRIEND, status_id=7)
+    progress = sending.Progress(app, asyncio.get_running_loop(), job)
     await asyncio.to_thread(progress, "step one", 30)
     await asyncio.sleep(0.1)  # stages arrive seconds apart in practice
     await asyncio.to_thread(progress, "step two", 20)
@@ -147,9 +147,9 @@ async def test_update_notification_is_sent_once_per_version(app, telegram, monke
         if next(rounds, "stop") == "stop":
             raise asyncio.CancelledError
 
-    monkeypatch.setattr(bot.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     with pytest.raises(asyncio.CancelledError):
-        await bot.update_checker(app)
+        await lifecycle.update_checker(app)
     notes = [d for d in telegram.sent("sendMessage") if d["chat_id"] == ADMIN_ID]
     assert len(notes) == 1 and "<pre>sudo npm install -g @openai/codex</pre>" in notes[0]["text"]
 
@@ -157,5 +157,5 @@ async def test_update_notification_is_sent_once_per_version(app, telegram, monke
 async def test_bad_link_is_refused_before_queueing(app, telegram):
     access.set_state(FRIEND, "allowed")
     await send(app, msg_update(FRIEND, "http://192.168.1.1/?vm.tiktok.com/x"))
-    assert bot.queue.qsize() == 0 and db.recent_requests(FRIEND) == []
+    assert state.queue.qsize() == 0 and db.recent_requests(FRIEND) == []
     assert telegram.texts()[-1] == "⚠️ Only YouTube and TikTok links are supported."

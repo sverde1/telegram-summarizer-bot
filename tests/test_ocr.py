@@ -5,12 +5,12 @@ import re
 import pytest
 
 import access
-import bot
 from summarizer import config, db, documents, ocr, proc, summarize
 
 from conftest import ADMIN_ID, callback_update, doc_update, msg_update, send
 from docs import make_scan
 from helpers import BookAI
+from tgbot import jobs, state, texts
 
 ANA, BOB = 60, 61
 TEXT = "The quick brown fox jumps over the lazy dog.\nCats sleep most of the day and hunt at night.\n" * 4
@@ -37,10 +37,10 @@ async def _upload(app, telegram, uid, path, file_id="F1") -> int:
 
 async def _work(app):
     """Runs the worker until the queue is empty and any paced deliveries are done."""
-    task = asyncio.create_task(bot.worker(app))
-    await asyncio.wait_for(bot.queue.join(), 60)
+    task = asyncio.create_task(jobs.worker(app))
+    await asyncio.wait_for(state.queue.join(), 60)
     for _ in range(500):
-        if not bot._delayed:
+        if not state.delayed:
             break
         await asyncio.sleep(0.02)
     task.cancel()
@@ -160,7 +160,7 @@ async def test_cancel_during_ocr_still_counts(app, telegram, tmp_path, monkeypat
     monkeypatch.setattr(ocr, "_read_batch", cancelled)
     await send(app, callback_update(ANA, f"ocr:{_rid(telegram)}:go"))
     await _work(app)
-    assert telegram.texts()[-1] == bot.CANCELLED and db.usage(ANA, "ocr")[0] == 1
+    assert telegram.texts()[-1] == texts.CANCELLED and db.usage(ANA, "ocr")[0] == 1
 
 
 async def test_no_ocr_engine(app, telegram, tmp_path, monkeypatch):

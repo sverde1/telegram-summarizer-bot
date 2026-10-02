@@ -4,10 +4,10 @@ import time
 import pytest
 
 import access
-import bot
 from summarizer import config, db, pipeline
 
 from conftest import ADMIN_ID, msg_update, send
+from tgbot import jobs, state
 
 FRIEND = 60
 LINK = "https://youtu.be/abcdefghijk"
@@ -17,14 +17,14 @@ async def test_a_user_may_queue_three_videos(app, telegram):
     access.set_state(FRIEND, "allowed")
     for _ in range(config.MAX_QUEUED_PER_USER + 1):
         await send(app, msg_update(FRIEND, LINK))
-    assert bot.queue.qsize() == config.MAX_QUEUED_PER_USER
+    assert state.queue.qsize() == config.MAX_QUEUED_PER_USER
     assert telegram.texts()[-1].startswith("⏳ You already have 3 requests in the queue")
 
 
 async def test_admins_are_not_limited(app, telegram):
     for _ in range(config.MAX_QUEUED_PER_USER + 2):
         await send(app, msg_update(ADMIN_ID, LINK))
-    assert bot.queue.qsize() == config.MAX_QUEUED_PER_USER + 2
+    assert state.queue.qsize() == config.MAX_QUEUED_PER_USER + 2
 
 
 async def test_full_queue_refuses_new_links(app, telegram):
@@ -32,18 +32,18 @@ async def test_full_queue_refuses_new_links(app, telegram):
     for _ in range(config.MAX_QUEUE):
         await send(app, msg_update(ADMIN_ID, LINK))
     await send(app, msg_update(FRIEND, LINK))
-    assert bot.queue.qsize() == config.MAX_QUEUE
+    assert state.queue.qsize() == config.MAX_QUEUE
     assert telegram.texts()[-1] == "⏳ The bot is busy right now. Please try again in a few minutes."
 
 
 async def test_jobs_waiting_for_memory_count_toward_the_total(app, telegram):
     access.set_state(FRIEND, "allowed")
     for n in range(config.MAX_QUEUE):  # e.g. many users' long videos waiting for memory
-        job = bot.Job("u", chat_id=1, status_id=n, user_id=1000 + n, request_id=10_000 + n)
-        bot._jobs[job.request_id] = job
-        bot._waiting_for_memory.append(job)
+        job = state.Job("u", chat_id=1, status_id=n, user_id=1000 + n, request_id=10_000 + n)
+        state.jobs[job.request_id] = job
+        state.waiting_for_memory.append(job)
     await send(app, msg_update(FRIEND, LINK))
-    assert bot.queue.qsize() == 0 and "busy" in telegram.texts()[-1]
+    assert state.queue.qsize() == 0 and "busy" in telegram.texts()[-1]
 
 
 async def test_finished_jobs_free_the_slot(app, telegram, monkeypatch):
@@ -52,12 +52,12 @@ async def test_finished_jobs_free_the_slot(app, telegram, monkeypatch):
     monkeypatch.setattr(pipeline, "run", lambda *a, **k: (_ for _ in ()).throw(pipeline.PipelineError("nope")))
     for _ in range(config.MAX_QUEUED_PER_USER):
         await send(app, msg_update(FRIEND, LINK))
-    task = asyncio.create_task(bot.worker(app))
-    await asyncio.wait_for(bot.queue.join(), 5)
+    task = asyncio.create_task(jobs.worker(app))
+    await asyncio.wait_for(state.queue.join(), 5)
     task.cancel()
-    assert bot._user_jobs[FRIEND] == 0
+    assert state.user_jobs[FRIEND] == 0
     await send(app, msg_update(FRIEND, LINK))
-    assert bot.queue.qsize() == 1
+    assert state.queue.qsize() == 1
 
 
 def _done_again(user: int, minutes_ago: float) -> None:

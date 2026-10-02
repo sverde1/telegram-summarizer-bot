@@ -8,6 +8,7 @@ import access
 from summarizer import config, db, ocr
 
 from conftest import ADMIN_ID, msg_update, send
+from tgbot import jobs, state
 
 pytestmark = pytest.mark.skipif(not ocr.available_tesseract(), reason="Tesseract isn't installed")
 
@@ -125,7 +126,7 @@ async def test_admins_are_told_how_to_add_a_missing_language(app, telegram, tmp_
     await send(app, callback_update(ADMIN_ID, f"book:{up}:whole"))
     import asyncio
     import bot
-    task = asyncio.create_task(bot.worker(app))
-    await asyncio.wait_for(bot.queue.join(), 30)
+    task = asyncio.create_task(jobs.worker(app))
+    await asyncio.wait_for(state.queue.join(), 30)
     task.cancel()
     assert telegram.texts()[-1].endswith("Details: add it with /ocrlang add pol")

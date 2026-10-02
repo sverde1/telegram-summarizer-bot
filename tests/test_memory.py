@@ -4,11 +4,11 @@ import asyncio
 import pytest
 
 import access
-import bot
 from summarizer import config, db, media, memory, pipeline
 
 from conftest import ADMIN_ID, callback_update, send
 from helpers import meta
+from tgbot import jobs, state, texts
 
 GB = memory.GB
 
@@ -55,7 +55,7 @@ def test_pipeline_refuses_what_can_never_fit(needs_whisper, monkeypatch):
 def two_jobs(monkeypatch):
     """Job 1 (user 60) needs memory until `free[0]` is set; job 2 (user 70) runs normally."""
     free = [False]
-    monkeypatch.setattr(bot, "MEMORY_RECHECK", 0.05)
+    monkeypatch.setattr(jobs, "MEMORY_RECHECK", 0.05)
     monkeypatch.setattr(memory, "fits_now", lambda needed: free[0])
     ran = []
 
@@ -70,12 +70,12 @@ def two_jobs(monkeypatch):
     monkeypatch.setattr(pipeline, "run", run)
     for uid in (60, 70):
         access.set_state(uid, "allowed")
-    jobs = [bot.Job(f"https://youtu.be/{'a' * 10}{n}", chat_id=uid, status_id=n, user_id=uid,
+    queued = [state.Job(f"https://youtu.be/{'a' * 10}{n}", chat_id=uid, status_id=n, user_id=uid,
                     request_id=db.add_request(uid, "u", "summary")) for n, uid in ((1, 60), (2, 70))]
-    for job in jobs:
-        bot._jobs[job.request_id] = job
-        bot._user_jobs[job.user_id] += 1
-    return free, ran, jobs
+    for job in queued:
+        state.jobs[job.request_id] = job
+        state.user_jobs[job.user_id] += 1
+    return free, ran, queued
 
 
 async def _wait_for(condition, seconds=5):
@@ -88,60 +88,60 @@ async def _wait_for(condition, seconds=5):
 
 
 async def test_waiting_job_steps_aside_then_resumes(app, telegram, two_jobs):
-    free, ran, jobs = two_jobs
-    for job in jobs:
-        await bot.queue.put(job)
-    task = asyncio.create_task(bot.worker(app))
+    free, ran, queued = two_jobs
+    for job in queued:
+        await state.queue.put(job)
+    task = asyncio.create_task(jobs.worker(app))
     await _wait_for(lambda: ran == ["2"])  # job 2 ran while job 1 waits
     waiting = [d for d in telegram.sent("editMessageText") if d["chat_id"] == 60][-1]
     assert "Not enough free memory" in waiting["text"] and "cancel:" in str(waiting["reply_markup"])
     free[0] = True
     await _wait_for(lambda: ran == ["2", "1"])
     task.cancel()
-    assert bot._user_jobs == {} and bot._jobs == {}
+    assert state.user_jobs == {} and state.jobs == {}
 
 
 async def test_cancel_button_only_for_the_owner(app, telegram, two_jobs):
-    free, ran, jobs = two_jobs
-    await bot.queue.put(jobs[0])
-    task = asyncio.create_task(bot.worker(app))
-    await _wait_for(lambda: bot._waiting_for_memory)
-    await send(app, callback_update(70, f"cancel:{jobs[0].request_id}"))  # someone else
-    assert bot._waiting_for_memory and "Only the person" in telegram.sent("answerCallbackQuery")[-1]["text"]
-    await send(app, callback_update(60, f"cancel:{jobs[0].request_id}"))
+    free, ran, queued = two_jobs
+    await state.queue.put(queued[0])
+    task = asyncio.create_task(jobs.worker(app))
+    await _wait_for(lambda: state.waiting_for_memory)
+    await send(app, callback_update(70, f"cancel:{queued[0].request_id}"))  # someone else
+    assert state.waiting_for_memory and "Only the person" in telegram.sent("answerCallbackQuery")[-1]["text"]
+    await send(app, callback_update(60, f"cancel:{queued[0].request_id}"))
     task.cancel()
-    assert not bot._waiting_for_memory and ran == []
+    assert not state.waiting_for_memory and ran == []
     assert db.recent_requests(60)[0]["status"] == "cancelled"
-    assert telegram.sent("editMessageText")[-1]["text"] == bot.CANCELLED
+    assert telegram.sent("editMessageText")[-1]["text"] == texts.CANCELLED
 
 
 async def test_waiting_gives_up_after_the_limit(app, telegram, two_jobs, monkeypatch):
-    free, ran, jobs = two_jobs
+    free, ran, queued = two_jobs
     monkeypatch.setattr(config, "WHISPER_RAM_WAIT_MIN", 0)
-    await bot.queue.put(jobs[0])
-    task = asyncio.create_task(bot.worker(app))
+    await state.queue.put(queued[0])
+    task = asyncio.create_task(jobs.worker(app))
     await _wait_for(lambda: db.recent_requests(60)[0]["status"] == "failed")
     task.cancel()
     assert "Still not enough free memory" in telegram.sent("editMessageText")[-1]["text"]
-    assert bot._user_jobs.get(60, 0) == 0
+    assert state.user_jobs.get(60, 0) == 0
 
 
 async def test_waiting_job_is_re_estimated_after_the_model_loads(app, telegram, monkeypatch):
     from summarizer import transcribe
-    monkeypatch.setattr(bot, "MEMORY_RECHECK", 0.05)
+    monkeypatch.setattr(jobs, "MEMORY_RECHECK", 0.05)
     monkeypatch.setattr(transcribe, "_model", None)
     budget = memory.whisper_needs(600, model_loaded=True)  # fits only without the model counted
     monkeypatch.setattr(memory, "fits_now", lambda needed: needed <= budget)
     access.set_state(60, "allowed")
-    job = bot.Job("https://youtu.be/aaaaaaaaaaa", chat_id=60, status_id=1, user_id=60,
+    job = state.Job("https://youtu.be/aaaaaaaaaaa", chat_id=60, status_id=1, user_id=60,
                   request_id=db.add_request(60, "u", "summary"))
-    bot._jobs[job.request_id] = job
-    bot._user_jobs[60] += 1
-    await bot._set_aside(app, job, memory.whisper_needs(600, model_loaded=False), 600)
+    state.jobs[job.request_id] = job
+    state.user_jobs[60] += 1
+    await jobs.set_aside(app, job, memory.whisper_needs(600, model_loaded=False), 600)
     resumed = []
     monkeypatch.setattr(pipeline, "run", lambda url, *a, **k: resumed.append(url) or (_ for _ in ()).throw(
         pipeline.PipelineError("x")))
-    task = asyncio.create_task(bot.worker(app))
+    task = asyncio.create_task(jobs.worker(app))
     await asyncio.sleep(0.2)
     assert resumed == []  # model not loaded yet: still doesn't fit
     monkeypatch.setattr(transcribe, "_model", object())  # another job loaded Whisper

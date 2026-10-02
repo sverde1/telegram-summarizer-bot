@@ -1,15 +1,15 @@
 """The bot works in private chats only."""
-import bot
 import access
 
 from conftest import ADMIN_ID, callback_update, msg_update, my_chat_member_update, send
+from tgbot import state
 
 
 async def test_commands_and_links_in_groups_are_ignored(app, telegram):
     await send(app, msg_update(ADMIN_ID, "/history", chat_type="group"))
     await send(app, msg_update(ADMIN_ID, "/users", chat_type="supergroup"))
     await send(app, msg_update(ADMIN_ID, "https://youtu.be/abcdefghijk", chat_type="group"))
-    assert telegram.texts() == [] and bot.queue.qsize() == 0
+    assert telegram.texts() == [] and state.queue.qsize() == 0
 
 
 async def test_buttons_pressed_in_groups_are_ignored(app, telegram):

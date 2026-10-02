@@ -4,8 +4,8 @@ import re
 
 import pytest
 
-import bot
 from summarizer import pipeline
+from tgbot import render
 
 
 def _result(title="T", answer="", summary="S", clickbait=False) -> pipeline.Result:
@@ -30,18 +30,18 @@ def _valid(chunk: str) -> bool:
     _result(summary="a" * 10_000),
 ])
 def test_every_message_fits_and_is_valid(result):
-    chunks = bot.render(result)
-    assert all(len(c) <= bot.TG_LIMIT for c in chunks)
+    chunks = render.render(result)
+    assert all(len(c) <= render.TG_LIMIT for c in chunks)
     assert all(_valid(c) for c in chunks)
 
 
 def test_fields_are_capped():
-    chunks = bot.render(_result(title="t" * 5000, summary="s" * 50_000))
+    chunks = render.render(_result(title="t" * 5000, summary="s" * 50_000))
     title_line = html.unescape(chunks[0].split("\n")[1])
-    assert len(title_line) == bot.FIELD_LIMITS["title"] and title_line.endswith("…")
+    assert len(title_line) == render.FIELD_LIMITS["title"] and title_line.endswith("…")
     assert len(chunks) <= 3  # 4000 summary characters at most, not a flood
 
 
 def test_short_result_is_one_message_with_footer():
-    chunks = bot.render(_result())
+    chunks = render.render(_result())
     assert len(chunks) == 1 and chunks[0].startswith("<b>Title:</b>") and chunks[0].rstrip().endswith("</i>")

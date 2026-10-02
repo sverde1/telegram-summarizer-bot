@@ -6,10 +6,10 @@ import pytest
 from telegram.error import BadRequest
 
 import access
-import bot
 from summarizer import db, pipeline, proc, tts
 
 from conftest import ADMIN_ID, callback_update, msg_update, send
+from tgbot import delivery, jobs, state, texts
 
 ANA, BOB = 60, 61
 URL = "https://youtu.be/abcdefghijk"
@@ -36,16 +36,16 @@ def voice(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "run", lambda url, *a, **k: pipeline.Result(
         "youtube", "abcdefghijk", URL, {"title": "Cats"}, "", "captions", "en", dict(SUMMARY)))
     real_sleep = asyncio.sleep
-    monkeypatch.setattr(bot.asyncio, "sleep", lambda s: real_sleep(min(s, 0.01)))
+    monkeypatch.setattr(asyncio, "sleep", lambda s: real_sleep(min(s, 0.01)))
     return made
 
 
 async def _work(app):
     """Runs the worker until the queue and any paced deliveries are done."""
-    task = asyncio.create_task(bot.worker(app))
-    await asyncio.wait_for(bot.queue.join(), 10)
+    task = asyncio.create_task(jobs.worker(app))
+    await asyncio.wait_for(state.queue.join(), 10)
     for _ in range(300):
-        if not bot._delayed:
+        if not state.delayed:
             break
         await asyncio.sleep(0.01)
     task.cancel()
@@ -95,7 +95,7 @@ async def test_buttons_only_for_the_owner_and_no_duplicates(app, telegram, voice
     assert telegram.sent("answerCallbackQuery")[-1]["text"] == "This isn't available."
     await send(app, callback_update(ANA, f"voice:{rid}"))
     await send(app, callback_update(ANA, f"voice:{rid}"))  # tapped twice while queued
-    assert telegram.sent("answerCallbackQuery")[-1]["text"] == "Already on its way." and bot.queue.qsize() == 1
+    assert telegram.sent("answerCallbackQuery")[-1]["text"] == "Already on its way." and state.queue.qsize() == 1
 
 
 async def test_no_button_without_voice_messages_or_for_transcripts(app, telegram, voice, monkeypatch):
@@ -146,15 +146,15 @@ async def test_cancel_while_speaking(app, telegram, voice, monkeypatch):
     monkeypatch.setattr(tts, "synthesize", cancelled)
     await send(app, callback_update(ANA, f"voice:{rid}"))
     await _work(app)
-    assert telegram.texts()[-1] == bot.CANCELLED and not telegram.sent("sendVoice")
+    assert telegram.texts()[-1] == texts.CANCELLED and not telegram.sent("sendVoice")
 
 
 async def test_whole_book_gets_listen_next_to_the_chapter_options(app, telegram, voice, monkeypatch):
     from summarizer import documents
-    job = bot.Job("📄 b.pdf", ANA, 5, user_id=ANA, request_id=db.add_request(ANA, "📄 b.pdf", "book"), upload_id=9,
-                  job_kind=bot.JobKind.DOCUMENT)
+    job = state.Job("📄 b.pdf", ANA, 5, user_id=ANA, request_id=db.add_request(ANA, "📄 b.pdf", "book"), upload_id=9,
+                  job_kind=state.JobKind.DOCUMENT)
     result = documents.DocResult("book", "b.pdf", {"chapters": [{}, {}]}, book={"title": "Pets", "summary": "Cats."})
-    await bot._deliver(app, job, result, 0)
+    await delivery.deliver(app, job, result, 0)
     rows = telegram.sent("sendMessage")[-1]["reply_markup"]
     assert "book:9:short" in str(rows) and f"voice:{job.request_id}" in str(rows)
     assert db.get_spoken(job.request_id)["text"] == "Pets. Cats."
@@ -163,4 +163,4 @@ async def test_whole_book_gets_listen_next_to_the_chapter_options(app, telegram,
 async def test_old_summary_without_stored_text(app, telegram, voice):
     rid = db.add_request(ANA, URL, "summary")
     await send(app, callback_update(ANA, f"voice:{rid}"))
-    assert telegram.sent("answerCallbackQuery")[-1]["text"] == bot.VOICE_TOO_OLD
+    assert telegram.sent("answerCallbackQuery")[-1]["text"] == texts.VOICE_TOO_OLD

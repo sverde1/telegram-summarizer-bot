@@ -4,10 +4,10 @@ import asyncio
 import pytest
 
 import access
-import bot
 from summarizer import media, pipeline
 
 from conftest import ADMIN_ID
+from tgbot import jobs, state
 
 LINK = "https://youtu.be/abcdefghijk"
 
@@ -50,9 +50,9 @@ async def test_admins_hear_about_a_block_once(app, telegram, monkeypatch):
     monkeypatch.setattr(pipeline, "run", lambda *a, **k: (_ for _ in ()).throw(
         pipeline.Blocked("🚫 YouTube is currently blocking downloads…", detail="HTTP Error 429", platform="youtube")))
     for n in range(2):
-        await bot.queue.put(bot.Job(LINK, chat_id=60, status_id=n, user_id=60, request_id=n + 1))
-    task = asyncio.create_task(bot.worker(app))
-    await asyncio.wait_for(bot.queue.join(), 5)
+        await state.queue.put(state.Job(LINK, chat_id=60, status_id=n, user_id=60, request_id=n + 1))
+    task = asyncio.create_task(jobs.worker(app))
+    await asyncio.wait_for(state.queue.join(), 5)
     task.cancel()
     to_user = [d["text"] for d in telegram.sent("editMessageText") if d["chat_id"] == 60]
     assert len(to_user) == 2 and all(t.startswith("🚫 YouTube is currently blocking") for t in to_user)

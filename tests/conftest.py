@@ -54,6 +54,7 @@ if config.DATA_DIR.resolve() == (config.ROOT / "data").resolve() or config.TELEG
 import access  # noqa: E402
 from helpers import SUMMARY, FakeConversation, meta  # noqa: E402
 import bot  # noqa: E402
+from tgbot import state  # noqa: E402
 from summarizer import db, media, stats, summarize  # noqa: E402
 from telegram import File as telegram_File  # noqa: E402  (after PTB_TIMEDELTA is set)
 
@@ -76,15 +77,7 @@ def fresh_state(tmp_path, monkeypatch):
     db.init()
     db.sync_admins(access.ADMINS)
     monkeypatch.setattr(stats, "_FILE", tmp_path / "stats.json")
-    monkeypatch.setattr(bot, "queue", asyncio.Queue())
-    monkeypatch.setattr(bot, "_pending_replied", {})
-    monkeypatch.setattr(bot, "_user_jobs", collections.Counter())
-    monkeypatch.setattr(bot, "_admin_error_noticed", {})
-    monkeypatch.setattr(bot, "_block_noticed", {})
-    monkeypatch.setattr(bot, "_jobs", {})
-    monkeypatch.setattr(bot, "_running", None)
-    monkeypatch.setattr(bot, "_waiting_for_memory", [])
-    monkeypatch.setattr(bot, "_delayed", {})
+    state.reset()
     import threading
     from summarizer import proc
     monkeypatch.setattr(proc, "current_job_cancel", threading.Event())

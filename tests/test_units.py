@@ -2,6 +2,7 @@
 import pytest
 
 from summarizer import units
+from tgbot import jobs, render, state
 
 
 def metric(text):
@@ -131,8 +132,8 @@ async def test_the_same_summary_in_each_readers_units(app, telegram, monkeypatch
         "youtube", "abcdefghijk", url, {"title": "T"}, "", "captions", "en", summary))
     for uid in (60, 61):
         await send(app, msg_update(uid, "https://youtu.be/abcdefghijk"))
-    task = asyncio.create_task(bot.worker(app))
-    await asyncio.wait_for(bot.queue.join(), 10)
+    task = asyncio.create_task(jobs.worker(app))
+    await asyncio.wait_for(state.queue.join(), 10)
     task.cancel()
     ana, bob = ([m["text"] for m in telegram.sent("sendMessage") if m["chat_id"] == uid][-1] for uid in (60, 61))
     assert "35 °C for 480 km" in ana and "Stored at 24 °C" in ana and "9.1 kg" in ana
@@ -148,7 +149,7 @@ def test_chapters_are_converted_for_display():
     from summarizer import documents
     r = documents.DocResult("each", "b.pdf", {"format": "pdf", "pages": 3},
                             chapters=[(0, "The 100-Mile Walk", "We walked 100 miles at 90 °F.")], llm="x")
-    text = bot.render_document(r, units_=("metric", "c"))[0]
+    text = render.render_document(r, units_=("metric", "c"))[0]
     assert "We walked 160 km at 32 °C." in text and "The 100-Mile Walk" in text
 
 

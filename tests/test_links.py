@@ -10,12 +10,12 @@ import urllib.response
 import pytest
 
 import access
-import bot
 from summarizer import config, fetch, links, summarize
 
 from conftest import callback_update, msg_update, send
 from docs import make_pdf
 from helpers import BookAI
+from tgbot import jobs, state, texts
 
 ANA = 60
 FILE_ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456"
@@ -197,8 +197,8 @@ def served_pdf(monkeypatch, tmp_path):
 
 async def _run(app):
     """Runs the worker until the queue is empty."""
-    task = asyncio.create_task(bot.worker(app))
-    await asyncio.wait_for(bot.queue.join(), 20)
+    task = asyncio.create_task(jobs.worker(app))
+    await asyncio.wait_for(state.queue.join(), 20)
     task.cancel()
 
 
@@ -231,8 +231,8 @@ async def test_drive_link_learns_the_file_name_on_download(app, telegram, served
 async def test_unusable_links_are_refused_at_once(app, telegram, url, reply):
     access.set_state(ANA, "allowed")
     await send(app, msg_update(ANA, url))
-    assert reply in telegram.texts()[-1] and bot.queue.qsize() == 0
+    assert reply in telegram.texts()[-1] and state.queue.qsize() == 0
 
 
 def test_too_big_upload_points_to_drive_and_dropbox():
-    assert "Google Drive or Dropbox" in bot.TOO_BIG
+    assert "Google Drive or Dropbox" in texts.TOO_BIG

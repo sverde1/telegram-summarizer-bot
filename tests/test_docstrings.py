@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FILES = [ROOT / "bot.py", ROOT / "access.py", *sorted((ROOT / "summarizer").glob("*.py")),
-         *sorted((ROOT / "tests").glob("*.py"))]
+         *sorted((ROOT / "tgbot").rglob("*.py")), *sorted((ROOT / "tests").glob("*.py"))]
 
 
 def test_every_function_has_a_docstring():

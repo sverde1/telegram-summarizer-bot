@@ -198,9 +198,9 @@ def test_a_file_summary_has_no_clickbait_section_and_names_the_file():
     import bot
     r = pipeline.Result("file", SHA, "🎤 Voice message", {"title": "Audio file", "duration": 42}, "t", "whisper-small",
                         "en", {**SUMMARY, "title": "Battery talk", "_stats": {}})
-    text = bot.render(r)[0]
+    text = render.render(r)[0]
     assert "Clickbait" not in text and "🎤 Voice message" in text and "Battery talk" in text
-    assert bot._transcript_name(r) == "Voice message transcript.txt"
+    assert delivery.transcript_name(r) == "Voice message transcript.txt"
 
 
 # ---------- sent in Telegram ----------
@@ -208,7 +208,6 @@ def test_a_file_summary_has_no_clickbait_section_and_names_the_file():
 import asyncio  # noqa: E402
 
 import access  # noqa: E402
-import bot  # noqa: E402
 
 from conftest import doc_update, media_update, send  # noqa: E402
 
@@ -217,10 +216,10 @@ ANA = 60
 
 async def _work(app):
     """Runs the worker until the queue and any paced deliveries are done."""
-    task = asyncio.create_task(bot.worker(app))
-    await asyncio.wait_for(bot.queue.join(), 30)
+    task = asyncio.create_task(jobs.worker(app))
+    await asyncio.wait_for(state.queue.join(), 30)
     for _ in range(300):
-        if not bot._delayed:
+        if not state.delayed:
             break
         await asyncio.sleep(0.01)
     task.cancel()
@@ -240,7 +239,7 @@ async def test_a_voice_message_is_summarized(app, telegram, files, ana, ai, whis
     assert "Battery talk" in text and "🎤 Voice message (0:42)" in text and "Clickbait" not in text
     req = db.recent_requests(ANA)[0]
     assert (req["kind"], req["status"], req["url"]) == ("summary", "done", "🎤 Voice message (0:42)")
-    assert not list((bot.config.DATA_DIR / "work").glob("media_*"))  # the file is gone afterwards
+    assert not list((config.DATA_DIR / "work").glob("media_*"))  # the file is gone afterwards
 
 
 async def test_a_video_sent_as_a_file_gets_frames(app, telegram, files, ana, ai, whisper):
@@ -265,7 +264,7 @@ async def test_caption_transcript_sends_the_transcript(app, telegram, files, ana
 ])
 async def test_refused_before_downloading(app, telegram, ana, update, reply):
     await send(app, update)
-    assert reply in telegram.texts()[-1] and not telegram.sent("getFile") and bot.queue.qsize() == 0
+    assert reply in telegram.texts()[-1] and not telegram.sent("getFile") and state.queue.qsize() == 0
 
 
 async def test_a_video_note_without_a_name(app, telegram, files, ana, ai, whisper):
@@ -279,16 +278,16 @@ async def test_an_unreadable_file(app, telegram, files, ana, ai, whisper):
     telegram.files["M1"] = files["broken"]
     await send(app, doc_update(ANA, "broken.mp4", 400, file_id="M1"))
     await _work(app)
-    assert telegram.texts()[-1] == bot.UNREADABLE_MEDIA and ai == []
+    assert telegram.texts()[-1] == texts.UNREADABLE_MEDIA and ai == []
 
 
 async def test_waiting_for_memory_downloads_once(app, telegram, files, ana, ai, whisper, monkeypatch):
     telegram.files["M1"] = files["voice"]
     fits = iter([False, True, True, True])
     monkeypatch.setattr(memory, "fits_now", lambda needed: next(fits, True))
-    monkeypatch.setattr(bot, "MEMORY_RECHECK", 0.05)
+    monkeypatch.setattr(jobs, "MEMORY_RECHECK", 0.05)
     await send(app, media_update(ANA, "voice"))
-    task = asyncio.create_task(bot.worker(app))
+    task = asyncio.create_task(jobs.worker(app))
     for _ in range(400):
         if db.recent_requests(ANA)[0]["status"] == "done":
             break
@@ -304,6 +303,7 @@ import urllib.request  # noqa: E402
 from summarizer import fetch, links  # noqa: E402
 
 from conftest import msg_update  # noqa: E402
+from tgbot import delivery, jobs, render, state, texts
 
 DRIVE = "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456/view"
 
@@ -387,7 +387,7 @@ async def test_a_video_by_drive_link_is_summarized(app, telegram, ana, ai, whisp
     await _work(app)
     text = telegram.sent("sendMessage")[-1]["text"]
     assert "🎬 holiday.mp4" in text and "Battery talk" in text
-    assert shared.downloads == [bot.config.MAX_MEDIA_LINK_MB]  # media links get the 1 GB cap
+    assert shared.downloads == [config.MAX_MEDIA_LINK_MB]  # media links get the 1 GB cap
 
 
 async def test_transcript_of_a_linked_recording(app, telegram, files, ana, ai, whisper, shared):
@@ -408,9 +408,9 @@ async def test_too_big_or_too_little_disk(app, telegram, ana, shared, monkeypatc
     await send(app, msg_update(ANA, DRIVE))
     assert "larger than 1024 MB" in telegram.texts()[-1]
     shared.info["size"] = 500 * 1024 ** 2
-    monkeypatch.setattr(bot.shutil, "disk_usage", lambda path: type("U", (), {"free": 600 * 1024 ** 2})())
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: type("U", (), {"free": 600 * 1024 ** 2})())
     await send(app, msg_update(ANA, DRIVE))
-    assert "enough free disk space" in telegram.texts()[-1] and bot.queue.qsize() == 0
+    assert "enough free disk space" in telegram.texts()[-1] and state.queue.qsize() == 0
 
 
 async def test_a_drive_link_to_a_document_still_gets_the_book_menu(app, telegram, ana, shared):

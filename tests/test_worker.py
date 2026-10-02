@@ -5,10 +5,10 @@ import pytest
 from telegram.error import Forbidden, RetryAfter
 
 import access
-import bot
 from summarizer import db, pipeline
 
 from conftest import ADMIN_ID
+from tgbot import jobs, runners, state
 
 USER = 60
 
@@ -25,19 +25,19 @@ def _result(text="A summary.") -> pipeline.Result:
     return pipeline.Result("youtube", "id", "https://youtu.be/id", {"title": "T"}, "", "captions", "en", summary)
 
 
-async def _run(app, jobs: list[bot.Job], outcome) -> None:
-    """Queues jobs, runs the worker until they're all handled, then stops it.
+async def _run(app, queued: list[state.Job], outcome) -> None:
+    """Queues the jobs, runs the worker until they're all handled, then stops it.
 
     Args:
         app: The test application.
-        jobs: Jobs to queue.
+        queued: Jobs to queue.
         outcome: Function (job) -> Result, or raising, standing in for the pipeline.
     """
-    for job in jobs:
-        await bot.queue.put(job)
-    task = asyncio.create_task(bot.worker(app))
+    for job in queued:
+        await state.queue.put(job)
+    task = asyncio.create_task(jobs.worker(app))
     try:
-        await asyncio.wait_for(bot.queue.join(), 5)
+        await asyncio.wait_for(state.queue.join(), 5)
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -45,9 +45,9 @@ async def _run(app, jobs: list[bot.Job], outcome) -> None:
     assert not task.done() or task.cancelled()
 
 
-def _job(n: int, **kw) -> bot.Job:
+def _job(n: int, **kw) -> state.Job:
     """A queued job for USER with its own request row."""
-    return bot.Job(f"https://youtu.be/{n:011d}", chat_id=USER, status_id=n, user_id=USER,
+    return state.Job(f"https://youtu.be/{n:011d}", chat_id=USER, status_id=n, user_id=USER,
                    request_id=db.add_request(USER, "u", "summary"), **kw)
 
 
@@ -93,23 +93,23 @@ async def test_deleted_status_message_is_not_an_error(app, telegram, fake_pipeli
 
 
 def test_every_job_kind_has_a_runner():
-    assert set(bot.RUNNERS) == set(bot.JobKind)
+    assert set(runners.RUNNERS) == set(state.JobKind)
 
 
 @pytest.mark.parametrize("fields", [
     {"upload_id": 3},  # a video job naming an upload
     {"voice_of": 4},  # a video job naming a summary to read
-    {"job_kind": bot.JobKind.DOCUMENT},  # a document job without its upload
-    {"job_kind": bot.JobKind.MEDIA, "upload_id": 3, "voice_of": 4},
-    {"job_kind": bot.JobKind.VOICE},
+    {"job_kind": state.JobKind.DOCUMENT},  # a document job without its upload
+    {"job_kind": state.JobKind.MEDIA, "upload_id": 3, "voice_of": 4},
+    {"job_kind": state.JobKind.VOICE},
 ])
 def test_a_job_must_have_the_fields_of_its_kind(fields):
     with pytest.raises(ValueError):
-        bot.Job("u", chat_id=1, status_id=1, **fields)
+        state.Job("u", chat_id=1, status_id=1, **fields)
 
 
 def test_jobs_of_each_kind_with_their_fields():
-    assert bot.Job("u", 1, 1).job_kind is bot.JobKind.VIDEO
-    for kind in (bot.JobKind.MEDIA, bot.JobKind.DOCUMENT):
-        assert bot.Job("u", 1, 1, upload_id=3, job_kind=kind).job_kind is kind
-    assert bot.Job("u", 1, 1, voice_of=4, job_kind=bot.JobKind.VOICE).job_kind is bot.JobKind.VOICE
+    assert state.Job("u", 1, 1).job_kind is state.JobKind.VIDEO
+    for kind in (state.JobKind.MEDIA, state.JobKind.DOCUMENT):
+        assert state.Job("u", 1, 1, upload_id=3, job_kind=kind).job_kind is kind
+    assert state.Job("u", 1, 1, voice_of=4, job_kind=state.JobKind.VOICE).job_kind is state.JobKind.VOICE
