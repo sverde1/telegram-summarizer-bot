@@ -555,9 +555,10 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
                 f"⏳ You already have {_user_jobs[uid]} videos in the queue. Send this one again when one of "
                 "them is done.")
             return
-        if queue.qsize() >= config.MAX_QUEUE:
-            await update.message.reply_text(
-                f"⏳ The bot is busy right now ({queue.qsize()} videos queued). Please try again in a few minutes.")
+        # Every unfinished job counts (queued, running, waiting for memory, replaying), not just the queue.
+        # The count isn't shown: it would tell users how busy the others are.
+        if len(_jobs) >= config.MAX_QUEUE:
+            await update.message.reply_text("⏳ The bot is busy right now. Please try again in a few minutes.")
             return
     ahead = queue.qsize()
     status = await update.message.reply_text(

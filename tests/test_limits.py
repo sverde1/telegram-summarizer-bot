@@ -33,7 +33,17 @@ async def test_full_queue_refuses_new_links(app, telegram):
         await send(app, msg_update(ADMIN_ID, LINK))
     await send(app, msg_update(FRIEND, LINK))
     assert bot.queue.qsize() == config.MAX_QUEUE
-    assert "The bot is busy right now (20 videos queued)" in telegram.texts()[-1]
+    assert telegram.texts()[-1] == "⏳ The bot is busy right now. Please try again in a few minutes."
+
+
+async def test_jobs_waiting_for_memory_count_toward_the_total(app, telegram):
+    access.set_state(FRIEND, "allowed")
+    for n in range(config.MAX_QUEUE):  # e.g. many users' long videos waiting for memory
+        job = bot.Job("u", chat_id=1, status_id=n, user_id=1000 + n, request_id=10_000 + n)
+        bot._jobs[job.request_id] = job
+        bot._waiting_for_memory.append(job)
+    await send(app, msg_update(FRIEND, LINK))
+    assert bot.queue.qsize() == 0 and "busy" in telegram.texts()[-1]
 
 
 async def test_finished_jobs_free_the_slot(app, telegram, monkeypatch):
