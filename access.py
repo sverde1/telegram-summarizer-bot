@@ -120,3 +120,19 @@ def ocr_limit(uid: int) -> tuple[int | None, bool]:
     if u and u.get("ocr_limit") is not None:
         return u["ocr_limit"], False
     return global_ocr_limit(), True
+
+
+def global_tts_limit() -> int:
+    """New voice messages per 24 h for users without an override: /limit voice, else TTS_DAILY_LIMIT."""
+    stored = db.get_setting("tts_limit")
+    return int(stored) if stored is not None else config.TTS_DAILY_LIMIT
+
+
+def tts_limit(uid: int) -> tuple[int | None, bool]:
+    """A user's voice-message limit, like daily_limit: (limit or None for admins, whether it's the default)."""
+    if is_admin(uid):
+        return None, False
+    u = db.get_user(uid)
+    if u and u.get("tts_limit") is not None:
+        return u["tts_limit"], False
+    return global_tts_limit(), True

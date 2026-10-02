@@ -129,6 +129,20 @@ CREATE TABLE IF NOT EXISTS ocr_holds (
     approved    INTEGER DEFAULT 0,             -- an admin allowed it (over OCR_MAX_PAGES)
     created_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS spoken (
+    request_id  INTEGER PRIMARY KEY,           -- the summary request whose 🔊 button this is
+    title       TEXT NOT NULL,
+    text        TEXT NOT NULL,                 -- exactly what is read aloud (what the user read)
+    lang        TEXT NOT NULL,                 -- espeak language code and Kokoro voice, as when delivered
+    voice       TEXT NOT NULL,
+    created_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS voices (
+    key         TEXT PRIMARY KEY,              -- sha256 of voice, language, speed and text (no user)
+    file_id     TEXT NOT NULL,                 -- Telegram's id of the sent voice message, reusable in any chat
+    duration    INTEGER,
+    created_at  REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS requests_user ON requests (user_id, created_at);
 CREATE INDEX IF NOT EXISTS requests_video ON requests (platform, video_id);
 """
@@ -180,6 +194,8 @@ def init() -> None:
             c.execute("ALTER TABLE users ADD COLUMN daily_limit INTEGER")
         if "ocr_limit" not in cols:  # …and before the OCR limit
             c.execute("ALTER TABLE users ADD COLUMN ocr_limit INTEGER")
+        if "tts_limit" not in cols:  # …and before the voice-message limit
+            c.execute("ALTER TABLE users ADD COLUMN tts_limit INTEGER")
         if "ocr" not in {r["name"] for r in c.execute("PRAGMA table_info(requests)")}:
             c.execute("ALTER TABLE requests ADD COLUMN ocr INTEGER DEFAULT 0")  # 1: this request ran OCR
         if "source_url" not in {r["name"] for r in c.execute("PRAGMA table_info(uploads)")}:
@@ -494,8 +510,9 @@ def daily_usage(uid: int, window: float = 86400) -> tuple[int, float | None]:
         (count, unix time of the oldest counted request or None).
     """
     with _db() as c:
-        row = c.execute("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM requests WHERE user_id=? AND created_at>?",
-                        (uid, time.time() - window)).fetchone()
+        # Voice messages don't count: listening is free (it has its own limit for new ones, tts_usage).
+        row = c.execute("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM requests WHERE user_id=? "
+                        "AND created_at>? AND kind<>'voice'", (uid, time.time() - window)).fetchone()
     return row["n"], row["oldest"]
 
 
@@ -636,6 +653,56 @@ def get_page_sources(sha256: str) -> dict[int, str]:
     with _db() as c:
         return {r["page"]: r["source"] for r in c.execute(
             "SELECT page, source FROM document_pages WHERE sha256=?", (sha256,))}
+
+
+def set_user_tts_limit(uid: int, limit: int | None) -> bool:
+    """Sets (or with None removes) one user's voice-message limit. Returns False if the user is unknown."""
+    with _db() as c:
+        return c.execute("UPDATE users SET tts_limit=? WHERE id=?", (limit, uid)).rowcount > 0
+
+
+def tts_usage(uid: int, window: float = 86400) -> tuple[int, float | None]:
+    """New voice messages a user had made in the last `window` seconds (reused ones don't count), and the
+    oldest's time. Queued ones aren't counted until they run."""
+    with _db() as c:
+        row = c.execute("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM requests WHERE user_id=? "
+                        "AND kind='voice' AND cached=0 AND status<>'queued' AND created_at>?",
+                        (uid, time.time() - window)).fetchone()
+    return row["n"], row["oldest"]
+
+
+def save_spoken(request_id: int, title: str, text: str, lang: str, voice: str) -> None:
+    """Stores what a summary's 🔊 button reads (replacing an earlier version for the same request)."""
+    with _db() as c:
+        c.execute("INSERT OR REPLACE INTO spoken VALUES (?,?,?,?,?,?)",
+                  (request_id, title, text, lang, voice, time.time()))
+
+
+def get_spoken(request_id: int) -> dict | None:
+    """What a summary's 🔊 button reads, or None."""
+    with _db() as c:
+        row = c.execute("SELECT * FROM spoken WHERE request_id=?", (request_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_voice(key: str, max_age: float) -> dict | None:
+    """A made voice message by its key, unless older than `max_age` seconds (old ones are deleted here)."""
+    with _db() as c:
+        c.execute("DELETE FROM voices WHERE created_at<?", (time.time() - max_age,))
+        row = c.execute("SELECT * FROM voices WHERE key=?", (key,)).fetchone()
+    return dict(row) if row else None
+
+
+def save_voice(key: str, file_id: str, duration: int | None) -> None:
+    """Remembers Telegram's id of a sent voice message."""
+    with _db() as c:
+        c.execute("INSERT OR REPLACE INTO voices VALUES (?,?,?,?)", (key, file_id, duration, time.time()))
+
+
+def delete_voice(key: str) -> None:
+    """Forgets a voice message (Telegram no longer accepts its id)."""
+    with _db() as c:
+        c.execute("DELETE FROM voices WHERE key=?", (key,))
 
 
 def waiting_request(user_id: int, sha256: str) -> int | None:

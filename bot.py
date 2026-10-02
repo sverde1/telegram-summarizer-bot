@@ -26,7 +26,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
 
 import access
 from summarizer import (config, db, documents, links, memory, ocr, pipeline, proc, stats, summarize, transcribe,
-                        updates)
+                        tts, updates)
 from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -470,7 +470,18 @@ def _limit_label(uid: int) -> str:
         return "no limit"
     daily = f"{used}/{limit} today" + (" (default)" if is_default else "") if limit else "no daily limit"
     used, limit, _, _ = _ocr_status(uid)
-    return f"{daily} · OCR {used}/{limit}" if limit else f"{daily} · OCR no limit"
+    ocr_ = f"OCR {used}/{limit}" if limit else "OCR no limit"
+    used, limit, _, _ = _tts_status(uid)
+    voice = f"🔊 {used}/{limit}" if limit else "🔊 no limit"
+    return f"{daily} · {ocr_} · {voice}"
+
+
+def _tts_status(uid: int) -> tuple[int, int | None, bool, float | None]:
+    """A user's new voice messages against their voice-message limit, like _daily_status."""
+    used, oldest = db.tts_usage(uid, DAY)
+    limit, is_default = access.tts_limit(uid)
+    frees_in = (oldest + DAY - time.time()) if limit and used >= limit and oldest else None
+    return used, limit, is_default, frees_in
 
 
 # The two limits /limit manages: setting key, per-user setter, global getter, status, what is counted.
@@ -479,6 +490,8 @@ LIMITS = {
               "requests", "Daily limit"),
     "ocr": ("ocr_limit", db.set_user_ocr_limit, access.global_ocr_limit, lambda uid: _ocr_status(uid),
             "scanned documents (OCR)", "OCR limit"),
+    "voice": ("tts_limit", db.set_user_tts_limit, access.global_tts_limit, lambda uid: _tts_status(uid),
+              "new voice messages", "Voice-message limit"),
 }
 
 
@@ -486,7 +499,7 @@ def _usage_line(uid: int, kind: str) -> str:
     """A user's own usage of one limit, e.g. "📊 Today: 12 of your 100 requests (last 24 h). 88 left." """
     _, _, _, status, what, _ = LIMITS[kind]
     used, limit, _, frees_in = status(uid)
-    icon = "📊" if kind == "daily" else "🔍"
+    icon = {"daily": "📊", "ocr": "🔍", "voice": "🔊"}[kind]
     if not limit:
         return f"{icon} Today: {used} {what} (last 24 h). No limit."
     if used >= limit:
@@ -506,22 +519,22 @@ async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     uid = update.effective_user.id
     if not access.is_admin(uid):
-        await update.message.reply_text(f"{_usage_line(uid, 'daily')}\n{_usage_line(uid, 'ocr')}")
+        await update.message.reply_text("\n".join(_usage_line(uid, k) for k in LIMITS))
         return
     args = list(ctx.args)
-    kind = "ocr" if args and args[0].lower() == "ocr" else "daily"
-    if kind == "ocr":
+    kind = args[0].lower() if args and args[0].lower() in ("ocr", "voice") else "daily"
+    if kind != "daily":
         args = args[1:]
     key, set_user, glob, _, what, title = LIMITS[kind]
     if not args:
         lines = []
         for k, (_, _, g, _, w, t) in LIMITS.items():
             lines.append(f"📊 {t} for everyone: {g() or 'none'} {w} per 24 h.")
-            col = "daily_limit" if k == "daily" else "ocr_limit"
+            col = LIMITS[k][0]
             lines += [f"  • {access.label(u['id'], u)}: {u[col] or 'no limit'}"
                       for u in access.all_users()["allowed"] if u.get(col) is not None]
         lines.append("\nChange it: /limit 50 · one user: /limit <user id> 200 · /limit <user id> default · "
-                     "0 = no limit. The same with \"ocr\" first for the OCR limit: /limit ocr 5")
+                     "0 = no limit. The same with \"ocr\" or \"voice\" first for those limits: /limit ocr 5")
         await update.message.reply_text("\n".join(lines))
         return
     if len(args) == 1 and args[0].isdigit():
@@ -1967,6 +1980,19 @@ async def sync_commands(bot, uid: int) -> None:
         log.warning("couldn't set commands for %s: %s", uid, e)
 
 
+async def _prepare_tts() -> None:
+    """Downloads Kokoro's model if missing (off the event loop) and checks voice messages can be made; logs
+    what's missing for the admins. Until it's ready, summaries get no 🔊 button."""
+    try:
+        await asyncio.to_thread(tts.download_models)
+    except Exception as e:  # noqa: BLE001  (logged; the bot works without voice messages)
+        log.warning("couldn't download the text-to-speech model: %s", e)
+    if found := await asyncio.to_thread(tts.refresh):
+        log.warning("voice messages (🔊) are off: %s", "; ".join(found))
+    else:
+        log.info("voice messages (🔊) are ready")
+
+
 async def post_init(app: Application) -> None:
     """Startup: registers the command menus and starts the worker and the update checker.
 
@@ -1976,6 +2002,8 @@ async def post_init(app: Application) -> None:
     Args:
         app: The application being started.
     """
+    if tts.language():  # voice messages wanted: get the model in the background (338 MB, once)
+        app.bot_data["tts_setup"] = asyncio.create_task(_prepare_tts())
     if missing := ocr.missing_languages():
         log.warning("OCR (%s) has no model for installed language(s) %s: add them again with /ocrlang add",
                     ocr.engine(), ", ".join(missing))
@@ -2056,7 +2084,7 @@ async def post_stop(app: Application) -> None:
     if running is not None and running.request_id in _jobs:  # the worker didn't get to report it in time
         _end_job(running)
         await _report_cancel(app, running)
-    for name in ("worker", "update_checker"):
+    for name in ("worker", "update_checker", "tts_setup"):
         if task := app.bot_data.get(name):
             task.cancel()
 

@@ -87,6 +87,13 @@ MAX_LINK_DOWNLOAD_MB = int(_env("MAX_LINK_DOWNLOAD_MB", "100"))
 # sudo apt install espeak-ng-data. Paths as on Debian/Ubuntu x86-64.
 ESPEAK_LIB = _env("ESPEAK_LIB", "/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1")
 ESPEAK_DATA = _env("ESPEAK_DATA", "/usr/lib/x86_64-linux-gnu/espeak-ng-data")
+# Voice messages (🔊 Listen). TTS_VOICE "" = the default voice for SUMMARY_LANGUAGE (see tts.LANGUAGES).
+TTS_VOICE = _env("TTS_VOICE", "")
+TTS_SPEED = float(_env("TTS_SPEED", "1.0"))  # 0.5-2.0
+TTS_DEVICE = _env("TTS_DEVICE", "cpu")  # cpu, or cuda (needs onnxruntime-gpu; falls back to the CPU)
+VOICE_CACHE_DAYS = int(_env("VOICE_CACHE_DAYS", "7"))  # how long a made voice message is reused
+# New voice messages a non-admin may have made per rolling 24 h (0 = no limit); reused ones are free.
+TTS_DAILY_LIMIT = int(_env("TTS_DAILY_LIMIT", "20"))
 MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
 SHORT_VIDEO_SEC = int(_env("SHORT_VIDEO_SEC", "180"))  # up to this long: denser frame sampling
 # Whisper may use at most this share of the machine's RAM; a video that doesn't fit right now waits (other

@@ -91,8 +91,9 @@ def fresh_state(tmp_path, monkeypatch):
     # OCR models live in the worker's data dir, shared by its tests: start each test with none added.
     for folder in ("tessdata", "rapidocr"):
         shutil.rmtree(config.DATA_DIR / folder, ignore_errors=True)
-    from summarizer import ocr
+    from summarizer import ocr, tts
     monkeypatch.setattr(ocr, "_cuda_ok", None)
+    monkeypatch.setattr(tts, "_ready", False)  # voice messages off unless a test turns them on
     # Pretend the installed Codex knows every feature we disable (asking it would spawn codex).
     monkeypatch.setattr(summarize, "_codex_known_features", set(summarize.CODEX_DISABLED_FEATURES))
 

@@ -251,6 +251,11 @@ The database migrates itself on start.
 | `MAX_DOC_PAGES` | `2000` | Most pages read from an uploaded document (EPUB/DOCX/TXT count ~2000 characters as a page). |
 | `MAX_DOC_CHARS` | `3000000` | Most characters read from an uploaded document. |
 | `MAX_LINK_DOWNLOAD_MB` | `100` | Largest document downloaded from a Google Drive / Dropbox link. |
+| `TTS_VOICE` | *(empty)* | Kokoro voice for 🔊 voice messages; empty = the default for `SUMMARY_LANGUAGE` (English: `af_heart`). |
+| `TTS_SPEED` | `1.0` | Reading speed, 0.5–2.0. |
+| `VOICE_CACHE_DAYS` | `7` | Days a made voice message is reused (only Telegram's id for it is stored); then it's made again. |
+| `TTS_DAILY_LIMIT` | `20` | New voice messages a user may have made per 24 h (admins: no limit; `0` = no limit). Reused ones are free, and listening doesn't count toward `DAILY_LIMIT`. `/limit voice` changes it. |
+| `ESPEAK_LIB` / `ESPEAK_DATA` | Debian/Ubuntu paths | The system's espeak-ng, which Kokoro needs. |
 | `OCR_ENGINE` | `auto` | Text recognition for scanned PDFs. `auto`: RapidOCR when `OCR_DEVICE=cuda` works, else Tesseract (measured on a 475-page scanned book, 4 cores, 3 workers: Tesseract 1.2 s/page, RapidOCR 6.4 s/page, same text). Or force `tesseract` / `rapidocr`. Switching engines needs the OCR languages added again (`/ocrlang`); the bot logs which at startup. |
 | `OCR_DEVICE` | `cpu` | `cuda` runs OCR with RapidOCR on an NVIDIA GPU (see GPU below); falls back to Tesseract on the CPU when CUDA isn't available. |
 | `OCR_DAILY_LIMIT` | `5` | Scanned documents a user may have read per rolling 24 h (admins: no limit; `0` = no limit). Once changed with `/limit ocr`, the stored value wins. |
