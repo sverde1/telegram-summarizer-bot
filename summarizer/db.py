@@ -117,6 +117,18 @@ CREATE TABLE IF NOT EXISTS doc_summaries (
     created_at REAL NOT NULL,
     PRIMARY KEY (sha256, part, style, backend, model)
 );
+CREATE TABLE IF NOT EXISTS ocr_holds (
+    request_id  INTEGER PRIMARY KEY,           -- a document request waiting for the user to confirm OCR
+    upload_id   INTEGER NOT NULL,
+    mode        TEXT NOT NULL,                 -- the job to continue: whole | short | each | pick
+    chapter     INTEGER,
+    pages       INTEGER NOT NULL,              -- pages that need OCR
+    seconds     REAL NOT NULL,                 -- estimated OCR time
+    language    TEXT,                          -- OCR language(s), e.g. "slv"
+    asked       INTEGER DEFAULT 0,             -- the user asked the admins to allow a long OCR
+    approved    INTEGER DEFAULT 0,             -- an admin allowed it (over OCR_MAX_PAGES)
+    created_at  REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS requests_user ON requests (user_id, created_at);
 CREATE INDEX IF NOT EXISTS requests_video ON requests (platform, video_id);
 """
@@ -165,6 +177,12 @@ def init() -> None:
                 c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
         if "daily_limit" not in cols:  # databases created before per-user daily limits
             c.execute("ALTER TABLE users ADD COLUMN daily_limit INTEGER")
+        if "ocr_limit" not in cols:  # …and before the OCR limit
+            c.execute("ALTER TABLE users ADD COLUMN ocr_limit INTEGER")
+        if "ocr" not in {r["name"] for r in c.execute("PRAGMA table_info(requests)")}:
+            c.execute("ALTER TABLE requests ADD COLUMN ocr INTEGER DEFAULT 0")  # 1: this request ran OCR
+        if "toc" not in {r["name"] for r in c.execute("PRAGMA table_info(documents)")}:
+            c.execute("ALTER TABLE documents ADD COLUMN toc INTEGER DEFAULT 0")  # chapters from a contents list
         vcols = {r["name"] for r in c.execute("PRAGMA table_info(videos)")}
         if "result" in vcols:  # summaries used to live in videos (one per video): move them out
             for r in c.execute("SELECT platform, video_id, result, frames_used, updated_at FROM videos "
@@ -549,6 +567,59 @@ def save_doc_summary(sha256: str, part: str, style: str, backend: str, model: st
     with _db() as c:
         c.execute("INSERT OR REPLACE INTO doc_summaries VALUES (?,?,?,?,?,?,?)",
                   (sha256, part, style, backend, model, json.dumps(result, ensure_ascii=False), time.time()))
+
+
+def get_request(req_id: int) -> dict | None:
+    """One requests row, or None."""
+    with _db() as c:
+        row = c.execute("SELECT * FROM requests WHERE id=?", (req_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def set_user_ocr_limit(uid: int, limit: int | None) -> bool:
+    """Sets (or with None removes) one user's OCR-limit override. Returns False if the user is unknown."""
+    with _db() as c:
+        return c.execute("UPDATE users SET ocr_limit=? WHERE id=?", (limit, uid)).rowcount > 0
+
+
+def ocr_usage(uid: int, window: float = 86400) -> tuple[int, float | None]:
+    """How many OCR runs a user started in the last `window` seconds (finished or not), and the oldest's time."""
+    with _db() as c:
+        row = c.execute("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM requests "
+                        "WHERE user_id=? AND ocr=1 AND created_at>?", (uid, time.time() - window)).fetchone()
+    return row["n"], row["oldest"]
+
+
+def save_ocr_hold(request_id: int, upload_id: int, mode: str, chapter: int | None, pages: int, seconds: float,
+                  language: str) -> None:
+    """Remembers a document request that waits for the user's OCR confirmation (replacing an earlier one)."""
+    with _db() as c:
+        c.execute("INSERT OR REPLACE INTO ocr_holds (request_id, upload_id, mode, chapter, pages, seconds, language,"
+                  " asked, approved, created_at) VALUES (?,?,?,?,?,?,?, COALESCE((SELECT asked FROM ocr_holds "
+                  "WHERE request_id=?), 0), COALESCE((SELECT approved FROM ocr_holds WHERE request_id=?), 0), ?)",
+                  (request_id, upload_id, mode, chapter, pages, seconds, language, request_id, request_id,
+                   time.time()))
+
+
+def get_ocr_hold(request_id: int) -> dict | None:
+    """The OCR confirmation a request waits for, or None."""
+    with _db() as c:
+        row = c.execute("SELECT * FROM ocr_holds WHERE request_id=?", (request_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_ocr_hold(request_id: int, **fields) -> None:
+    """Updates an OCR hold (asked / approved)."""
+    with _db() as c:
+        c.execute(f"UPDATE ocr_holds SET {', '.join(f'{k}=?' for k in fields)} WHERE request_id=?",
+                  (*fields.values(), request_id))
+
+
+def get_page_sources(sha256: str) -> dict[int, str]:
+    """Where each stored page's text came from ("text" layer or "ocr-<engine>"), by page index."""
+    with _db() as c:
+        return {r["page"]: r["source"] for r in c.execute(
+            "SELECT page, source FROM document_pages WHERE sha256=?", (sha256,))}
 
 
 def waiting_request(user_id: int, sha256: str) -> int | None:

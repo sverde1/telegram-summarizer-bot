@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import books, config, db, pipeline, proc, sandbox, summarize
+from . import books, config, db, docparse, ocr, pipeline, proc, sandbox, summarize
 
 log = logging.getLogger(__name__)
 
@@ -31,8 +31,6 @@ MESSAGES = {
 
 
 EMPTY = "⚠️ I couldn't find any readable text in this file."
-SCANNED = ("⚠️ This looks like a scanned document (pictures of pages, no text), which I can't read yet. "
-           "Send a version with selectable text.")
 MIN_LETTERS = 50          # less than this in the whole file is "no readable text"
 SCAN_PAGE_LETTERS = 20    # a PDF page with fewer letters has no text layer (a short real page still has more)
 SCAN_SHARE = 0.5          # …and a PDF where at least this share of pages is like that is a scan
@@ -40,6 +38,21 @@ SCAN_SHARE = 0.5          # …and a PDF where at least this share of pages is l
 
 class DocumentError(pipeline.PipelineError):
     """The document can't be used. str() is a message for the user; `detail` is for the admins."""
+
+
+class NeedsOcr(Exception):
+    """A scanned document: the user must confirm OCR first (it takes long and has its own daily limit).
+
+    Attributes:
+        pages: How many pages need OCR.
+        seconds: Estimated OCR time.
+        language: The OCR language(s) chosen from the sample, e.g. "slv".
+    """
+
+    def __init__(self, pages: int, seconds: float, language: str):
+        """Stores what the confirmation message shows."""
+        super().__init__(f"{pages} pages need OCR")
+        self.pages, self.seconds, self.language = pages, seconds, language
 
 
 @dataclass
@@ -124,22 +137,80 @@ def read_seconds(pages: int) -> float:
     return 2 + 0.02 * pages
 
 
-def _check_text(parsed: dict) -> None:
-    """Refuses documents with no usable text: scans (until OCR is available) and empty files.
+def _letters(text: str) -> int:
+    """Number of letters in a text."""
+    return sum(c.isalpha() for c in text)
+
+
+def _is_scan(parsed: dict) -> bool:
+    """Whether a PDF is mostly pictures of pages: at least SCAN_SHARE of its pages have no text layer."""
+    letters = parsed.get("letters")
+    return bool(letters) and sum(1 for n in letters if n < SCAN_PAGE_LETTERS) >= SCAN_SHARE * len(letters)
+
+
+def _check_text(pages) -> None:
+    """Refuses a document with no readable text at all.
 
     Raises:
-        DocumentError: SCANNED or EMPTY.
+        DocumentError: EMPTY.
     """
-    letters = parsed.get("letters")
-    if letters and sum(1 for n in letters if n < SCAN_PAGE_LETTERS) >= SCAN_SHARE * len(letters):
-        raise DocumentError(SCANNED, f"{sum(letters)} letters on {len(letters)} pages")
-    if sum(sum(c.isalpha() for c in p) for p in parsed["pages"]) < MIN_LETTERS:
+    if sum(_letters(p) for p in pages) < MIN_LETTERS:
         raise DocumentError(EMPTY)
+
+
+def _ocr_pages(digest: str) -> list[int]:
+    """Pages of a scanned document still without text (neither a text layer nor OCR yet)."""
+    sources, pages = db.get_page_sources(digest), db.get_pages(digest)
+    return [p for p in sorted(pages) if sources.get(p) == "text" and _letters(pages[p]) < SCAN_PAGE_LETTERS]
+
+
+def _ocr(digest: str, doc: dict, path: Path | None, workdir: Path, st: "pipeline.Status", request_id: int,
+         confirmed: bool) -> list[tuple[str, float]]:
+    """Makes a scanned document's text: asks for confirmation first, then OCRs the pages without text.
+
+    Returns:
+        The steps done, for the footer.
+
+    Raises:
+        NeedsOcr: Not confirmed yet (the bot asks the user).
+        DocumentError: OCR isn't available, the language isn't supported, or no text came out.
+    """
+    if not ocr.available():
+        raise DocumentError(ocr.NO_ENGINE, f"OCR engine {ocr.engine()} not available")
+    if path is None:
+        raise DocumentError("⚠️ Please send the file again.", "scan without the file")
+    need = _ocr_pages(digest)
+    steps = []
+    if need and not doc.get("language"):  # the language is checked once per document
+        st.show("🔍 Checking the scan's language…")
+        t = time.monotonic()
+        try:
+            langs = ocr.choose_languages(path, need, workdir)
+        except ocr.UnsupportedLanguage as e:
+            raise DocumentError(str(e), "unsupported OCR language")
+        db.save_document(digest, language=langs)
+        doc["language"] = langs
+        steps.append(("language check", time.monotonic() - t))
+    if need and not confirmed:
+        raise NeedsOcr(len(need), ocr.estimate(len(need)), doc["language"])
+    if need:
+        db.update_request(request_id, ocr=1)  # counts toward the OCR limit from the moment it starts
+        t = time.monotonic()
+        ocr.run(path, digest, need, doc["language"], workdir, st.show)
+        steps.append(("OCR", time.monotonic() - t))
+    pages = db.get_pages(digest)
+    ordered = [pages[i] for i in sorted(pages)]
+    _check_text(ordered)
+    fields = {"status": "done", "text_source": f"ocr-{ocr.engine()}", "error": None}
+    if not doc.get("toc"):  # no bookmarks: now that there's text, look for chapter headings
+        fields["chapters"] = docparse.pdf_chapters(ordered)
+    db.save_document(digest, **fields)
+    return steps
 
 
 def run(upload: dict, mode: str, chapter: int | None, path: Path | None, workdir: Path,
         progress: Callable[..., None], *, backend: str | None, model: str | None, request_id: int,
-        hide_cache_from: int | None) -> DocResult:
+        hide_cache_from: int | None, ocr_confirmed: bool = False) -> DocResult:
     """Reads an uploaded document (unless already read) and summarizes it as the user chose.
 
     Args:
@@ -153,12 +224,14 @@ def run(upload: dict, mode: str, chapter: int | None, path: Path | None, workdir
         model: The user's model; None = that backend's default.
         request_id: The requests row, updated with the document and status.
         hide_cache_from: A non-admin requester who mustn't learn that someone else sent this file before.
+        ocr_confirmed: The user confirmed OCR for a scan (see NeedsOcr).
 
     Returns:
         The result to render.
 
     Raises:
         DocumentError: The file can't be read or summarized (message for the user).
+        NeedsOcr: A scan whose OCR the user hasn't confirmed yet.
         proc.ProcCancelled: The job was cancelled.
     """
     t0 = time.time()
@@ -174,7 +247,8 @@ def run(upload: dict, mode: str, chapter: int | None, path: Path | None, workdir
     db.update_request(request_id, platform="document", video_id=digest, status="processing")
     hide = bool(hide_cache_from) and not db.user_saw_video(hide_cache_from, "document", digest, request_id)
     doc = db.get_document(digest)
-    read_now = not doc or doc["status"] != "done"
+    # A scan read before but not OCRed yet ("needs-ocr") isn't parsed again: its pages are stored.
+    read_now = not doc or doc["status"] not in ("done", "needs-ocr")
     if read_now:
         if path is None:
             raise DocumentError("⚠️ Please send the file again.", "document text missing")
@@ -183,13 +257,24 @@ def run(upload: dict, mode: str, chapter: int | None, path: Path | None, workdir
         db.save_document(digest, name=upload["name"][:200], status="processing")
         try:
             parsed = parse(path, workdir)
-            _check_text(parsed)
+            scan = _is_scan(parsed)
+            if not scan:
+                _check_text(parsed["pages"])
         except DocumentError as e:
             db.save_document(digest, status="failed", error=(e.detail or str(e))[:500])
             raise
-        store(digest, upload["name"], parsed)
+        store(digest, upload["name"], parsed, scan)
         steps.append(("reading the file", time.monotonic() - t))
         doc = db.get_document(digest)
+    if doc["status"] == "needs-ocr":
+        try:
+            steps += _ocr(digest, doc, path, workdir, st, request_id, ocr_confirmed)
+        except DocumentError as e:
+            if str(e) == EMPTY:
+                db.save_document(digest, status="failed", error="no text after OCR")
+            raise
+        doc = db.get_document(digest)
+        read_now = True
     st.head = f"📄 {upload['name'][:80]} ({doc['pages']} pages)"
     st.ok(f"✅ {len(doc['chapters'])} chapters" if len(doc["chapters"]) > 1 else "✅ File read")
 
@@ -257,9 +342,13 @@ def _plan_replay(result: DocResult, backend: str) -> None:
     result.replay_total = delay
 
 
-def store(digest: str, name: str, parsed: dict) -> None:
-    """Saves a parsed document: metadata and chapters in documents, the text in document_pages."""
+def store(digest: str, name: str, parsed: dict, scan: bool = False) -> None:
+    """Saves a parsed document: metadata and chapters in documents, the text in document_pages.
+
+    A scan is saved as "needs-ocr": its pages are there (mostly empty), OCR fills them in later.
+    """
     db.save_document(digest, name=name[:200], format=parsed["format"], pages=len(parsed["pages"]),
                      title=parsed.get("title") or None, author=parsed.get("author") or None,
-                     chapters=parsed["chapters"], text_source="text", status="done", error=None)
+                     chapters=parsed["chapters"], text_source="text", toc=int(bool(parsed.get("toc"))),
+                     status="needs-ocr" if scan else "done", error=None)
     db.save_pages(digest, dict(enumerate(parsed["pages"])), "text")

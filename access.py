@@ -104,3 +104,19 @@ def daily_limit(uid: int) -> tuple[int | None, bool]:
     if u and u.get("daily_limit") is not None:
         return u["daily_limit"], False
     return global_daily_limit(), True
+
+
+def global_ocr_limit() -> int:
+    """OCR runs per 24 h for users without an override: the /limit ocr setting, else OCR_DAILY_LIMIT (0 = none)."""
+    stored = db.get_setting("ocr_limit")
+    return int(stored) if stored is not None else config.OCR_DAILY_LIMIT
+
+
+def ocr_limit(uid: int) -> tuple[int | None, bool]:
+    """A user's OCR limit, like daily_limit: (limit or None for admins, whether it's the global default)."""
+    if is_admin(uid):
+        return None, False
+    u = db.get_user(uid)
+    if u and u.get("ocr_limit") is not None:
+        return u["ocr_limit"], False
+    return global_ocr_limit(), True

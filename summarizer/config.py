@@ -68,6 +68,14 @@ MAX_DOC_CHARS = int(_env("MAX_DOC_CHARS", "3000000"))
 # Characters of book text sent to the AI in one call (~75k tokens; fits every backend's context with room for
 # the answer). Longer books and chapters are summarized in pieces, then combined.
 BOOK_CHUNK_CHARS = int(_env("BOOK_CHUNK_CHARS", "300000"))
+# Text recognition for scanned documents. tesseract (system package) or rapidocr (Python, ONNX).
+OCR_ENGINE = _env("OCR_ENGINE", "tesseract")
+# Scanned documents a non-admin may have read per rolling 24 h (0 = no limit); /limit ocr overrides it.
+OCR_DAILY_LIMIT = int(_env("OCR_DAILY_LIMIT", "5"))
+# Longest scan read without an admin's approval (pages needing OCR).
+OCR_MAX_PAGES = int(_env("OCR_MAX_PAGES", "400"))
+# OCR processes run in parallel; leave a core for the bot and Telegram.
+OCR_WORKERS = int(_env("OCR_WORKERS", "3"))
 MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
 SHORT_VIDEO_SEC = int(_env("SHORT_VIDEO_SEC", "180"))  # up to this long: denser frame sampling
 # Whisper may use at most this share of the machine's RAM; a video that doesn't fit right now waits (other

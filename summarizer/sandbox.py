@@ -17,7 +17,7 @@ MEMORY_LIMIT = 6 * 1024 ** 3  # address-space cap; generous because onnxruntime 
 
 
 def command(job: Path, args: list[str], *, ro_binds: dict[Path, str] | None = None,
-            memory: int = MEMORY_LIMIT) -> list[str]:
+            memory: int = MEMORY_LIMIT, env: dict[str, str] | None = None) -> list[str]:
     """Builds the full command that runs `args` sandboxed, with `job` as the only writable directory.
 
     Args:
@@ -26,6 +26,7 @@ def command(job: Path, args: list[str], *, ro_binds: dict[Path, str] | None = No
             element "python" is replaced by the bot's interpreter.
         ro_binds: Extra host paths to mount read-only, mapped to their path inside (e.g. OCR models).
         memory: Address-space limit in bytes (prlimit), so a decompression bomb can't take the machine.
+        env: Extra environment variables inside (the environment is otherwise empty).
 
     Returns:
         The command for proc.run.
@@ -55,6 +56,8 @@ def command(job: Path, args: list[str], *, ro_binds: dict[Path, str] | None = No
         "--setenv", "LANG", "C.UTF-8", "--setenv", "PYTHONPATH", APP,
         "--setenv", "PYTHONDONTWRITEBYTECODE", "1",  # the package is read-only
         "--setenv", "OMP_THREAD_LIMIT", "1",  # Tesseract: one thread per process; we choose the parallelism
-        "prlimit", f"--as={memory}", "--",
     ]
+    for key, value in (env or {}).items():
+        cmd += ["--setenv", key, value]
+    cmd += ["prlimit", f"--as={memory}", "--"]
     return cmd + args

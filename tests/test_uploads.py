@@ -158,13 +158,6 @@ async def test_short_mode_fits_three_messages_for_thirty_chapters():
 
 # ---------- failures ----------
 
-async def test_scanned_pdf_is_explained(app, telegram, tmp_path):
-    up = await _upload(app, telegram, ANA, make_scan(tmp_path / "scan.pdf", ["Hello", "World"]))
-    await send(app, callback_update(ANA, f"book:{up}:whole"))
-    await _work(app)
-    assert telegram.texts()[-1] == documents.SCANNED and BookAI.calls == []
-
-
 async def test_empty_document(app, telegram, tmp_path):
     (tmp_path / "empty.txt").write_text("   \n\n  ")
     up = await _upload(app, telegram, ANA, tmp_path / "empty.txt")

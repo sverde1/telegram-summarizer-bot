@@ -31,6 +31,8 @@ service on a single machine with no GPU.
 | `summarizer/sandbox.py` | bwrap command for code that touches untrusted files: no network, no repo, no environment. |
 | `summarizer/docparse.py` | Reads PDF/EPUB/DOCX/TXT into pages + chapters. Runs **inside** the sandbox; imports no bot module. |
 | `summarizer/books.py` | Book summaries: chapters batched per call, long chapters in parts, whole book (map-reduce), cached in `doc_summaries`. |
+| `summarizer/ocr.py` | OCR of scanned PDFs: rendering, Tesseract/RapidOCR in the sandbox, parallel batches, language check, estimates. |
+| `summarizer/rapid_ocr.py` | RapidOCR entry point **inside** the sandbox (offline: models by path only). |
 | `summarizer/documents.py` | Bot side of docparse: runs it sandboxed, maps errors to user messages, stores pages by SHA-256. |
 | `tests/` | pytest suite; `conftest.py` isolates tests from the real bot (see above), `helpers.py` has the fake LLM. |
 | `deploy/` | systemd units and the weekly extractor-upgrade script. |
@@ -93,7 +95,8 @@ How the tests are isolated (`tests/conftest.py`):
 user message and put raw tool output, paths or exception text in `detail` (admins see it, users never).
 Anything unexpected becomes the generic "something went wrong" message plus an admin notice.
 
-**Abuse limits** (keep them when changing the queue): the daily limit (global in the `settings` table,
+**Abuse limits** (keep them when changing the queue): the OCR limit (`requests.ocr`, set when an OCR run
+starts; cancelled runs count), the OCR page cap with admin approval (`ocr_holds`), the daily limit (global in the `settings` table,
 per-user override in `users.daily_limit`, read from the database on each check), per-user and total queue
 limits, the `/again` cooldown, the pending-request cap and reply throttling, the memory guard, and the
 frame-grab cap. Admins are exempt from the daily and queue limits.

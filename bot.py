@@ -25,7 +25,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
                           MessageHandler, filters)
 
 import access
-from summarizer import config, db, documents, memory, pipeline, proc, stats, summarize, transcribe, updates
+from summarizer import config, db, documents, memory, ocr, pipeline, proc, stats, summarize, transcribe, updates
 from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -48,7 +48,7 @@ HELP = (
 ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n"
               "/history - recent requests from all users (who sent what, cache hits)\n"
               "/limit - daily limits: /limit 50 (everyone), /limit <user id> 200 (one user), "
-              "/limit <user id> default, /limit 0 (no limit)")
+              "/limit <user id> default, /limit 0 (no limit); /limit ocr … for scanned documents")
 
 
 @dataclass
@@ -85,6 +85,7 @@ class Job:
     upload_id: int = 0  # an uploaded document (url is then its file name); 0 for links
     book_mode: str = ""  # whole | short | each | pick
     chapter: int | None = None  # for "pick": the chosen chapter (None: show the chapter list)
+    ocr_ok: bool = False  # the user confirmed OCR of this scanned document
 
 
 # A single queue drained by a single worker: jobs run one at a time, so Whisper (CPU-heavy) never runs
@@ -459,58 +460,82 @@ async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _limit_label(uid: int) -> str:
-    """Daily-limit status for the /users list, e.g. "12/100 today (default)", "3/200 today" or "no limit"."""
+    """Limit status for the /users list, e.g. "12/100 today (default) · OCR 1/5", or "no limit"."""
     used, limit, is_default, _ = _daily_status(uid)
-    if not limit:  # None (admin) or 0 (switched off)
+    if limit is None:  # admins
         return "no limit"
-    return f"{used}/{limit} today" + (" (default)" if is_default else "")
+    daily = f"{used}/{limit} today" + (" (default)" if is_default else "") if limit else "no daily limit"
+    used, limit, _, _ = _ocr_status(uid)
+    return f"{daily} · OCR {used}/{limit}" if limit else f"{daily} · OCR no limit"
+
+
+# The two limits /limit manages: setting key, per-user setter, global getter, status, what is counted.
+LIMITS = {
+    "daily": ("daily_limit", db.set_user_daily_limit, access.global_daily_limit, lambda uid: _daily_status(uid),
+              "requests", "Daily limit"),
+    "ocr": ("ocr_limit", db.set_user_ocr_limit, access.global_ocr_limit, lambda uid: _ocr_status(uid),
+            "scanned documents (OCR)", "OCR limit"),
+}
+
+
+def _usage_line(uid: int, kind: str) -> str:
+    """A user's own usage of one limit, e.g. "📊 Today: 12 of your 100 requests (last 24 h). 88 left." """
+    _, _, _, status, what, _ = LIMITS[kind]
+    used, limit, _, frees_in = status(uid)
+    icon = "📊" if kind == "daily" else "🔍"
+    if not limit:
+        return f"{icon} Today: {used} {what} (last 24 h). No limit."
+    if used >= limit:
+        return (f"{icon} Today: {used} of your {limit} {what} (last 24 h). You can send more in about "
+                f"{_fmt_until(frees_in or 0)}.")
+    return f"{icon} Today: {used} of your {limit} {what} (last 24 h). {limit - used} left."
 
 
 async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles /limit: users see their own daily status; admins see and change the limits.
+    """Handles /limit: users see their own usage; admins see and change the limits.
 
-    Admin forms: `/limit` (show), `/limit 50` (everyone), `/limit <user id> 200` (one user),
-    `/limit <user id> default` (remove the override), `0` meaning no limit.
+    Admin forms, each also with "ocr" first for the OCR limit (e.g. `/limit ocr 5`): `/limit` (show),
+    `/limit 50` (everyone), `/limit <user id> 200` (one user), `/limit <user id> default` (remove the
+    override), `0` meaning no limit.
     """
     if not await guard(update, ctx):
         return
     uid = update.effective_user.id
     if not access.is_admin(uid):
-        used, limit, _, frees_in = _daily_status(uid)
-        if not limit:
-            await update.message.reply_text(f"📊 Today: {used} requests (last 24 h). You have no daily limit.")
-        elif used >= limit:
-            await update.message.reply_text(f"📊 Today: {used} of your {limit} requests (last 24 h). You can send "
-                                            f"more in about {_fmt_until(frees_in or 0)}.")
-        else:
-            await update.message.reply_text(f"📊 Today: {used} of your {limit} requests (last 24 h). "
-                                            f"{limit - used} left.")
+        await update.message.reply_text(f"{_usage_line(uid, 'daily')}\n{_usage_line(uid, 'ocr')}")
         return
-    args = ctx.args
+    args = list(ctx.args)
+    kind = "ocr" if args and args[0].lower() == "ocr" else "daily"
+    if kind == "ocr":
+        args = args[1:]
+    key, set_user, glob, _, what, title = LIMITS[kind]
     if not args:
-        glob = access.global_daily_limit()
-        overrides = [u for u in access.all_users()["allowed"] if u.get("daily_limit") is not None]
-        lines = [f"📊 Daily limit for everyone: {glob or 'none'} requests per 24 h."]
-        lines += [f"• {access.label(u['id'], u)}: {u['daily_limit'] or 'no limit'}" for u in overrides]
+        lines = []
+        for k, (_, _, g, _, w, t) in LIMITS.items():
+            lines.append(f"📊 {t} for everyone: {g() or 'none'} {w} per 24 h.")
+            col = "daily_limit" if k == "daily" else "ocr_limit"
+            lines += [f"  • {access.label(u['id'], u)}: {u[col] or 'no limit'}"
+                      for u in access.all_users()["allowed"] if u.get(col) is not None]
         lines.append("\nChange it: /limit 50 · one user: /limit <user id> 200 · /limit <user id> default · "
-                     "0 = no limit")
+                     "0 = no limit. The same with \"ocr\" first for the OCR limit: /limit ocr 5")
         await update.message.reply_text("\n".join(lines))
         return
     if len(args) == 1 and args[0].isdigit():
-        db.set_setting("daily_limit", str(int(args[0])))
-        await update.message.reply_text(f"✅ Daily limit for everyone: {int(args[0]) or 'none'}.")
+        db.set_setting(key, str(int(args[0])))
+        await update.message.reply_text(f"✅ {title} for everyone: {int(args[0]) or 'none'}.")
         return
     if len(args) == 2 and args[0].isdigit() and (args[1].isdigit() or args[1] == "default"):
         target = int(args[0])
         value = None if args[1] == "default" else int(args[1])
-        if access.is_admin(target) or not db.set_user_daily_limit(target, value):
+        if access.is_admin(target) or not set_user(target, value):
             await update.message.reply_text("⚠️ No such user (admins have no limit).")
             return
         who = access.label(target, db.get_user(target))
         text = "back to the default" if value is None else (value or "no limit")
-        await update.message.reply_text(f"✅ Daily limit for {who}: {text}.")
+        await update.message.reply_text(f"✅ {title} for {who}: {text}.")
         return
-    await update.message.reply_text("Usage: /limit · /limit 50 · /limit <user id> 200 · /limit <user id> default")
+    await update.message.reply_text("Usage: /limit · /limit 50 · /limit <user id> 200 · /limit <user id> default "
+                                    "(add \"ocr\" first for the OCR limit)")
 
 
 async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1034,6 +1059,10 @@ def _doc_details(r: documents.DocResult, waited: float, reveal_cache: bool) -> s
         timing += f" (+ {_secs(waited)} waiting in queue)"
     fmt = (r.doc.get("format") or "").upper()
     pages = f"{r.doc.get('pages')} pages" if fmt == "PDF" else f"~{r.doc.get('pages')} pages"
+    source = r.doc.get("text_source") or ""
+    if source.startswith("ocr-"):
+        engine_name = {"tesseract": "Tesseract", "rapidocr": "RapidOCR"}.get(source[4:], source[4:])
+        fmt += f" · 🔍 OCR ({engine_name}, {ocr_names(r.doc.get('language'))})"
     used = f"📄 {r.name[:80]} · {fmt} · {pages} · 🧠 {r.llm}"
     return "\n".join(filter(None, [timing, used]))
 
@@ -1409,6 +1438,9 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
         if job.cancel_reason or isinstance(e, proc.ProcCancelled):
             await _report_cancel(app, job)
             return False
+        if isinstance(e, documents.NeedsOcr):
+            await _ask_ocr(app, job, e)
+            return False
         if isinstance(e, memory.NeedsMemory):
             await _set_aside(app, job, e.needed, e.duration)
             return True
@@ -1437,6 +1469,156 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
 
 
 _delayed: dict[int, asyncio.Task] = {}  # request id -> replay task of a cached summary (see _deliver_later)
+
+
+def _ocr_status(uid: int) -> tuple[int, int | None, bool, float | None]:
+    """A user's OCR use against their OCR limit, like _daily_status."""
+    used, oldest = db.ocr_usage(uid, DAY)
+    limit, is_default = access.ocr_limit(uid)
+    frees_in = (oldest + DAY - time.time()) if limit and used >= limit and oldest else None
+    return used, limit, is_default, frees_in
+
+
+def _ocr_refusal(uid: int) -> str | None:
+    """The refusal when a non-admin has used up today's OCR, else None."""
+    used, limit, _, frees_in = _ocr_status(uid)
+    if limit and used >= limit:
+        return (f"⏳ This is a scanned document and needs text recognition (OCR). You've used today's {limit} "
+                f"OCR documents; you can send more in about {_fmt_until(frees_in or 0)}.")
+    return None
+
+
+def _ocr_buttons(rid: int, over_cap: bool) -> InlineKeyboardMarkup:
+    """Start/Cancel under an OCR confirmation, or OK/Ask an admin when the scan is over the page cap."""
+    if over_cap:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("OK", callback_data=f"ocr:{rid}:ok"),
+                                      InlineKeyboardButton("🙋 Ask admin for approval", callback_data=f"ocr:{rid}:ask")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start OCR", callback_data=f"ocr:{rid}:go"),
+                                  InlineKeyboardButton("✖️ Cancel", callback_data=f"ocr:{rid}:no")]])
+
+
+async def _ask_ocr(app: Application, job: Job, e: documents.NeedsOcr) -> None:
+    """A scanned document: asks the user to confirm OCR (with the time it takes), or explains why it can't run.
+
+    The request waits ("waiting") with its job remembered in ocr_holds; the Start button continues it, so it
+    counts once toward the daily limit. Over OCR_MAX_PAGES the user can only accept or ask the admins.
+    """
+    db.save_ocr_hold(job.request_id, job.upload_id, job.book_mode, job.chapter, e.pages, e.seconds, e.language)
+    hold = db.get_ocr_hold(job.request_id)
+    if refusal := (None if access.is_admin(job.user_id) else _ocr_refusal(job.user_id)):
+        db.update_request(job.request_id, status="failed", error="OCR limit reached")
+        await _fail(app, job, refusal)
+        return
+    over_cap = e.pages > config.OCR_MAX_PAGES and not hold["approved"] and not access.is_admin(job.user_id)
+    if over_cap:
+        text = (f"⚠️ This scan has {e.pages} pages that need text recognition (OCR); I read up to "
+                f"{config.OCR_MAX_PAGES} pages. Reading all {e.pages} would take about {_fmt_eta(e.seconds)}.")
+    else:
+        text = (f"🔍 This is a scanned document: {e.pages} pages need text recognition (OCR), about "
+                f"{_fmt_eta(e.seconds)}, plus the summary. Start?")
+    db.update_request(job.request_id, status="waiting")
+    await app.bot.edit_message_text(text, chat_id=job.chat_id, message_id=job.status_id,
+                                    reply_markup=_ocr_buttons(job.request_id, over_cap))
+
+
+def ocr_names(langs: str | None) -> str:
+    """Names of a Tesseract language string, e.g. "slv+eng" -> "Slovenian, English"."""
+    return ocr.names((langs or "").split("+")) or "unknown"
+
+
+async def on_ocr_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the user's OCR buttons (`ocr:<request id>:go|no|ok|ask`).
+
+    go starts the OCR (continuing the request), no/ok drop it, ask sends the admins the details with
+    Allow/Deny buttons (once per request). Everything is re-checked: chat, access, ownership, the request
+    still waiting, the page cap, the OCR limit.
+    """
+    q = update.callback_query
+    parts = (q.data or "").split(":")
+    uid = q.from_user.id
+    req = db.get_request(int(parts[1])) if len(parts) == 3 and parts[1].isdigit() else None
+    hold = db.get_ocr_hold(req["id"]) if req else None
+    if (not _private(update) or access.state(uid) not in ("admin", "allowed") or not hold
+            or (req["user_id"] != uid and not access.is_admin(uid))):
+        await q.answer("This isn't available.")
+        return
+    if req["status"] != "waiting":
+        await q.answer("This request isn't waiting any more.")
+        return
+    action = parts[2]
+    upload = db.get_upload(hold["upload_id"])
+    if action in ("no", "ok"):
+        db.update_request(req["id"], status="cancelled", error="OCR declined")
+        await q.answer()
+        await q.edit_message_text("✖️ Cancelled." if action == "no" else "OK, I won't read this scan.")
+        return
+    if action == "ask":
+        if hold["asked"]:
+            await q.answer("An admin has been asked already.")
+            return
+        db.update_ocr_hold(req["id"], asked=1)
+        used, limit, _, _ = _ocr_status(req["user_id"])
+        size = f" ({_fmt_size(upload['size'])})" if upload and upload["size"] else ""
+        details = (f"🙋 {access.label(req['user_id'], db.get_user(req['user_id']))} asks to read a long scan:\n"
+                   f"📄 {upload['name'][:100] if upload else '?'}{size}\n"
+                   f"Pages needing OCR: {hold['pages']} (limit {config.OCR_MAX_PAGES})\n"
+                   f"Language: {ocr_names(hold['language'])}\n"
+                   f"Estimated OCR time: about {_fmt_eta(hold['seconds'])}, plus the summary\n"
+                   f"Their OCR use today: {used}" + (f"/{limit}" if limit else ""))
+        buttons = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Allow", callback_data=f"ocradm:{req['id']}:yes"),
+                                         InlineKeyboardButton("❌ Deny", callback_data=f"ocradm:{req['id']}:no")]])
+        for admin in access.ADMINS:
+            try:
+                await ctx.bot.send_message(admin, details, reply_markup=buttons)
+            except TelegramError as e:
+                log.warning("couldn't ask admin %s: %s", admin, e)
+        await q.answer()
+        await q.edit_message_text("🙋 I asked an admin; I'll let you know their answer.")
+        return
+    if action != "go":
+        await q.answer("This isn't available.")
+        return
+    if hold["pages"] > config.OCR_MAX_PAGES and not hold["approved"] and not access.is_admin(uid):
+        await q.answer("This needs an admin's approval first.", show_alert=True)
+        return
+    refusal = None if access.is_admin(req["user_id"]) else _ocr_refusal(req["user_id"])
+    if refusal := refusal or _refusal(req["user_id"], new_request=False):
+        await q.answer(refusal[:200], show_alert=True)
+        return
+    await q.answer()
+    await q.edit_message_text(_queued_message())
+    db.update_request(req["id"], status="queued")
+    await _start_job(req["user_id"], q.message.chat.id, q.message.message_id, req["url"], req["kind"],
+                     request_id=req["id"], upload_id=hold["upload_id"], book_mode=hold["mode"],
+                     chapter=hold["chapter"], ocr_ok=True)
+
+
+async def on_ocr_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles an admin's Allow/Deny on a long-scan request (`ocradm:<request id>:yes|no`)."""
+    q = update.callback_query
+    parts = (q.data or "").split(":")
+    if not _private(update) or not access.is_admin(q.from_user.id):
+        await q.answer("Only admins can do this.")
+        return
+    req = db.get_request(int(parts[1])) if len(parts) == 3 and parts[1].isdigit() else None
+    hold = db.get_ocr_hold(req["id"]) if req else None
+    if not hold or req["status"] != "waiting":
+        await q.answer("Already handled.")
+        await q.edit_message_reply_markup(None)
+        return
+    by = q.from_user.full_name
+    if parts[2] == "yes":
+        db.update_ocr_hold(req["id"], approved=1)
+        await ctx.bot.send_message(
+            req["user_id"], f"✅ An admin allowed reading all {hold['pages']} pages (about "
+                            f"{_fmt_eta(hold['seconds'])}, plus the summary). Start?",
+            reply_markup=_ocr_buttons(req["id"], False))
+        await q.edit_message_text(f"{q.message.text}\n\n✅ Allowed by {by}.")
+    else:
+        db.update_request(req["id"], status="cancelled", error="long OCR denied")
+        await ctx.bot.send_message(req["user_id"], "❌ An admin declined reading this long scan.")
+        await q.edit_message_text(f"{q.message.text}\n\n❌ Denied by {by}.")
+    await q.answer()
 
 
 async def _run_document(app: Application, job: Job, progress: "Progress") -> documents.DocResult:
@@ -1469,7 +1651,7 @@ async def _run_document(app: Application, job: Job, progress: "Progress") -> doc
         return await asyncio.to_thread(
             documents.run, upload, job.book_mode, job.chapter, path, workdir, progress, backend=job.backend,
             model=job.model, request_id=job.request_id,
-            hide_cache_from=None if access.is_admin(job.user_id) else job.user_id)
+            hide_cache_from=None if access.is_admin(job.user_id) else job.user_id, ocr_confirmed=job.ocr_ok)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)  # only the extracted text is kept
 
@@ -1784,6 +1966,8 @@ def add_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(on_llm_button, pattern=r"^llm:"))
     app.add_handler(CallbackQueryHandler(on_cancel_button, pattern=r"^cancel:"))
     app.add_handler(CallbackQueryHandler(on_book_button, pattern=r"^book:"))
+    app.add_handler(CallbackQueryHandler(on_ocr_button, pattern=r"^ocr:"))
+    app.add_handler(CallbackQueryHandler(on_ocr_admin_button, pattern=r"^ocradm:"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(allow|block|remove):"))
     # Before on_message: a file sent with a caption is a document, not a message with a link.
     app.add_handler(MessageHandler(new & filters.Document.ALL, on_document))

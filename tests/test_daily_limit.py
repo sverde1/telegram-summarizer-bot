@@ -82,7 +82,7 @@ async def test_bad_arguments_change_nothing(app, telegram, args):
 async def test_user_sees_own_status_and_cannot_change_it(app, telegram):
     _use(ANA, 1)
     await send(app, msg_update(ANA, "/limit"))
-    assert telegram.texts()[-1] == "📊 Today: 1 of your 3 requests (last 24 h). 2 left."
+    assert telegram.texts()[-1].split("\n")[0] == "📊 Today: 1 of your 3 requests (last 24 h). 2 left."
     await send(app, msg_update(ANA, "/limit 1000"))
     assert access.global_daily_limit() == 3 and "of your 3 requests" in telegram.texts()[-1]
     _use(ANA, 2)

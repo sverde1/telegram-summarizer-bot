@@ -351,6 +351,26 @@ def _pdf_outline(path: Path, n_pages: int) -> list[tuple[str, int]]:
     return top
 
 
+def pdf_heading_starts(pages: list[str]) -> list[tuple[str, int]]:
+    """Chapter starts found in page text: a heading ("Chapter 3", "Poglavje III") among a page's first lines.
+
+    Used for PDFs without bookmarks, and again after OCR (a scan has no text to look at before).
+    """
+    starts = []
+    for i, page in enumerate(pages):
+        top = [ln for ln in page.splitlines() if ln.strip()][:3]
+        for line in top:
+            if _HEADING_WORDS.match(line) and len(line) < 120:
+                starts.append((line, i))
+                break
+    return starts
+
+
+def pdf_chapters(pages: list[str]) -> list[dict]:
+    """Chapters of a PDF without bookmarks, from its page text (see pdf_heading_starts)."""
+    return _chapters(pages, pdf_heading_starts(pages), True)
+
+
 def parse_pdf(path: Path, max_pages: int, max_chars: int) -> dict:
     """Text per page with poppler, chapters from bookmarks or headings; also how much text each page has.
 
@@ -372,17 +392,13 @@ def parse_pdf(path: Path, max_pages: int, max_chars: int) -> dict:
     if pages and not pages[-1].strip():
         pages.pop()  # poppler ends the last page with a form feed too
     starts = _pdf_outline(path, len(pages))
-    if len(starts) < 2:  # no bookmarks: look for headings near the top of each page
-        starts = []
-        for i, page in enumerate(pages):
-            top = [ln for ln in page.splitlines() if ln.strip()][:3]
-            for line in top:
-                if _HEADING_WORDS.match(line) and len(line) < 120:
-                    starts.append((line, i))
-                    break
+    toc = len(starts) >= 2
+    if not toc:  # no bookmarks: look for headings near the top of each page
+        starts = pdf_heading_starts(pages)
     result = _result("pdf", pages, starts, info.get("Title", ""), info.get("Author", ""),
                      max_pages=max_pages, max_chars=max_chars, real_pages=True)
     result["letters"] = [sum(c.isalpha() for c in p) for p in pages]
+    result["toc"] = toc  # bookmarks: still right after OCR; headings get looked for again then
     return result
 
 

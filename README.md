@@ -32,6 +32,8 @@ running on your ChatGPT or Claude subscription, inside a sandbox.
   subscription), or the Claude / OpenAI APIs with an API key, then a model. Default: Codex `gpt-6-sol`.
 - **Live status with ETA** while it works; per-step timings under the result.
 - **Multi-user with admin approval**: `/start` sends the admin an Allow / Deny request.
+- **Books and documents**: PDF, EPUB, DOCX, TXT; the whole book or chapter by chapter. Scanned PDFs are
+  read with OCR (Tesseract or RapidOCR) after the user confirms the estimated time.
 - **Cache**: a video is downloaded and transcribed once; summaries are kept per model.
 - **Private by design**: users can't see what others submitted, and the LLM can't touch the machine.
 
@@ -39,7 +41,9 @@ running on your ChatGPT or Claude subscription, inside a sandbox.
 
 ### Software
 
-- Linux with Python 3.11+ and `bwrap` (bubblewrap) for the Codex sandbox.
+- Linux with Python 3.11+ and `bwrap` (bubblewrap) for the Codex and document sandboxes.
+- poppler-utils (`pdftotext`, `pdftoppm`) for PDFs, and Tesseract for scanned documents (or RapidOCR,
+  installed with the Python dependencies; set `OCR_ENGINE=rapidocr`).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 - At least one LLM:
   - [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) and a ChatGPT plan, or
@@ -109,10 +113,12 @@ Step by step on Ubuntu/Debian; other Linux distributions work the same with thei
 ### 1. System packages
 
 ```bash
-sudo apt install git python3 python3-venv bubblewrap nodejs npm
+sudo apt install git python3 python3-venv bubblewrap nodejs npm poppler-utils tesseract-ocr
 ```
 
-`bubblewrap` (`bwrap`) sandboxes the Codex CLI; `nodejs`/`npm` are only needed to install Codex.
+`bubblewrap` (`bwrap`) sandboxes the Codex CLI and the reading of uploaded files; `nodejs`/`npm` are only
+needed to install Codex. `poppler-utils` reads PDFs; `tesseract-ocr` (with English) reads scanned ones.
+Further OCR languages are added from Telegram with `/ocrlang`, no system packages needed.
 
 ### 2. Get the code and install the Python dependencies
 
@@ -229,6 +235,10 @@ The database migrates itself on start.
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |
 | `MAX_DOC_PAGES` | `2000` | Most pages read from an uploaded document (EPUB/DOCX/TXT count ~2000 characters as a page). |
 | `MAX_DOC_CHARS` | `3000000` | Most characters read from an uploaded document. |
+| `OCR_ENGINE` | `tesseract` | Text recognition for scanned PDFs: `tesseract` (system package, most accurate for Latin-script languages) or `rapidocr` (Python/ONNX, no system install). |
+| `OCR_DAILY_LIMIT` | `5` | Scanned documents a user may have read per rolling 24 h (admins: no limit; `0` = no limit). Once changed with `/limit ocr`, the stored value wins. |
+| `OCR_MAX_PAGES` | `400` | Longest scan read without an admin's approval (pages needing OCR). |
+| `OCR_WORKERS` | `3` | OCR processes in parallel (one thread each); keep below the number of cores. |
 | `BOOK_CHUNK_CHARS` | `300000` | Book text sent to the AI in one call (~75k tokens). Several short chapters share a call; longer books and chapters are summarized in pieces, then combined. |
 | `DAILY_LIMIT` | `100` | Links a user may send per rolling 24 h; every accepted link counts (`/again`, `/transcript`, cache hits, failures). `0` = no limit; admins: no limit. Only the starting value: once changed with `/limit`, the stored value wins. |
 | `MAX_FRAMES` / `MAX_SLIDES` | `16` / `35` | Images sent to the LLM. |
@@ -257,7 +267,7 @@ The bot test-runs the model when it loads and falls back to the CPU if CUDA isn'
 | `/history` | users | Your recent requests (admins: everyone's, with who sent them). |
 | `/models` | users | Show or choose the AI: provider first, then model. |
 | `/limit` | users | Your daily limit: used in the last 24 h and how many are left. |
-| `/limit` | admins | Show the daily limit and per-user overrides. `/limit 50` sets it for everyone, `/limit <user id> 200` for one user, `/limit <user id> default` removes the override; `0` = no limit. |
+| `/limit` | admins | Show the daily and OCR limits and per-user overrides. `/limit 50` sets the daily limit for everyone, `/limit <user id> 200` for one user, `/limit <user id> default` removes the override; `0` = no limit. The same with `ocr` first (`/limit ocr 5`) for the OCR limit. |
 | `/users` | admins | Users with Allow / Deny / Remove / Unblock buttons, their AI choice and daily limit with today's usage. |
 | `/start` | strangers | Request access. |
 
@@ -277,6 +287,14 @@ Chapters come from the file's table of contents (PDF bookmarks, EPUB contents, D
 failing that, from headings like "Chapter 3" / "Poglavje 3"; very many short chapters are grouped, and text
 without any structure is split into parts. Old Word `.doc` and Kindle files must be converted to PDF or
 EPUB first; password-protected PDFs and copy-protected (DRM) e-books can't be read.
+
+**Scanned PDFs** (pages that are pictures, no text) need OCR, which is slow on a CPU (about 1–3 s per page
+with 3 workers; a 300-page book takes 10–15 minutes) and has its own daily limit (`OCR_DAILY_LIMIT`, default
+5). The bot first checks a few pages for the language, then asks: "312 pages need text recognition, about
+10 min. Start?" Scans longer than `OCR_MAX_PAGES` (400) can't be started by the user; they can ask an admin,
+who gets the details (pages, time, language, the user's OCR use) with Allow / Deny buttons. OCR'd text is
+kept like any other, so a scan is read only once. A scan in a language that isn't installed is refused with
+the list of supported ones; admins add languages with `/ocrlang`.
 
 Each request counts toward the daily limit (picking a chapter from a list you just requested doesn't count
 again). Files are parsed in a sandbox without network access. Only the extracted text is kept (by the file's
