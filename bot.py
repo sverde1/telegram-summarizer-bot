@@ -28,6 +28,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
 import access
 from summarizer import (config, db, documents, links, media, memory, ocr, pipeline, proc, stats, summarize,
                         transcribe, tts, units, updates)
+from summarizer.results import JobResult
 from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -2049,7 +2050,7 @@ async def _show_pick_list(app: Application, job: Job, result: documents.DocResul
     db.update_request(job.request_id, status="waiting")
 
 
-async def _finish(app: Application, job: Job, result, waited: float) -> None:
+async def _finish(app: Application, job: Job, result: JobResult, waited: float) -> None:
     """Hands a finished job's result to the user and closes its request.
 
     A document in "pick" mode shows its chapter list instead (the request stays open for the pick). Otherwise
@@ -2066,16 +2067,15 @@ async def _finish(app: Application, job: Job, result, waited: float) -> None:
     db.update_request(job.request_id, status="done", cached=int(result.cached))
     # Only fresh summaries teach the wait estimate: cache hits (~1 s) and transcripts would drag the average
     # far below what a queued link really waits for. The worker's time, without any privacy pause.
-    if not result.cached and not job.transcript_only:
-        if total := (result.summary or {}).get("_stats", {}).get("total"):
-            stats.record("job", total)
+    if not result.cached and not job.transcript_only and (total := result.work_seconds()):
+        stats.record("job", total)
     try:
         await app.bot.delete_message(job.chat_id, job.status_id)
     except TelegramError:
         pass  # the user deleted it already, or can't be reached: the result is delivered either way
 
 
-async def _deliver_later(app: Application, job: Job, result: pipeline.Result, waited: float) -> None:
+async def _deliver_later(app: Application, job: Job, result: JobResult, waited: float) -> None:
     """Finishes a first-time requester's job off the worker, so its pacing doesn't hold up anyone else.
 
     Either waits out the time still owed after real work on reused data (result.hold: status text and
@@ -2083,18 +2083,9 @@ async def _deliver_later(app: Application, job: Job, result: pipeline.Result, wa
     delivers (or shows the chapter list). Stops if the job is cancelled meanwhile. Always ends the job.
     """
     try:
-        saved = (result.summary or {}).get("_stats") or {}
         progress = Progress(app, asyncio.get_running_loop(), job)
-        meta = getattr(result, "meta", None) or {}
-        if isinstance(result, documents.DocResult):
-            head = result.head
-        elif getattr(result, "platform", "") == "file":
-            head = pipeline.file_label_head(result, meta)
-        elif meta.get("is_carousel"):
-            head = f"🖼 {meta.get('title', '')[:80]} (photo post)"
-        else:
-            head = f"🎬 {meta.get('title', '')[:80]} ({pipeline._fmt_duration(meta.get('duration') or 0)})"
-        llm = getattr(result, "llm", "") or saved.get("llm") or summarize.llm_label(job.backend, job.model or "")
+        head = result.head()
+        llm = result.llm_label() or summarize.llm_label(job.backend, job.model or "")
         stages = result.hold or [(f"{head}\n{pipeline.replay_stage(name, llm)}", sec)
                                  for name, sec in result.replay_steps]
         remaining = sum(sec for _, sec in stages)
@@ -2121,7 +2112,7 @@ async def _deliver_later(app: Application, job: Job, result: pipeline.Result, wa
         _end_job(job)
 
 
-async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: float) -> None:
+async def _deliver(app: Application, job: Job, result: JobResult, waited: float) -> None:
     """Sends a finished job's result: the transcript file, or the summary message(s).
 
     Raises:

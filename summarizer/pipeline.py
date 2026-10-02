@@ -13,12 +13,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from . import config, db, frames, media, memory, proc, stats, summarize, transcribe
+from .results import JobResult
 from .urls import Video, classify
 
 log = logging.getLogger(__name__)
 
 @dataclass
-class Result:
+class Result(JobResult):
     """Everything the bot needs to reply about one video.
 
     Attributes:
@@ -31,15 +32,10 @@ class Result:
         language: Detected or caption language code, or "".
         summary: {title, is_clickbait, clickbait_answer, summary, _stats}, or None for /transcript runs.
         frames_used: Whether frames or slides were shown to the LLM.
-        cached: Whether the result came from the database without new work.
         notes: Non-fatal problems hit along the way (for logs/debugging).
-        replay_steps: For a requester who mustn't learn that earlier work was reused: the (step, seconds)
-            a fresh run shows. On a cached result the bot plays them back before delivering; on a fresh
-            one they include the paced transcript step. None for everyone else. The footer shows them, so
-            what the user waited and what the footer says always agree.
-        replay_total: Seconds those steps add up to.
-        hold: For a first-time requester whose answer reused earlier work: (status text, seconds) still owed
-            before delivery, so the wait matches a fresh run. The bot waits them out off the worker.
+
+    The caching and pacing fields come from JobResult. On a fresh result, replay_steps include the paced
+    transcript step; the footer shows them, so what the user waited and what the footer says always agree.
     """
     platform: str
     video_id: str
@@ -50,11 +46,19 @@ class Result:
     language: str
     summary: dict | None  # {title, is_clickbait, clickbait_answer, summary}
     frames_used: bool = False
-    cached: bool = False
     notes: list[str] = field(default_factory=list)
-    replay_steps: list[tuple[str, float]] | None = None
-    replay_total: float = 0.0
-    hold: list[tuple[str, float]] | None = None
+
+    def head(self) -> str:
+        """The status line naming the video, photo post or sent recording."""
+        return status_head(self.platform, self.url, self.meta)
+
+    def work_seconds(self) -> float | None:
+        """The worker's time for the summary; None for transcript-only results (they'd skew the estimate)."""
+        return (self.summary or {}).get("_stats", {}).get("total")
+
+    def llm_label(self) -> str:
+        """The model that answered, as stored with the summary."""
+        return (self.summary or {}).get("_stats", {}).get("llm", "")
 
 
 class PipelineError(RuntimeError):
@@ -307,9 +311,23 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
                 hide_cache_from=hide_cache_from)
 
 
-def file_label_head(video, meta: dict) -> str:
-    """The status line naming a file a user sent: its label and length, e.g. "🎤 Voice message (0:42)"."""
-    return f"{video.url[:80]} ({_fmt_duration(meta.get('duration') or 0)})"
+def status_head(platform: str, url: str, meta: dict, photo: bool = False) -> str:
+    """The status line naming what a job works on.
+
+    Args:
+        platform: The video's platform; "file" for a recording a user sent (its url is its label).
+        url: The video's URL, or a sent file's label (e.g. "🎤 Voice message").
+        meta: Its metadata (title, duration, is_carousel).
+        photo: Whether it is a photo post even if the metadata doesn't say so (a /photo/ link).
+
+    Returns:
+        E.g. "🎬 Title (12:34)", "🖼 Title (photo post)" or "🎤 Voice message (0:42)".
+    """
+    if platform == "file":
+        return f"{url[:80]} ({_fmt_duration(meta.get('duration') or 0)})"
+    if photo or meta.get("is_carousel"):
+        return f"🖼 {meta.get('title', '')[:80]} (photo post)"  # "duration" would be the music's
+    return f"🎬 {meta.get('title', '')[:80]} ({_fmt_duration(meta.get('duration') or 0)})"
 
 
 def run_file(src: Path, label: str, info: dict, sha256: str, progress: Callable[..., None], *, workdir: Path,
@@ -473,12 +491,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
                 raise PipelineError(media.describe(e), detail=str(e))
         dur = meta["duration"] or 0
         what = "This recording" if is_file else "Video"
-        if is_file:
-            st.head = file_label_head(video, meta)
-        elif video.kind == "photo" or meta.get("is_carousel"):
-            st.head = f"🖼 {meta['title'][:80]} (photo post)"  # "duration" would be the music's
-        else:
-            st.head = f"🎬 {meta['title'][:80]} ({_fmt_duration(dur)})"
+        st.head = status_head(video.platform, video.url, meta, photo=video.kind == "photo")
         if dur > config.MAX_DURATION_MIN * 60:
             raise PipelineError(f"{what} is longer than {config.MAX_DURATION_MIN} min; skipping.")
         if not dur and not (video.kind == "photo" or meta.get("is_carousel")):

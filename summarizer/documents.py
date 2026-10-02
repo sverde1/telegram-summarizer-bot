@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import books, config, db, docparse, ocr, pipeline, proc, sandbox, summarize
+from .results import JobResult
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class NeedsOcr(Exception):
 
 
 @dataclass
-class DocResult:
+class DocResult(JobResult):
     """A finished document request, for the bot to render.
 
     Attributes:
@@ -68,9 +69,9 @@ class DocResult:
         steps: (label, seconds) of the work done, for the footer.
         total: Seconds the whole job took.
         llm: Label of the model that wrote the summaries.
-        cached: Whether nothing had to be done (text and summaries came from the database).
-        replay_steps / replay_total: As for videos (see pipeline.Result): what a first-time requester is
-            shown instead of an instant answer.
+        platform, video_id: "document" and the text's SHA-256: what db.user_saw_video looks for.
+
+    The caching and pacing fields come from JobResult.
     """
     kind: str
     name: str
@@ -80,18 +81,16 @@ class DocResult:
     steps: list[tuple[str, float]] = field(default_factory=list)
     total: float = 0.0
     llm: str = ""
-    cached: bool = False
-    replay_steps: list[tuple[str, float]] | None = None
-    replay_total: float = 0.0
-    hold: list[tuple[str, float]] | None = None  # as for videos (pipeline.Result.hold)
-    platform: str = "document"  # with video_id, what db.user_saw_video looks for
+    platform: str = "document"
     video_id: str = ""
-    summary: dict | None = None  # videos only; here for the code that handles both
 
-    @property
     def head(self) -> str:
         """First line of the status message while replaying."""
         return f"📄 {self.name[:80]} ({self.doc.get('pages') or '?'} pages)"
+
+    def llm_label(self) -> str:
+        """The model that wrote the summaries."""
+        return self.llm
 
 
 def sha256(path: Path) -> str:
