@@ -113,13 +113,33 @@ def _allowed(service: str):
     return lambda host: host in DROPBOX_HOSTS or host.endswith(".dropboxusercontent.com")
 
 
-def download(link: FileLink, dest: Path, progress=None) -> str:
+def peek(link: FileLink) -> dict:
+    """The name, type and size of a shared file, from the first bytes only (see fetch.peek).
+
+    Returns:
+        {"filename", "content_type", "size"}; the name falls back to the one in the link.
+
+    Raises:
+        LinkError: Not shared publicly, or the service couldn't be reached.
+    """
+    try:
+        got = fetch.peek(link.download_url, allowed=_allowed(link.service))
+    except fetch.FetchError as e:
+        if e.code in ("html", "blocked", "denied"):
+            raise LinkError(NOT_SHARED, f"{e.code}: {e.detail}")
+        raise LinkError("⚠️ Couldn't open that link. Please try again later.", f"{e.code}: {e.detail}")
+    got["filename"] = PurePosixPath(got["filename"]).name[:200] or link.name
+    return got
+
+
+def download(link: FileLink, dest: Path, progress=None, max_mb: int | None = None) -> str:
     """Downloads a shared file.
 
     Args:
         link: From parse().
         dest: Where to save it.
         progress: Called with (bytes, total or None) as the download goes.
+        max_mb: Size cap in MB; MAX_LINK_DOWNLOAD_MB (documents) by default.
 
     Returns:
         The file's name (from the service's answer, else from the link), or "".
@@ -128,14 +148,14 @@ def download(link: FileLink, dest: Path, progress=None) -> str:
         LinkError: Not shared publicly, too large, or the download failed (message for the user).
         proc.ProcCancelled: The job was cancelled.
     """
-    limit = config.MAX_LINK_DOWNLOAD_MB * 1024 ** 2
+    max_mb = max_mb or config.MAX_LINK_DOWNLOAD_MB
+    limit = max_mb * 1024 ** 2
     try:
         got = fetch.download(link.download_url, dest, allowed=_allowed(link.service), max_bytes=limit,
                              refuse_html=True, progress=progress)
     except fetch.FetchError as e:
         if e.code == "too_large":
-            raise LinkError(f"⚠️ This file is larger than {config.MAX_LINK_DOWNLOAD_MB} MB, the most I download.",
-                            e.detail)
+            raise LinkError(f"⚠️ This file is larger than {max_mb} MB, the most I download.", e.detail)
         if e.code in ("html", "blocked", "denied"):  # a login page, "access denied", or no such file
             raise LinkError(NOT_SHARED, f"{e.code}: {e.detail}")
         raise LinkError("⚠️ Couldn't download the file. Please try again later.", f"{e.code}: {e.detail}")

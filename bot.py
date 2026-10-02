@@ -829,6 +829,14 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
         await update.message.reply_text("Send me a YouTube or TikTok link, or a book or document.")
         return
     try:
+        link = links.parse(url)
+    except links.LinkError as e:
+        await update.message.reply_text(str(e))
+        return
+    if link:  # a Google Drive / Dropbox file: a recording, or a document
+        await _handle_link(update, url, link, **opts)
+        return
+    try:
         check_url(url)  # no network: a bad link is refused before it gets a queue slot or a request row
     except UnsupportedURL as e:
         await update.message.reply_text(f"⚠️ {e}")
@@ -989,8 +997,80 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                                     reply_markup=_book_menu(upload_id))
 
 
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".wma", ".amr"}
+
+
+def _link_kind(name: str, content_type: str) -> str | None:
+    """"media", "document" or None (can't tell) for a shared file, by its name, else its type."""
+    ext = Path(name).suffix.lower()
+    if ext in MEDIA_EXTENSIONS:
+        return "media"
+    if ext in DOC_EXTENSIONS or ext in CONVERT_EXTENSIONS:
+        return "document"
+    if content_type.split("/")[0] in ("audio", "video"):
+        return "media"
+    if content_type in ("application/pdf", "application/epub+zip", "text/plain") or "wordprocessingml" in content_type:
+        return "document"
+    return None
+
+
+async def _handle_link(update: Update, url: str, link: links.FileLink, transcript_only: bool = False,
+                       use_cache: bool = True) -> None:
+    """A Google Drive / Dropbox link: a recording is summarized right away (like an upload), a document gets
+    the book menu.
+
+    When the link doesn't show the file's name (Drive), its first bytes are fetched to learn the name, type and
+    size: after the access and limit checks, since anyone allowed could trigger it. A recording's size and the
+    free disk space are checked before it's queued.
+    """
+    uid = update.effective_user.id
+    kind = _link_kind(link.name, "")
+    info = {"filename": link.name, "content_type": "", "size": None}
+    if kind is None and Path(link.name).suffix:  # the link names a file of another kind: no need to look
+        await update.message.reply_text("⚠️ I can't tell what kind of file this is. I can summarize audio and "
+                                        f"video files, and {DOC_FORMATS} documents.")
+        return
+    if kind != "document":
+        if refusal := _refusal(uid):
+            await update.message.reply_text(refusal)
+            return
+        try:
+            info = await asyncio.to_thread(links.peek, link)
+        except links.LinkError as e:
+            await update.message.reply_text(str(e))
+            return
+        kind = _link_kind(info["filename"], info["content_type"])
+    if kind == "document":
+        if transcript_only:
+            await update.message.reply_text("That's a document; send the link without /transcript.")
+            return
+        await _offer_link(update, url, links.FileLink(link.service, link.download_url, info["filename"]))
+        return
+    if kind is None:
+        await update.message.reply_text("⚠️ I can't tell what kind of file this is. I can summarize audio and "
+                                        f"video files, and {DOC_FORMATS} documents.")
+        return
+    size = info["size"] or 0
+    if size > config.MAX_MEDIA_LINK_MB * 1024 ** 2:
+        await update.message.reply_text(f"⚠️ This file is larger than {config.MAX_MEDIA_LINK_MB} MB, the most I "
+                                        "download.")
+        return
+    if size and shutil.disk_usage(config.DATA_DIR).free < 2 * size:
+        await update.message.reply_text("⚠️ There isn't enough free disk space for this file right now.")
+        log.warning("disk too full for a %d MB file", size // 1024 ** 2)
+        return
+    name = info["filename"] or f"{link.service} file"
+    icon = "🎵" if Path(name).suffix.lower() in AUDIO_EXTENSIONS or info["content_type"].startswith("audio/") else "🎬"
+    label = f"{icon} {name}"
+    upload_id = db.add_link_upload(uid, url, label)
+    status = await update.message.reply_text(_queued_message())
+    await _start_job(uid, update.effective_chat.id, status.message_id, label,
+                     "transcript" if transcript_only else "again" if not use_cache else "summary",
+                     upload_id=upload_id, media=True, transcript_only=transcript_only, use_cache=use_cache)
+
+
 async def _offer_link(update: Update, url: str, link: links.FileLink) -> None:
-    """A Google Drive / Dropbox link: records it like an upload and asks how to summarize it.
+    """A Google Drive / Dropbox link to a document: records it like an upload and asks how to summarize it.
 
     Nothing is downloaded yet: that happens in the job, once the user picks (and the limits allow it).
     """
@@ -1070,16 +1150,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update, ctx):
         return
     text = update.message.text or update.message.caption or ""
-    url = find_url(text)
-    try:
-        link = links.parse(url) if url else None
-    except links.LinkError as e:
-        await update.message.reply_text(str(e))
-        return
-    if link:
-        await _offer_link(update, url, link)
-        return
-    await enqueue(update, url)
+    await enqueue(update, find_url(text))
 
 
 def command(**opts):
@@ -1843,7 +1914,8 @@ async def on_ocr_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     await q.answer()
 
 
-async def _download_link(upload: dict, path: Path, head: str, progress: "Progress") -> dict:
+async def _download_link(upload: dict, path: Path, head: str, progress: "Progress", max_mb: int | None = None,
+                         rename: bool = True) -> dict:
     """Downloads a Drive/Dropbox-linked document (in a thread: it can take minutes), showing the progress.
 
     Returns:
@@ -1860,10 +1932,10 @@ async def _download_link(upload: dict, path: Path, head: str, progress: "Progres
         progress(f"{head}\n📥 Downloading the file… {_fmt_size(done)}{of}", None)
 
     try:
-        name = await asyncio.to_thread(links.download, link, path, shown)
+        name = await asyncio.to_thread(links.download, link, path, shown, max_mb)
     except links.LinkError as e:
         raise documents.DocumentError(str(e), e.detail)
-    if name and name != upload["name"]:
+    if rename and name and name != upload["name"]:  # a recording keeps its label (set when the link came in)
         db.set_upload_name(upload["id"], name)
         upload = db.get_upload(upload["id"])
     return upload
@@ -1893,7 +1965,7 @@ async def _run_media(app: Application, job: Job, progress: "Progress") -> pipeli
             progress(f"{head}\n📥 Getting the file…", None)
             path = workdir / "download"
             if upload["source_url"]:
-                upload = await _download_link(upload, path, head, progress)
+                await _download_link(upload, path, head, progress, config.MAX_MEDIA_LINK_MB, rename=False)
             else:
                 try:
                     tg_file = await app.bot.get_file(upload["file_id"])

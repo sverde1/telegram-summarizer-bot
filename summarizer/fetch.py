@@ -6,6 +6,7 @@ bot fetch from its own network (SSRF) or from an arbitrary server.
 """
 import email.message
 import hashlib
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -105,3 +106,52 @@ def download(url: str, dest: Path, *, allowed: Callable[[str], bool], max_bytes:
     disposition = email.message.Message()
     disposition["content-disposition"] = headers.get("Content-Disposition") or ""
     return {"filename": disposition.get_filename() or "", "size": size}
+
+
+def peek(url: str, *, allowed: Callable[[str], bool], max_bytes: int = 65536, timeout: float = 10) -> dict:
+    """Looks at the start of a file without downloading it: its name, type and total size.
+
+    A ranged request (bytes 0-65535); a server that ignores the range answers with the whole file, of which
+    at most `max_bytes` are read. Same host and redirect checks as download().
+
+    Returns:
+        {"filename": "" if unknown, "content_type": str, "size": total bytes or None}.
+
+    Raises:
+        FetchError: blocked, html (a page instead of the file), denied or failed.
+    """
+    def check(target: str) -> None:
+        """Refuses a URL that isn't https on an allowed host."""
+        parts = urllib.parse.urlsplit(target)
+        if parts.scheme != "https" or not allowed((parts.hostname or "").lower()):
+            raise FetchError("blocked", f"not allowed: {parts.hostname}")
+
+    class Checked(urllib.request.HTTPRedirectHandler):
+        """Follows a redirect only to an allowed host over HTTPS."""
+
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            """Checks the redirect target before following it."""
+            check(urllib.parse.urljoin(req.full_url, newurl))
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    check(url)
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Range": f"bytes=0-{max_bytes - 1}"})
+    try:
+        with urllib.request.build_opener(Checked()).open(request, timeout=timeout) as r:
+            headers = r.headers
+            r.read(max_bytes)
+    except urllib.error.HTTPError as e:
+        raise FetchError("denied" if e.code in (401, 403, 404) else "failed", f"HTTP {e.code}")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise FetchError("failed", str(e))
+    content_type = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if content_type == "text/html":
+        raise FetchError("html", content_type)
+    size = None
+    if m := re.match(r"bytes \d+-\d+/(\d+)", headers.get("Content-Range") or ""):  # 206: the total after "/"
+        size = int(m[1])
+    elif (headers.get("Content-Length") or "").isdigit() and not headers.get("Content-Range"):
+        size = int(headers["Content-Length"])  # 200: the range was ignored, this is the whole file
+    disposition = email.message.Message()
+    disposition["content-disposition"] = headers.get("Content-Disposition") or ""
+    return {"filename": disposition.get_filename() or "", "content_type": content_type, "size": size}

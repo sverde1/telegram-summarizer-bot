@@ -295,3 +295,125 @@ async def test_waiting_for_memory_downloads_once(app, telegram, files, ana, ai, 
         await asyncio.sleep(0.02)
     task.cancel()
     assert db.recent_requests(ANA)[0]["status"] == "done" and len(telegram.sent("getFile")) == 1
+
+
+# ---------- shared by link ----------
+
+import urllib.request  # noqa: E402
+
+from summarizer import fetch, links  # noqa: E402
+
+from conftest import msg_update  # noqa: E402
+
+DRIVE = "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456/view"
+
+
+class _Answer:
+    """A fake HTTP answer for fetch.peek."""
+
+    def __init__(self, headers):
+        """Keeps the headers."""
+        self.headers = headers
+
+    def read(self, n):
+        """A few bytes."""
+        return b"\x00" * 10
+
+    def __enter__(self):
+        """Context manager like urllib's response."""
+        return self
+
+    def __exit__(self, *exc):
+        """Nothing to close."""
+
+
+@pytest.mark.parametrize("headers,size,name", [
+    ({"Content-Type": "video/mp4", "Content-Range": "bytes 0-65535/314572800",
+      "Content-Disposition": "attachment; filename*=UTF-8''Po%C4%8Ditnice.mp4"}, 314572800, "Počitnice.mp4"),
+    ({"Content-Type": "audio/mpeg", "Content-Length": "5000"}, 5000, ""),  # the range was ignored
+])
+def test_peek_reads_name_type_and_total_size(monkeypatch, headers, size, name):
+    class Opener:
+        """Answers with the given headers."""
+
+        def open(self, request, timeout):
+            """Checks the range request; answers."""
+            assert request.get_header("Range") == "bytes=0-65535"
+            return _Answer(headers)
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *h: Opener())
+    got = fetch.peek("https://drive.usercontent.google.com/x", allowed=lambda h: True)
+    assert (got["size"], got["filename"], got["content_type"]) == (size, name, headers["Content-Type"])
+
+
+def test_peek_of_a_page_means_not_shared(monkeypatch):
+    class Opener:
+        """Answers with a login page."""
+
+        def open(self, request, timeout):
+            """An HTML answer."""
+            return _Answer({"Content-Type": "text/html; charset=utf-8"})
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *h: Opener())
+    with pytest.raises(links.LinkError, match="Anyone with the link"):
+        links.peek(links.parse(DRIVE))
+
+
+@pytest.fixture
+def shared(monkeypatch, files):
+    """Share links whose peek says what `shared.info` holds, and whose download serves `shared.file`."""
+    def peek(link):
+        """The prepared answer."""
+        return dict(peek.info)
+
+    peek.info = {"filename": "holiday.mp4", "content_type": "video/mp4", "size": 3_000_000}
+    peek.file = files["video"]
+    peek.downloads = []
+
+    def download(link, dest, progress=None, max_mb=None):
+        """Copies the prepared file; records the cap."""
+        peek.downloads.append(max_mb)
+        shutil.copy(peek.file, dest)
+        return peek.info["filename"]
+
+    monkeypatch.setattr(links, "peek", peek)
+    monkeypatch.setattr(links, "download", download)
+    return peek
+
+
+async def test_a_video_by_drive_link_is_summarized(app, telegram, ana, ai, whisper, shared):
+    whisper.cues = []
+    await send(app, msg_update(ANA, DRIVE))
+    await _work(app)
+    text = telegram.sent("sendMessage")[-1]["text"]
+    assert "🎬 holiday.mp4" in text and "Battery talk" in text
+    assert shared.downloads == [bot.config.MAX_MEDIA_LINK_MB]  # media links get the 1 GB cap
+
+
+async def test_transcript_of_a_linked_recording(app, telegram, files, ana, ai, whisper, shared):
+    shared.info = {"filename": "talk.mp3", "content_type": "audio/mpeg", "size": 50_000}
+    shared.file = files["mp3"]
+    await send(app, msg_update(ANA, f"/transcript {DRIVE}"))
+    await _work(app)
+    assert telegram.sent("sendDocument")[-1]["document"].filename == "talk.mp3 transcript.txt" and ai == []
+
+
+async def test_transcript_of_a_linked_document_is_explained(app, telegram, ana, shared):
+    await send(app, msg_update(ANA, "/transcript https://www.dropbox.com/s/abc123xyz/book.pdf?dl=0"))
+    assert telegram.texts()[-1] == "That's a document; send the link without /transcript."
+
+
+async def test_too_big_or_too_little_disk(app, telegram, ana, shared, monkeypatch):
+    shared.info = {"filename": "film.mkv", "content_type": "video/x-matroska", "size": 2 * 1024 ** 3}
+    await send(app, msg_update(ANA, DRIVE))
+    assert "larger than 1024 MB" in telegram.texts()[-1]
+    shared.info["size"] = 500 * 1024 ** 2
+    monkeypatch.setattr(bot.shutil, "disk_usage", lambda path: type("U", (), {"free": 600 * 1024 ** 2})())
+    await send(app, msg_update(ANA, DRIVE))
+    assert "enough free disk space" in telegram.texts()[-1] and bot.queue.qsize() == 0
+
+
+async def test_a_drive_link_to_a_document_still_gets_the_book_menu(app, telegram, ana, shared):
+    shared.info = {"filename": "Pets.pdf", "content_type": "application/pdf", "size": 2000}
+    await send(app, msg_update(ANA, DRIVE))
+    assert telegram.sent("sendMessage")[-1]["text"].startswith("📄 Pets.pdf (Google Drive)")

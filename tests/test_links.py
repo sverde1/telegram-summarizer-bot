@@ -182,7 +182,7 @@ def served_pdf(monkeypatch, tmp_path):
     pdf = make_pdf(tmp_path / "src.pdf", ["Intro text about cats and their habits " * 3,
                                           "Second part on dogs and their loyalty " * 3], [("Cats", 0), ("Dogs", 1)])
 
-    def download(link, dest, progress=None):
+    def download(link, dest, progress=None, max_mb=None):
         """Copies the book; reports the name a service would."""
         shutil.copy(pdf, dest)
         if progress:
@@ -190,6 +190,9 @@ def served_pdf(monkeypatch, tmp_path):
         return link.name or "Real name.pdf"
 
     monkeypatch.setattr(links, "download", download)
+    # A Drive link's name and type are looked up first; here it's a PDF.
+    monkeypatch.setattr(links, "peek", lambda link: {"filename": link.name or "Real name.pdf",
+                                                     "content_type": "application/pdf", "size": 2000})
 
 
 async def _run(app):
@@ -212,7 +215,8 @@ async def test_dropbox_link_is_summarized_like_an_upload(app, telegram, served_p
 
 async def test_drive_link_learns_the_file_name_on_download(app, telegram, served_pdf):
     await send(app, msg_update(ANA, f"https://drive.google.com/file/d/{FILE_ID}/view?usp=sharing"))
-    assert telegram.sent("sendMessage")[-1]["text"].startswith("📄 Google Drive file (Google Drive)")
+    # The name is looked up before the buttons (the first bytes of the file), not only after the download.
+    assert telegram.sent("sendMessage")[-1]["text"].startswith("📄 Real name.pdf (Google Drive)")
     up = int(re.search(r"book:(\d+):", str(telegram.sent("sendMessage")[-1]["reply_markup"])).group(1))
     await send(app, callback_update(ANA, f"book:{up}:whole"))
     await _run(app)
@@ -221,7 +225,7 @@ async def test_drive_link_learns_the_file_name_on_download(app, telegram, served
 
 @pytest.mark.parametrize("url,reply", [
     ("https://www.dropbox.com/s/abc123xyz/book.mobi?dl=0", "Convert it to PDF or EPUB"),
-    ("https://www.dropbox.com/s/abc123xyz/song.mp3?dl=0", "I can summarize PDF, EPUB, DOCX or TXT"),
+    ("https://www.dropbox.com/s/abc123xyz/photos.zip?dl=0", "I can't tell what kind of file this is"),
     ("https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz", links.FOLDER),
 ])
 async def test_unusable_links_are_refused_at_once(app, telegram, url, reply):

@@ -83,6 +83,8 @@ OCR_MAX_PAGES = int(_env("OCR_MAX_PAGES", "400"))
 OCR_WORKERS = int(_env("OCR_WORKERS", "3"))
 # Largest document downloaded from a Google Drive / Dropbox link (Telegram itself stops bots at 20 MB).
 MAX_LINK_DOWNLOAD_MB = int(_env("MAX_LINK_DOWNLOAD_MB", "100"))
+# Largest audio/video file downloaded from such a link (only the audio is decoded; the file is deleted after).
+MAX_MEDIA_LINK_MB = int(_env("MAX_MEDIA_LINK_MB", "1024"))
 # The system's espeak-ng (Kokoro's text-to-speech needs it to turn text into phonemes):
 # sudo apt install espeak-ng-data. Paths as on Debian/Ubuntu x86-64.
 ESPEAK_LIB = _env("ESPEAK_LIB", "/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1")

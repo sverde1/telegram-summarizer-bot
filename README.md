@@ -253,6 +253,7 @@ The database migrates itself on start.
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |
 | `MAX_DOC_PAGES` | `2000` | Most pages read from an uploaded document (EPUB/DOCX/TXT count ~2000 characters as a page). |
 | `MAX_DOC_CHARS` | `3000000` | Most characters read from an uploaded document. |
+| `MAX_MEDIA_LINK_MB` | `1024` | Largest audio/video file downloaded from a Google Drive / Dropbox link (only its audio is decoded; it's deleted after the job). |
 | `MAX_LINK_DOWNLOAD_MB` | `100` | Largest document downloaded from a Google Drive / Dropbox link. |
 | `TTS_VOICE` | *(empty)* | Kokoro voice for 🔊 voice messages; empty = the default for `SUMMARY_LANGUAGE` (English: `af_heart`). |
 | `TTS_SPEED` | `1.0` | Reading speed, 0.5–2.0. |
@@ -298,7 +299,7 @@ sandbox. Without a working CUDA runtime it logs a warning and stays on the CPU.
 |---|---|---|
 | *(a link)* | users | Summarize it. |
 | `/again <url>` | users | Summarize again with your current model, ignoring the cache. |
-| `/transcript <url>` | users | The raw transcript as a `.txt` file. |
+| `/transcript <url>` | users | The raw transcript as a `.txt` file (YouTube/TikTok, or a Drive/Dropbox link to a recording; for an uploaded recording, send it with the caption `/transcript`). |
 | `/history` | users | Your recent requests (admins: everyone's, with who sent them). |
 | `/models` | users | Show or choose the AI: provider first, then model. |
 | `/limit` | users | Your limits: requests, scanned documents (OCR) and new voice messages in the last 24 h, and how many are left. |
@@ -350,8 +351,12 @@ ask to see frames. The reply has a short title the AI writes and the summary (no
 has no published title), with 🔊 Listen and your units. Send it with the caption `/transcript` for the
 transcript as a file instead.
 
-- Up to 20 MB through Telegram (the most bots may download); the length limit (`MAX_DURATION_MIN`) and the
-  memory check are applied before anything is downloaded.
+- Up to 20 MB through Telegram (the most bots may download); bigger ones as a **Google Drive or Dropbox link**
+  (shared as "Anyone with the link"), up to `MAX_MEDIA_LINK_MB` (1 GB). For a link, the bot first reads only
+  the file's first bytes to learn its name, type and size, so a recording is summarized right away and a
+  document gets the book menu; the size and free disk space are checked before it's queued.
+- `/transcript <link>` gives a linked recording's transcript as a file.
+- The length limit (`MAX_DURATION_MIN`) and the memory check are applied before anything is downloaded.
 - The file is decoded only in the sandbox (a file can be crafted against ffmpeg) and deleted after the job;
   the transcript and summaries are kept by the file's SHA-256, so sending it again is quick. The shared cache
   never holds the file's name: someone sending the same file later doesn't see what you called it.
