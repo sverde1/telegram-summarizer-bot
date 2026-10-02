@@ -395,6 +395,21 @@ def update_request(req_id: int, **fields) -> None:
         c.execute(f"UPDATE requests SET {cols} WHERE id=?", (*fields.values(), req_id))
 
 
+def fail_stale_requests() -> int:
+    """Marks requests left unfinished by a crash or kill as failed ("bot restarted"); call at startup.
+
+    The queue lives in memory, so after a restart nothing will ever finish them; without this they'd show
+    as running in /history forever.
+
+    Returns:
+        How many requests were marked.
+    """
+    with _db() as c:
+        cur = c.execute("""UPDATE requests SET status='failed', error='bot restarted', finished_at=?
+                           WHERE status IN ('queued', 'processing')""", (time.time(),))
+        return cur.rowcount
+
+
 def last_again(user_id: int, platform: str, video_id: str, except_request: int) -> float | None:
     """When this user last successfully redid (/again) this video, or None if never.
 

@@ -96,3 +96,14 @@ def test_migration_moves_summaries_out_of_videos(tmp_path, monkeypatch):
     assert db.get_summary("youtube", "v", "codex", "gpt-6-astra")["result"]["summary"] == "old"
     cols = [r[1] for r in sqlite3.connect(old).execute("PRAGMA table_info(videos)")]
     assert "result" not in cols
+
+
+def test_stale_requests_are_failed_at_startup():
+    queued, running, done = (db.add_request(5, "u", "summary") for _ in range(3))
+    db.update_request(running, status="processing")
+    db.update_request(done, status="done")
+    assert db.fail_stale_requests() == 2
+    rows = {r["id"]: r for r in db.recent_requests(5)}
+    assert rows[queued]["status"] == rows[running]["status"] == "failed"
+    assert rows[queued]["error"] == "bot restarted" and rows[queued]["finished_at"]
+    assert rows[done]["status"] == "done"
