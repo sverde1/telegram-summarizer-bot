@@ -97,6 +97,10 @@ How the tests are isolated (`tests/conftest.py`):
   never the user's URL) and `fetch.download` with the service's host allow-list.
 - Text-to-speech runs only inside the sandbox (`tts.synthesize` → `tts_run`): the text is LLM output and
   espeak-ng parses it.
+- Recordings users send (`platform="file"`) are read only in the sandbox: `media.probe_file`, the
+  `transcribe._decode` / `frames` paths with a sandbox directory. Never open them with PyAV or ffmpeg in the
+  bot's process, and never store their file name in the shared `videos` row (it would show to the next
+  sender of the same file).
 - Unit conversion is display-only (`units.convert` in `render` / `render_document` / the 🔊 text); never store
   converted text. Only the converted value is shown, so add a guard and a test for every new unit or
   phrasing that could be read wrongly.

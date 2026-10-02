@@ -201,3 +201,97 @@ def test_a_file_summary_has_no_clickbait_section_and_names_the_file():
     text = bot.render(r)[0]
     assert "Clickbait" not in text and "🎤 Voice message" in text and "Battery talk" in text
     assert bot._transcript_name(r) == "Voice message transcript.txt"
+
+
+# ---------- sent in Telegram ----------
+
+import asyncio  # noqa: E402
+
+import access  # noqa: E402
+import bot  # noqa: E402
+
+from conftest import doc_update, media_update, send  # noqa: E402
+
+ANA = 60
+
+
+async def _work(app):
+    """Runs the worker until the queue and any paced deliveries are done."""
+    task = asyncio.create_task(bot.worker(app))
+    await asyncio.wait_for(bot.queue.join(), 30)
+    for _ in range(300):
+        if not bot._delayed:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+
+
+@pytest.fixture
+def ana():
+    """An approved user."""
+    access.set_state(ANA, "allowed")
+
+
+async def test_a_voice_message_is_summarized(app, telegram, files, ana, ai, whisper):
+    telegram.files["M1"] = files["voice"]
+    await send(app, media_update(ANA, "voice", duration=42))
+    await _work(app)
+    text = telegram.sent("sendMessage")[-1]["text"]
+    assert "Battery talk" in text and "🎤 Voice message (0:42)" in text and "Clickbait" not in text
+    req = db.recent_requests(ANA)[0]
+    assert (req["kind"], req["status"], req["url"]) == ("summary", "done", "🎤 Voice message (0:42)")
+    assert not list((bot.config.DATA_DIR / "work").glob("media_*"))  # the file is gone afterwards
+
+
+async def test_a_video_sent_as_a_file_gets_frames(app, telegram, files, ana, ai, whisper):
+    whisper.cues = []
+    telegram.files["M1"] = files["video"]
+    await send(app, doc_update(ANA, "holiday.mp4", 50_000, file_id="M1"))
+    await _work(app)
+    assert "🎬 holiday.mp4" in telegram.sent("sendMessage")[-1]["text"] and ai[0].sent[0][0]
+
+
+async def test_caption_transcript_sends_the_transcript(app, telegram, files, ana, ai, whisper):
+    telegram.files["M1"] = files["mp3"]
+    await send(app, media_update(ANA, "audio", caption="/transcript", file_name="talk.mp3"))
+    await _work(app)
+    doc = telegram.sent("sendDocument")[-1]
+    assert doc and ai == [] and db.recent_requests(ANA)[0]["kind"] == "transcript"
+
+
+@pytest.mark.parametrize("update,reply", [
+    (media_update(ANA, "video", size=25 * 1024 ** 2), "larger than 20 MB"),
+    (media_update(ANA, "voice", duration=200 * 60), "longer than 180 min"),
+])
+async def test_refused_before_downloading(app, telegram, ana, update, reply):
+    await send(app, update)
+    assert reply in telegram.texts()[-1] and not telegram.sent("getFile") and bot.queue.qsize() == 0
+
+
+async def test_a_video_note_without_a_name(app, telegram, files, ana, ai, whisper):
+    telegram.files["M1"] = files["video"]
+    await send(app, media_update(ANA, "video_note", duration=3))
+    await _work(app)
+    assert "🎥 Video message (0:03)" in telegram.sent("sendMessage")[-1]["text"]
+
+
+async def test_an_unreadable_file(app, telegram, files, ana, ai, whisper):
+    telegram.files["M1"] = files["broken"]
+    await send(app, doc_update(ANA, "broken.mp4", 400, file_id="M1"))
+    await _work(app)
+    assert telegram.texts()[-1] == bot.UNREADABLE_MEDIA and ai == []
+
+
+async def test_waiting_for_memory_downloads_once(app, telegram, files, ana, ai, whisper, monkeypatch):
+    telegram.files["M1"] = files["voice"]
+    fits = iter([False, True, True, True])
+    monkeypatch.setattr(memory, "fits_now", lambda needed: next(fits, True))
+    monkeypatch.setattr(bot, "MEMORY_RECHECK", 0.05)
+    await send(app, media_update(ANA, "voice"))
+    task = asyncio.create_task(bot.worker(app))
+    for _ in range(400):
+        if db.recent_requests(ANA)[0]["status"] == "done":
+            break
+        await asyncio.sleep(0.02)
+    task.cancel()
+    assert db.recent_requests(ANA)[0]["status"] == "done" and len(telegram.sent("getFile")) == 1

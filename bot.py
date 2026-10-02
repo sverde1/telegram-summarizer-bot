@@ -26,8 +26,8 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
                           MessageHandler, filters)
 
 import access
-from summarizer import (config, db, documents, links, memory, ocr, pipeline, proc, stats, summarize, transcribe,
-                        tts, units, updates)
+from summarizer import (config, db, documents, links, media, memory, ocr, pipeline, proc, stats, summarize,
+                        transcribe, tts, units, updates)
 from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -45,6 +45,8 @@ HELP = (
     "/models - show or choose the AI (Codex or Claude) and model\n"
     "/limit - how many requests you can still send today\n"
     "/units - measurements in metric or imperial, temperatures in °C or °F\n\n"
+    "🎤 Send a voice message, audio or video file (up to 20 MB) to summarize it; with the caption /transcript "
+    "you get the transcript instead.\n"
     "📄 You can also send a book or document (PDF, EPUB, DOCX or TXT, up to 20 MB), or a Google Drive or "
     "Dropbox link to one (shared as \"Anyone with the link\"): I'll summarize the whole thing or chapter by "
     "chapter."
@@ -92,6 +94,7 @@ class Job:
     chapter: int | None = None  # for "pick": the chosen chapter (None: show the chapter list)
     ocr_ok: bool = False  # the user confirmed OCR of this scanned document
     voice_of: int = 0  # 🔊: the request whose summary to read aloud; 0 for everything else
+    media: bool = False  # upload_id is a voice message, audio or video file (else a document)
     started_at: float = 0.0  # when the worker started it (monotonic); the status's elapsed time counts from it
 
 
@@ -891,8 +894,82 @@ def _chapter_list(upload_id: int, name: str, chapters: list[dict], page: int) ->
     return text, InlineKeyboardMarkup(rows)
 
 
+MEDIA_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".wma", ".amr",
+                    ".mp4", ".mov", ".mkv", ".webm", ".avi", ".3gp", ".m4v", ".mpeg", ".mpg", ".wmv"}
+MEDIA_TOO_BIG = ("⚠️ This file is larger than 20 MB, the most Telegram lets bots download. Upload it to Google "
+                 "Drive or Dropbox, share it as \"Anyone with the link\" and send me the link.")
+UNREADABLE_MEDIA = "⚠️ I couldn't read this file as audio or video."
+
+
+def _seconds(value) -> float:
+    """A Telegram duration in seconds (a timedelta with PTB_TIMEDELTA, else a number; None = 0)."""
+    return value.total_seconds() if hasattr(value, "total_seconds") else float(value or 0)
+
+
+def _media_label(msg) -> tuple[str, object]:
+    """What a sent recording is called in replies and /history, and the Telegram file object."""
+    if msg.voice:
+        return "🎤 Voice message", msg.voice
+    if msg.video_note:
+        return "🎥 Video message", msg.video_note
+    if msg.audio:
+        a = msg.audio
+        name = a.file_name or " - ".join(x for x in (a.performer, a.title) if x) or "Audio file"
+        return f"🎵 {name}", a
+    if msg.video:
+        return f"🎬 {msg.video.file_name or 'Video'}", msg.video
+    d = msg.document
+    is_video = (d.mime_type or "").startswith("video/") or Path(d.file_name or "").suffix.lower() in {
+        ".mp4", ".mov", ".mkv", ".webm", ".avi", ".3gp", ".m4v", ".mpeg", ".mpg", ".wmv"}
+    return f"{'🎬' if is_video else '🎵'} {d.file_name or 'Recording'}", d
+
+
+def _is_media_document(d) -> bool:
+    """Whether a sent document is a recording (audio/video type or extension) rather than a book."""
+    return ((d.mime_type or "").split("/")[0] in ("audio", "video")
+            or Path(d.file_name or "").suffix.lower() in MEDIA_EXTENSIONS)
+
+
+async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles a voice message, audio, video or round video message (or such a file as a document).
+
+    It's summarized right away, like a link (with the caption /transcript: the transcript instead).
+    Everything that can be checked from Telegram's description is checked before anything is downloaded:
+    the size (bots get at most 20 MB), the length and whether it could ever fit in memory.
+    """
+    if not await guard(update, ctx):
+        return
+    msg = update.message
+    label, f = _media_label(msg)
+    uid = update.effective_user.id
+    if not f.file_size or f.file_size > TG_DOWNLOAD_LIMIT:
+        await msg.reply_text(MEDIA_TOO_BIG)
+        return
+    seconds = _seconds(getattr(f, "duration", None))
+    if seconds > config.MAX_DURATION_MIN * 60:
+        await msg.reply_text(f"⚠️ This recording is longer than {config.MAX_DURATION_MIN} min; skipping.")
+        return
+    if seconds and not memory.can_ever_fit(memory.whisper_needs(seconds, transcribe.is_loaded())):
+        await msg.reply_text("🧠 This recording is too long to transcribe on this machine.")
+        return
+    if refusal := _refusal(uid):
+        await msg.reply_text(refusal)
+        return
+    if seconds:
+        label = f"{label} ({pipeline._fmt_duration(seconds)})" if msg.voice or msg.video_note else label
+    upload_id = db.add_upload(uid, f.file_id, f.file_unique_id, label, f.file_size)
+    transcript = (msg.caption or "").strip().lower().startswith("/transcript")
+    status = await msg.reply_text(_queued_message())
+    await _start_job(uid, update.effective_chat.id, status.message_id, label,
+                     "transcript" if transcript else "summary", upload_id=upload_id, media=True,
+                     transcript_only=transcript)
+
+
 async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles an uploaded file: checks its type and size, then asks how to summarize it."""
+    if update.message.document and _is_media_document(update.message.document):
+        await on_media(update, ctx)  # a recording sent as a file, not a book
+        return
     if not await guard(update, ctx):
         return
     d = update.message.document
@@ -1430,8 +1507,9 @@ async def _set_aside(app: Application, job: "Job", needed: int, duration: float 
     job.memory_needed, job.audio_seconds = needed, duration
     _waiting_for_memory.append(job)
     db.update_request(job.request_id, status="queued")
-    text = (f"🧠 Not enough free memory to transcribe this video right now (needs about "
-            f"{needed / memory.GB:.1f} GB). Waiting up to {config.WHISPER_RAM_WAIT_MIN} min; other videos go "
+    what = "recording" if job.media else "video"
+    text = (f"🧠 Not enough free memory to transcribe this {what} right now (needs about "
+            f"{needed / memory.GB:.1f} GB). Waiting up to {config.WHISPER_RAM_WAIT_MIN} min; other requests go "
             "first meanwhile.")
     button = InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Don't wait, cancel",
                                                          callback_data=f"cancel:{job.request_id}")]])
@@ -1541,6 +1619,8 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
         try:
             if job.voice_of:
                 result = await _run_voice(app, job, progress)
+            elif job.media:
+                result = await _run_media(app, job, progress)
             elif job.upload_id:
                 result = await _run_document(app, job, progress)
             else:
@@ -1787,6 +1867,68 @@ async def _download_link(upload: dict, path: Path, head: str, progress: "Progres
         db.set_upload_name(upload["id"], name)
         upload = db.get_upload(upload["id"])
     return upload
+
+
+async def _run_media(app: Application, job: Job, progress: "Progress") -> pipeline.Result:
+    """Runs a recording job: gets the file (Telegram or a share link), reads it in the sandbox, summarizes it.
+
+    The job directory is the bot's: a job that has to wait for memory keeps it, and resumes from the file
+    already there instead of downloading it again.
+
+    Raises:
+        pipeline.PipelineError: The file can't be downloaded, read or summarized.
+        memory.NeedsMemory: Not enough free memory right now (the job is set aside).
+    """
+    upload = db.get_upload(job.upload_id)
+    if upload is None:
+        raise pipeline.PipelineError("⚠️ Please send the file again.", detail=f"upload {job.upload_id} missing")
+    workdir = config.DATA_DIR / "work" / f"media_{job.request_id}"
+    sources = [p for p in workdir.glob("*") if p.stem in ("vid", "audio") and p.suffix != ".part"]
+    keep = False
+    try:
+        if not sources:
+            shutil.rmtree(workdir, ignore_errors=True)
+            workdir.mkdir(parents=True)
+            head = upload["name"][:80]
+            progress(f"{head}\n📥 Getting the file…", None)
+            path = workdir / "download"
+            if upload["source_url"]:
+                upload = await _download_link(upload, path, head, progress)
+            else:
+                try:
+                    tg_file = await app.bot.get_file(upload["file_id"])
+                    await tg_file.download_to_drive(path)
+                except BadRequest as e:
+                    raise pipeline.PipelineError(MEDIA_TOO_BIG if "too big" in str(e).lower() else DOWNLOAD_FAILED,
+                                                 detail=str(e))
+                except TelegramError as e:
+                    raise pipeline.PipelineError(DOWNLOAD_FAILED, detail=str(e))
+            if job.cancel_reason:
+                raise proc.ProcCancelled("cancelled")
+            try:
+                info = await asyncio.to_thread(media.probe_file, path, workdir)
+            except media.MediaError as e:
+                raise pipeline.PipelineError(UNREADABLE_MEDIA, detail=str(e))
+            if not info["has_audio"] and not info["has_video"]:
+                raise pipeline.PipelineError(UNREADABLE_MEDIA, detail="no audio or video stream")
+            # The pipeline's conventions: vid.* stays for frames after Whisper, audio.* goes right after it.
+            suffix = Path(upload["name"].split(" (")[0]).suffix.lower() or ".bin"
+            src = path.rename(workdir / (("vid" if info["has_video"] else "audio") + suffix))
+        else:
+            src = sources[0]
+            info = await asyncio.to_thread(media.probe_file, src, workdir)
+        digest = await asyncio.to_thread(documents.sha256, src)
+        return await asyncio.to_thread(
+            pipeline.run_file, src, upload["name"], info, digest, progress, workdir=workdir,
+            use_cache=job.use_cache, transcript_only=job.transcript_only, request_id=job.request_id,
+            backend=job.backend, model=job.model,
+            hide_cache_from=None if access.is_admin(job.user_id) else job.user_id)
+    except memory.NeedsMemory:
+        keep = True  # the file stays for the retry
+        raise
+    finally:
+        if not keep:
+            shutil.rmtree(workdir, ignore_errors=True)
 
 
 async def _run_document(app: Application, job: Job, progress: "Progress") -> documents.DocResult:
@@ -2350,7 +2492,10 @@ def add_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(on_ocr_button, pattern=r"^ocr:"))
     app.add_handler(CallbackQueryHandler(on_ocr_admin_button, pattern=r"^ocradm:"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(allow|block|remove):"))
-    # Before on_message: a file sent with a caption is a document, not a message with a link.
+    # Before on_message: a file sent with a caption is a file, not a message with a link (the attachment is
+    # what gets summarized).
+    app.add_handler(MessageHandler(new & (filters.VOICE | filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE),
+                                   on_media))
     app.add_handler(MessageHandler(new & filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(new & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND
                                    & ~filters.Document.ALL, on_message))

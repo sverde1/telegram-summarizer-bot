@@ -39,6 +39,7 @@ Dropbox link): the whole book, or chapter by chapter. Scanned PDFs are read with
   link (up to 100 MB); the whole book or chapter by chapter (short, one per message, or a picked chapter).
   Scanned PDFs are read with OCR (Tesseract or RapidOCR) after the user confirms the estimated time, with
   their own daily limit; admins add OCR languages with `/ocrlang`.
+- **Voice messages, audio and video files** you send are summarized too (Whisper, frames for videos).
 - **🔊 Listen**: any summary as a Telegram voice message (Kokoro text-to-speech, made on this machine),
   e.g. for the car.
 - **Cache**: a video is downloaded and transcribed once, a document read (or OCRed) once; summaries are
@@ -340,6 +341,20 @@ again). Once a file has been read, "Pick a chapter" shows the list at once, with
 chapter you tap is a request. Files are parsed in a sandbox without network access. Only the extracted text is kept (by the file's
 SHA-256, like video transcripts), so the same file is read once; summaries are cached per model. Admins see
 file names in `/history`.
+
+### Voice messages, audio and video files
+
+Send a **voice message**, an **audio file** or a **video** (also a round video message, or such a file sent as a
+document) and it's summarized right away, like a YouTube link: Whisper transcribes it, and for a video the AI can
+ask to see frames. The reply has a short title the AI writes and the summary (no clickbait section; a recording
+has no published title), with 🔊 Listen and your units. Send it with the caption `/transcript` for the
+transcript as a file instead.
+
+- Up to 20 MB through Telegram (the most bots may download); the length limit (`MAX_DURATION_MIN`) and the
+  memory check are applied before anything is downloaded.
+- The file is decoded only in the sandbox (a file can be crafted against ffmpeg) and deleted after the job;
+  the transcript and summaries are kept by the file's SHA-256, so sending it again is quick. The shared cache
+  never holds the file's name: someone sending the same file later doesn't see what you called it.
 
 ### Units
 

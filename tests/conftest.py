@@ -247,6 +247,22 @@ def doc_update(uid: int, name: str, size: int, *, file_id: str = "F1", caption: 
     return {"update_id": next(_update_ids), "message": message}
 
 
+def media_update(uid: int, kind: str, *, file_id: str = "M1", size: int = 50_000, duration: int = 3,
+                 caption: str | None = None, **fields) -> dict:
+    """Builds the JSON of an incoming voice message, audio, video or video note (`kind`: voice, audio, video,
+    video_note); extra fields (file_name, mime_type, ...) go into the attachment."""
+    attachment = {"file_id": file_id, "file_unique_id": f"u-{file_id}", "file_size": size, "duration": duration}
+    if kind == "video":
+        attachment |= {"width": 320, "height": 240}
+    if kind == "video_note":
+        attachment |= {"length": 240}
+    message = {"message_id": next(_update_ids), "date": 0, "from": _user(uid), "chat": {"id": uid, "type": "private"},
+               kind: attachment | fields}
+    if caption:
+        message["caption"] = caption
+    return {"update_id": next(_update_ids), "message": message}
+
+
 def callback_update(uid: int, data: str, *, chat_type: str = "private") -> dict:
     """Builds the JSON of an inline-button press (callback query) update."""
     return {"update_id": next(_update_ids), "callback_query": {
