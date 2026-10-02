@@ -109,7 +109,7 @@ async def test_no_button_without_voice_messages_or_for_transcripts(app, telegram
     assert all("voice:" not in str(m.get("reply_markup")) for m in telegram.sent("sendDocument"))
 
 
-async def test_voice_limit_counts_only_new_ones(app, telegram, voice):
+async def test_voice_limit_counts_only_new_ones(app, telegram, voice, monkeypatch):
     db.set_setting("tts_limit", "1")
     rid = await _summary(app, telegram, ANA)
     await send(app, callback_update(ANA, f"voice:{rid}"))
@@ -119,8 +119,8 @@ async def test_voice_limit_counts_only_new_ones(app, telegram, voice):
     await _work(app)
     assert len(voice) == 1 and len(telegram.sent("sendVoice")) == 2
     voice_other = dict(SUMMARY, summary="Something new")
-    pipeline.run = lambda url, *a, **k: pipeline.Result("youtube", "x", URL, {"title": "N"}, "", "captions",
-                                                         "en", voice_other)
+    monkeypatch.setattr(pipeline, "run", lambda url, *a, **k: pipeline.Result(
+        "youtube", "x", URL, {"title": "N"}, "", "captions", "en", voice_other))
     rid3 = await _summary(app, telegram, ANA)
     await send(app, callback_update(ANA, f"voice:{rid3}"))  # a new one: over the limit
     assert "new voice messages today" in telegram.sent("answerCallbackQuery")[-1]["text"]

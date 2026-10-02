@@ -234,7 +234,7 @@ The database migrates itself on start.
 | `TELEGRAM_BOT_TOKEN` | – | Bot token (required). |
 | `ADMIN_USER_IDS` | – | Comma-separated admin user ids. Empty = setup mode. |
 | `LLM_BACKEND` | `codex` | Default provider: `codex`, `claude-code`, `api` (Claude) or `openai-api`. |
-| `CODEX_MODEL` | `gpt-6-sol` | Default Codex model (empty = Codex's own default). |
+| `CODEX_MODEL` | – (`.env.example`: `gpt-6-sol`) | Default Codex model (empty = Codex's own default). |
 | `CODEX_EFFORT` / `CLAUDE_EFFORT` | `medium` | Reasoning effort. |
 | `CLAUDE_CODE_MODEL` / `CLAUDE_MODEL` | `claude-opus-5-5` | Default model for Claude Code / the API. |
 | `ANTHROPIC_API_KEY` | – | Enables the Claude API provider. |
@@ -303,10 +303,11 @@ sandbox. Without a working CUDA runtime it logs a warning and stays on the CPU.
 | `/history` | users | Your recent requests (admins: everyone's, with who sent them). |
 | `/models` | users | Show or choose the AI: provider first, then model. |
 | `/limit` | users | Your limits: requests, scanned documents (OCR) and new voice messages in the last 24 h, and how many are left. |
-| `/limit` | admins | Show the daily and OCR limits and per-user overrides. `/limit 50` sets the daily limit for everyone, `/limit <user id> 200` for one user, `/limit <user id> default` removes the override; `0` = no limit. The same with `ocr` first (`/limit ocr 5`) for the OCR limit. |
+| `/limit` | admins | Show the daily and OCR limits and per-user overrides. `/limit 50` sets the daily limit for everyone, `/limit <user id> 200` for one user, `/limit <user id> default` removes the override; `0` = no limit. The same with `ocr` or `voice` first (`/limit ocr 5`, `/limit voice 20`) for the OCR and voice-message limits. |
 | `/ocrlang` | admins | Languages for scanned documents: `/ocrlang` lists them, `/ocrlang add slv` downloads and installs one (Tesseract: from tesseract-ocr's `tessdata_fast` on GitHub, checked with a test run; RapidOCR: the script's model, checked against RapidOCR's pinned SHA-256), `/ocrlang remove slv`. |
 | `/units` | users | Units for measurements in summaries: Metric / Imperial and °C / °F (default: metric, °C). |
 | `/users` | admins | Users with Allow / Deny / Remove / Unblock buttons, their AI choice and daily limit with today's usage. |
+| `/help` | users | How to use the bot (admins also see their commands). |
 | `/start` | strangers | Request access. |
 
 The command menu adapts per user: strangers only see `/start`.
@@ -427,6 +428,12 @@ reveal how busy others are), then each stage and an ETA
 learned from this machine's measured speeds. Every external program runs in its own process group, so a
 timeout, a cancelled job or a removed user stops it at once.
 
+### Code layout
+
+`bot.py` only starts the bot; the Telegram side lives in `tgbot/` (handlers, the job queue and worker, one
+runner per job kind, rendering and delivery) and the work itself in `summarizer/` (pipeline, documents,
+OCR, speech, LLM calls). AGENTS.md has the module table and the rules for changing them.
+
 ## Security and privacy
 
 Video titles, descriptions, transcripts and on-screen text are untrusted: a video can contain prompt
@@ -463,7 +470,9 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 
 `bot.sqlite3` holds these tables:
 
-- `users`: id, name, username, status (admin / allowed / pending / blocked), chosen `backend` + `model`.
+- `users`: id, name, username, status (admin / allowed / pending / blocked), chosen `backend` + `model`,
+  per-user limit overrides (`daily_limit`, `ocr_limit`, `tts_limit`; empty = the global value) and units
+  (`unit_system`, `temperature`).
 - `videos`: metadata and transcript, status `processing` → `done` / `failed` (or `waiting` for memory,
   `cancelled`).
 - `summaries`: one per video and model.
@@ -475,7 +484,10 @@ injection. The model therefore gets no capability beyond returning its JSON answ
   file or OCR), by the file's SHA-256.
 - `doc_summaries`: book and chapter summaries, per style and model.
 - `ocr_holds`: document requests waiting for an OCR confirmation or an admin's approval.
-- `settings`: values set from Telegram (`/limit`, `/limit ocr`, `/ocrlang`).
+- `spoken`: per summary request, exactly the text its 🔊 button reads aloud (with the language and voice).
+- `voices`: Telegram's id of each made voice message, by a hash of voice, language, speed and text (no
+  user), so the same text isn't synthesized twice; deleted after `VOICE_CACHE_DAYS`.
+- `settings`: values set from Telegram (`/limit`, `/limit ocr`, `/limit voice`, `/ocrlang`).
 
 Also there: `codex-home/` (the bot's Codex login), `stats.json` (measured speeds for ETAs), `tessdata/` and
 `rapidocr/` (OCR language models added with `/ocrlang`).

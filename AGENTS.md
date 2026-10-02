@@ -5,16 +5,28 @@ Guidance for AI coding agents working on this repository. User-facing documentat
 
 ## What this is
 
-A private Telegram bot that summarizes YouTube and TikTok videos. Python 3, python-telegram-bot
-(async, long polling), yt-dlp / gallery-dl for media, faster-whisper for speech-to-text, and an LLM
-reached through the Codex CLI, the Claude Code CLI, the Anthropic API or the OpenAI API. It runs as a systemd user
-service on a single machine with no GPU.
+A private Telegram bot that summarizes YouTube and TikTok videos, books and documents (PDF, EPUB, DOCX,
+TXT; scans read with OCR), and recordings (voice messages, audio and video files, also shared by Google
+Drive / Dropbox link). Summaries can be read aloud as voice messages (Kokoro), and measurements are shown in
+each reader's units. Python 3, python-telegram-bot (async, long polling), yt-dlp / gallery-dl for media,
+faster-whisper for speech-to-text, Tesseract / RapidOCR, and an LLM reached through the Codex CLI, the
+Claude Code CLI, the Anthropic API or the OpenAI API. It runs as a systemd user service on a single machine
+with no GPU.
 
 ## Layout
 
 | Path | Role |
 |---|---|
-| `bot.py` | Telegram handlers, job queue/worker, status message + ETA, rendering, `/models`, `/users`, `/history`, update notifications, uploads and their buttons (`on_document`, `on_book_button`). |
+| `bot.py` | Entry point (`python bot.py`): logging, handler registration (`add_handlers`, order matters), `main`. |
+| `tgbot/state.py` | `Job`, `JobKind`, and the in-memory state: the queue, unfinished jobs, the running one (module attributes, `reset()`). |
+| `tgbot/jobs.py` | The queue's life cycle: `start_job`, the worker, cancelling, set aside for memory, finishing (`_finish`), paced delivery (`_deliver_later`), failures and admin notices. |
+| `tgbot/runners.py` | One runner per job kind (`RUNNERS`): gets the input (Telegram or share-link download), runs the blocking work in a thread. |
+| `tgbot/delivery.py` | Sending a finished result: summaries, transcript files, documents, voice messages, the 🔊 button. |
+| `tgbot/handlers.py` | Commands and buttons: access (`guard`, `button`, `owns`), `/users`, `/models`, `/limit`, `/units`, `/ocrlang`, `/history`, cancel, OCR approval, 🔊. |
+| `tgbot/intake.py` | Turning messages into jobs: links, uploaded documents and recordings, share links, book menus. |
+| `tgbot/lifecycle.py` | Start-up, shutdown, per-user command menus, update notices, the error handler. |
+| `tgbot/render.py`, `sending.py`, `menus.py`, `limits.py`, `prefs.py`, `texts.py` | Message rendering and formats; the status message (`Progress`) and retried sends; shared keyboards; limits as users see them; a user's effective AI choice; shared user-facing texts. |
+| `summarizer/results.py` | `JobResult`, the base of every result (cache and pacing fields, `head()`, `work_seconds()`, `llm_label()`). |
 | `access.py` | Who may use the bot (admins from `.env`, others from the `users` table). |
 | `summarizer/pipeline.py` | URL in, `Result` out: cache lookup, transcript, frames, LLM turns, timings. Blocking; runs in a worker thread. |
 | `summarizer/summarize.py` | Prompts, JSON schemas, the three LLM backends as `Conversation` classes, model lists. |
@@ -107,14 +119,18 @@ How the tests are isolated (`tests/conftest.py`):
 - Links are accepted only through `urls.check` / `urls.classify` (host allow-list; TikTok short-link
   redirects validated hop by hop). Never fetch a user-supplied URL any other way.
 - The bot answers only in private chats; every message/command handler is filtered to private chats and
-  every button handler checks the chat type; the admins come from `.env`, buttons re-check access.
+  every button handler starts with `handlers.button()` (private chat, access re-checked on every tap) and
+  `handlers.owns()` when it acts on someone's request; the admins come from `.env`.
 - Never commit `.env`, `data/`, tokens or logins.
 
 **Errors:** users only see expected, fixed messages. Raise `PipelineError` / `SummaryError` with a
 user message and put raw tool output, paths or exception text in `detail` (admins see it, users never).
 Anything unexpected becomes the generic "something went wrong" message plus an admin notice.
 
-**Abuse limits** (keep them when changing the queue): the voice-message limit (new ones only:
+**Abuse limits** (keep them when changing the queue). The three per-user daily limits (requests, OCR,
+voice messages) are one table each: `access.LIMITS` (setting, override column, default),
+`db.USAGE_FILTERS` (what counts) and `limits.LIMIT_UI` (wording); a test keeps their kinds equal. The
+voice-message limit (new ones only:
 `requests.kind='voice'` with `cached=0`; listening never counts toward the daily limit), the OCR limit (`requests.ocr`, set when an OCR run
 starts; cancelled runs count), the OCR page cap with admin approval (`ocr_holds`), the daily limit (global in the `settings` table,
 per-user override in `users.daily_limit`, read from the database on each check), per-user and total queue
@@ -124,7 +140,7 @@ frame-grab cap. Admins are exempt from the daily and queue limits.
 **Privacy:** who submitted which video is visible only to admins. Regular users may only learn that a
 result was cached if they requested that video themselves (`db.user_saw_video`). Otherwise every reuse is
 paced like a fresh run at half its time, at most 2 min: cached summaries and transcripts get a replay plan
-(`pipeline.plan_replay`, played back by `bot._deliver_later`); a saved transcript or document text reused
+(`pipeline.plan_replay`, played back by `jobs._deliver_later`); a saved transcript or document text reused
 for new work shows the paced step (frozen `Status`) while the real work runs, and the time still owed is
 waited out off the worker (`Result.hold` / `DocResult.hold`, also via `_deliver_later`). Never sleep in the
 worker for pacing: it would hold up everyone else's jobs. The footer shows `replay_steps`, so it always
@@ -141,7 +157,7 @@ matches the wait. Status lines must not mention the cache (`hide_cache`).
 - Audio is decoded with ffmpeg in `transcribe._decode`, not faster-whisper's PyAV path (new PyAV
   breaks it).
 - Telegram: messages are HTML (`parse_mode=HTML`), so escape everything with `html.escape`; split at
-  4096 characters; status edits are throttled and ordered by `Progress`.
+  4096 characters; status edits are throttled and ordered by `sending.Progress`.
 
 **Data:**
 - Schema changes go in `db.SCHEMA` plus a migration in `db.init()` for existing databases
@@ -162,8 +178,17 @@ matches the wait. Status lines must not mention the cache (`hide_cache`).
   reads plainly.
 - User-facing text is short and plain, with one emoji per status line (🔎 🎧 🗣 🎞 🧠 ✅ ⚠️).
 - New settings go in `summarizer/config.py`, `.env.example` and the README's configuration table.
-- New commands need a handler in `main()`, an entry in the per-user command menus (`USER_COMMANDS` /
-  `ADMIN_COMMANDS`), and a line in `HELP` and the README.
+- New commands need a handler in `bot.add_handlers`, an entry in the per-user command menus
+  (`lifecycle.USER_COMMANDS` / `ADMIN_COMMANDS`), and a line in `texts.HELP` and the README.
+- Code layout (`tests/test_layout.py` checks the first two):
+  - Inside `tgbot/`, import modules, never names (`from tgbot import jobs` → `jobs.fail(...)`): tests patch
+    module attributes, and a name imported with `from x import y` would keep the original. Shared state is
+    always `state.x`, so `reset()` and rebinding reach every module.
+  - `summarizer/` never imports `tgbot`, `telegram`, `bot` or `access` (it is mounted into the sandboxes).
+  - Imports go one way: `handlers` / `intake` → `jobs` → `runners` / `delivery` → the leaf modules.
+  - A new limit: `access.LIMITS`, `db.USAGE_FILTERS` and `limits.LIMIT_UI`. A new job kind: `state.JobKind`
+    (with its fields checked in `Job.__post_init__`) and `runners.RUNNERS`. A new result type: subclass
+    `results.JobResult`. A new button: `handlers.button()` first.
 - Keep `README.md` in sync with behavior changes.
 - Commit messages: imperative subject line, a short body explaining why when it isn't obvious.
 
