@@ -94,6 +94,7 @@ def fresh_state(tmp_path, monkeypatch):
     from summarizer import ocr, tts
     monkeypatch.setattr(ocr, "_cuda_ok", None)
     monkeypatch.setattr(tts, "_ready", False)  # voice messages off unless a test turns them on
+    monkeypatch.setattr(tts, "_cuda_ok", None)
     # Pretend the installed Codex knows every feature we disable (asking it would spawn codex).
     monkeypatch.setattr(summarize, "_codex_known_features", set(summarize.CODEX_DISABLED_FEATURES))
 

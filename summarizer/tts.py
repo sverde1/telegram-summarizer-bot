@@ -37,6 +37,25 @@ DOWNLOAD_HOSTS = {"github.com", "objects.githubusercontent.com", "release-assets
 MAX_MODEL_BYTES = 400 * 1024 ** 2
 
 _ready = False  # set by refresh(): models, espeak-ng and settings all fine (checked once, not per summary)
+_cuda_ok: bool | None = None  # whether onnxruntime can use CUDA here (checked once)
+
+
+def device() -> str:
+    """Where Kokoro runs: "cuda" when TTS_DEVICE=cuda and onnxruntime has CUDA, else "cpu" (with a warning
+    once, like OCR and Whisper: a missing GPU means slower voice messages, not none)."""
+    global _cuda_ok
+    if config.TTS_DEVICE != "cuda":
+        return "cpu"
+    if _cuda_ok is None:
+        try:
+            import onnxruntime
+            _cuda_ok = "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+        except ImportError:
+            _cuda_ok = False
+        if not _cuda_ok:
+            log.warning("TTS_DEVICE=cuda, but onnxruntime has no CUDA support (install onnxruntime-gpu); "
+                        "voice messages are made on the CPU")
+    return "cuda" if _cuda_ok else "cpu"
 
 
 def models_dir() -> Path:
@@ -68,7 +87,10 @@ def synthesize(pieces: list[str], workdir: Path, *, voice: str, lang: str, speed
     pcm, ogg = workdir / "speech.pcm", workdir / "speech.ogg"
     args = ["python", "-m", "summarizer.tts_run", "/job/pieces.json", "/job/speech.pcm", voice, lang, str(speed),
             config.ESPEAK_LIB, config.ESPEAK_DATA]
-    run = proc.run(sandbox.command(workdir, args, ro_binds={models or models_dir(): "/models"}), timeout=timeout)
+    gpu = device() == "cuda"
+    env = {"ONNX_PROVIDER": "CUDAExecutionProvider" if gpu else "CPUExecutionProvider"}  # read by kokoro-onnx
+    run = proc.run(sandbox.command(workdir, args, ro_binds={models or models_dir(): "/models"}, env=env, gpu=gpu),
+                   timeout=timeout)
     if run.returncode != 0 or not pcm.exists():
         raise RuntimeError(f"speech failed ({run.returncode}): {run.stderr[-500:]}")
     enc = proc.run([config.FFMPEG, "-v", "error", "-y", "-f", "f32le", "-ar", str(RATE), "-ac", "1",
@@ -214,13 +236,13 @@ def key(text: str, lang: str, voice: str) -> str:
 
 def estimate(chars: int) -> float:
     """Estimated seconds to make a voice message of this many characters."""
-    return LOAD_SECONDS + chars * stats.get("tts:cpu", SPEED_DEFAULT["cpu"])
+    return LOAD_SECONDS + chars * stats.get(f"tts:{device()}", SPEED_DEFAULT[device()])
 
 
 def record_speed(chars: int, seconds: float) -> None:
     """Learns the speed from a finished run (short texts are dominated by the model load)."""
     if chars >= 300:
-        stats.record("tts:cpu", max(seconds - LOAD_SECONDS, 0.1) / chars)
+        stats.record(f"tts:{device()}", max(seconds - LOAD_SECONDS, 0.1) / chars)
 
 
 @dataclass

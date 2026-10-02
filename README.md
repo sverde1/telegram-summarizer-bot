@@ -255,6 +255,7 @@ The database migrates itself on start.
 | `MAX_LINK_DOWNLOAD_MB` | `100` | Largest document downloaded from a Google Drive / Dropbox link. |
 | `TTS_VOICE` | *(empty)* | Kokoro voice for 🔊 voice messages; empty = the default for `SUMMARY_LANGUAGE` (English: `af_heart`). |
 | `TTS_SPEED` | `1.0` | Reading speed, 0.5–2.0. |
+| `TTS_DEVICE` | `cpu` | `cuda` makes voice messages on an NVIDIA GPU (with `onnxruntime-gpu`, see GPU below): seconds instead of about a minute. Falls back to the CPU without CUDA. |
 | `VOICE_CACHE_DAYS` | `7` | Days a made voice message is reused (only Telegram's id for it is stored); then it's made again. |
 | `TTS_DAILY_LIMIT` | `20` | New voice messages a user may have made per 24 h (admins: no limit; `0` = no limit). Reused ones are free, and listening doesn't count toward `DAILY_LIMIT`. `/limit voice` changes it. |
 | `ESPEAK_LIB` / `ESPEAK_DATA` | Debian/Ubuntu paths | The system's espeak-ng, which Kokoro needs. |
@@ -284,7 +285,8 @@ The bot test-runs the model when it loads and falls back to the CPU if CUDA isn'
 
 To run OCR on the GPU too: `.venv/bin/pip uninstall -y onnxruntime && .venv/bin/pip install
 onnxruntime-gpu` (faster-whisper works with either), set `OCR_DEVICE=cuda`, and restart; with the default
-`OCR_ENGINE=auto` that switches OCR to RapidOCR (add the OCR languages again with `/ocrlang`). A page then takes
+`OCR_ENGINE=auto` that switches OCR to RapidOCR (add the OCR languages again with `/ocrlang`). Voice messages
+use the GPU with `TTS_DEVICE=cuda` (same onnxruntime-gpu). A page then takes
 a fraction of a second instead of a few seconds; OCR runs as one process that gets the GPU's devices in its
 sandbox. Without a working CUDA runtime it logs a warning and stays on the CPU.
 

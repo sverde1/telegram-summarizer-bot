@@ -130,3 +130,30 @@ async def test_limit_voice_command(app, telegram):
     assert telegram.texts()[-1] == "✅ Voice-message limit for everyone: 3."
     await send(app, msg_update(60, "/limit"))
     assert telegram.texts()[-1].split("\n")[2] == "🔊 Today: 0 of your 3 new voice messages (last 24 h). 3 left."
+
+
+
+# ---------- device ----------
+
+def test_cuda_when_available_else_cpu(monkeypatch, tmp_path):
+    import sys
+    import types
+    from summarizer import proc
+    monkeypatch.setattr(config, "TTS_DEVICE", "cuda")
+    monkeypatch.setitem(sys.modules, "onnxruntime", types.SimpleNamespace(get_available_providers=lambda: ["CUDAExecutionProvider"]))
+    assert tts.device() == "cuda" and tts.estimate(1000) < 10
+    seen = []
+
+    def run(cmd, **kw):
+        """Records the sandbox command; pretends Kokoro and ffmpeg worked."""
+        seen.append(cmd)
+        out = tmp_path / ("speech.pcm" if len(seen) == 1 else "speech.ogg")
+        out.write_bytes(b"x")
+        return types.SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(proc, "run", run)
+    tts.synthesize(["Hi."], tmp_path, voice="af_heart", lang="en-us", speed=1.0, timeout=60, models=tmp_path)
+    assert "ONNX_PROVIDER" in seen[0] and "CUDAExecutionProvider" in seen[0] and "prlimit" not in seen[0]
+    monkeypatch.setattr(tts, "_cuda_ok", None)
+    monkeypatch.setitem(sys.modules, "onnxruntime", types.SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]))
+    assert tts.device() == "cpu"
