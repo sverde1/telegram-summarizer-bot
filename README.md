@@ -1,4 +1,4 @@
-# Telegram video summarizer
+# Telegram video and book summarizer
 
 A private Telegram bot: send it a YouTube or TikTok link and it replies with
 
@@ -20,6 +20,9 @@ It reads the transcript (captions, or Whisper speech-to-text), looks at the thum
 video frames or TikTok photo-carousel slides when the picture matters. Summaries are written by an LLM
 running on your ChatGPT or Claude subscription, inside a sandbox.
 
+It also summarizes **books and documents** (PDF, EPUB, DOCX, TXT, sent as a file or as a Google Drive /
+Dropbox link): the whole book, or chapter by chapter. Scanned PDFs are read with OCR.
+
 ## Features
 
 - **YouTube** (videos, Shorts, `youtu.be`) and **TikTok** (videos, photo carousels, `vm.`/`vt.` links).
@@ -32,9 +35,12 @@ running on your ChatGPT or Claude subscription, inside a sandbox.
   subscription), or the Claude / OpenAI APIs with an API key, then a model. Default: Codex `gpt-6-sol`.
 - **Live status with ETA** while it works; per-step timings under the result.
 - **Multi-user with admin approval**: `/start` sends the admin an Allow / Deny request.
-- **Books and documents**: PDF, EPUB, DOCX, TXT; the whole book or chapter by chapter. Scanned PDFs are
-  read with OCR (Tesseract or RapidOCR) after the user confirms the estimated time.
-- **Cache**: a video is downloaded and transcribed once; summaries are kept per model.
+- **Books and documents**: PDF, EPUB, DOCX, TXT, uploaded (up to 20 MB) or as a Google Drive / Dropbox
+  link (up to 100 MB); the whole book or chapter by chapter (short, one per message, or a picked chapter).
+  Scanned PDFs are read with OCR (Tesseract or RapidOCR) after the user confirms the estimated time, with
+  their own daily limit; admins add OCR languages with `/ocrlang`.
+- **Cache**: a video is downloaded and transcribed once, a document read (or OCRed) once; summaries are
+  kept per model.
 - **Private by design**: users can't see what others submitted, and the LLM can't touch the machine.
 
 ## Requirements
@@ -322,6 +328,19 @@ file names in `/history`.
 7. **Reply** in Telegram (HTML, split at 4096 characters). Downloaded media and LLM session files are
    deleted after each job (and any leftovers of a crashed run at the next start).
 
+**Books and documents** take the same queue:
+
+1. **Intake:** a file (type and the 20 MB Telegram limit checked) or a Drive/Dropbox link (parsed into the
+   service's own download URL); the user picks whole book / chapters. Each pick passes the same limits.
+2. **Download** from Telegram or the share link (HTTPS, the service's hosts only, size-capped).
+3. **Reading** in a sandbox with no network: the format is told from the bytes; text and chapters come
+   from PDF bookmarks, the EPUB contents, DOCX heading styles, or headings in the text.
+4. **OCR** for scans, after a language check on a few pages and the user's confirmation; pages are stored
+   as they're done.
+5. **LLM:** chapters are packed several per call; long chapters and books are summarized in pieces, then
+   combined. Every summary is cached as soon as it exists.
+6. **Reply:** Title / Author / Summary, or one block per chapter.
+
 Jobs run one at a time from a queue; the status message shows an estimated wait while queued (never the position, which would
 reveal how busy others are), then each stage and an ETA
 learned from this machine's measured speeds. Every external program runs in its own process group, so a
@@ -339,6 +358,11 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 | Claude API | A plain Messages call with no tools. |
 | OpenAI API | A plain Responses call with no tools. Turn 2 continues server-side via `previous_response_id`; the stored responses are deleted after each job. |
 
+- Uploaded files and linked documents are untrusted too. They're parsed only inside a `bwrap` sandbox with
+  no network, no environment and no repository (so no `.env`), under a memory limit; EPUB/DOCX archives
+  are read with size and compression-ratio caps (zip bombs). Share links are never fetched as sent: the
+  bot builds the download URL from the file id and follows redirects only on Google's / Dropbox's hosts.
+  OCR models are downloaded only from fixed sources and checked before use.
 - Who submitted what is visible only to admins. Someone requesting a video another user already
   processed can't tell: they see the same stages as a real run, the answer arrives after half the original
   processing time (at most 2 minutes), and the footer's timings match. This covers summaries, `/transcript`
@@ -356,16 +380,24 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 
 ## Data (`data/`, not in git)
 
-`bot.sqlite3` holds four tables:
+`bot.sqlite3` holds these tables:
 
 - `users`: id, name, username, status (admin / allowed / pending / blocked), chosen `backend` + `model`.
 - `videos`: metadata and transcript, status `processing` → `done` / `failed` (or `waiting` for memory,
   `cancelled`).
 - `summaries`: one per video and model.
-- `requests`: every link sent: who, what, kind, status (`queued` → `processing` → `done` / `failed` /
-  `cancelled`), cache hit, error detail, timestamps.
+- `requests`: every link or document request: who, what, kind, status (`queued` → `processing` → `done` /
+  `failed` / `cancelled`; `waiting` for a chapter pick or an OCR confirmation), cache hit, whether it ran
+  OCR, error detail, timestamps.
+- `uploads`: files and share links users sent (Telegram file id or the link, name, size, the document).
+- `documents` / `document_pages`: a document's metadata and chapters, and its text page by page (from the
+  file or OCR), by the file's SHA-256.
+- `doc_summaries`: book and chapter summaries, per style and model.
+- `ocr_holds`: document requests waiting for an OCR confirmation or an admin's approval.
+- `settings`: values set from Telegram (`/limit`, `/limit ocr`, `/ocrlang`).
 
-Also there: `codex-home/` (the bot's Codex login), `stats.json` (measured speeds for ETAs).
+Also there: `codex-home/` (the bot's Codex login), `stats.json` (measured speeds for ETAs), `tessdata/` and
+`rapidocr/` (OCR language models added with `/ocrlang`).
 
 ## Maintenance
 
@@ -379,6 +411,10 @@ Also there: `codex-home/` (the bot's Codex login), `stats.json` (measured speeds
   `deploy/update-extractors.sh` to upgrade them; no restart needed.
 - **Codex / Claude Code** are installed outside the venv. Every 12 h the bot checks npm for newer
   releases and messages the admins once per version with the update command. New models may need them.
+- **OCR:** Tesseract comes from the system (`sudo apt upgrade` keeps it current); its language models are
+  in `data/tessdata` and are added or removed with `/ocrlang`. Switching `OCR_ENGINE` needs the languages
+  added again for the other engine (RapidOCR has one model per script). RapidOCR updates with the Python
+  dependencies.
 - **New models:** Codex's list updates itself; the Claude Code list is in `summarizer/summarize.py`
   (`CLAUDE_CODE_MODELS`).
 
