@@ -408,6 +408,30 @@ def _private(update: Update) -> bool:
     return bool(update.effective_chat and update.effective_chat.type == "private")
 
 
+async def _button(update: Update, *, admin_only: bool = False,
+                  refusal: str | None = "This isn't available.") -> tuple | None:
+    """The checks every inline button needs, since callback data can be forged and buttons outlive access.
+
+    Private chat, and the user still allowed (or an admin, for admin_only); otherwise the tap is answered with
+    `refusal` and None is returned. Ownership is checked per button (see _owns).
+
+    Returns:
+        (callback query, user id, data split at ":") or None.
+    """
+    q = update.callback_query
+    uid = q.from_user.id
+    allowed = access.is_admin(uid) if admin_only else access.state(uid) in ("admin", "allowed")
+    if not _private(update) or not allowed:
+        await q.answer(refusal)
+        return None
+    return q, uid, (q.data or "").split(":")
+
+
+def _owns(uid: int, owner: int) -> bool:
+    """Whether a user may act on something of `owner`'s: their own, or anything for an admin."""
+    return uid == owner or access.is_admin(uid)
+
+
 async def on_my_chat_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Leaves any group or channel the bot is added to, and tells the admins who added it.
 
@@ -439,12 +463,10 @@ async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     Callback data: `llm:home`, `llm:default`, `llm:b:<backend>` (open a provider's models) or
     `llm:m:<backend>:<model>` (choose a model).
     """
-    q = update.callback_query
-    uid = q.from_user.id
     # Buttons can outlive access (e.g. the user was removed after /models was shown): re-check on every tap.
-    if not _private(update) or access.state(uid) not in ("admin", "allowed"):
-        await q.answer()
+    if not (checked := await _button(update, refusal=None)):
         return
+    q, uid, _ = checked
     parts = (q.data or "").split(":", 3)  # llm:home | llm:default | llm:b:<backend> | llm:m:<backend>:<model>
     # Callback data comes from the client: anything malformed or naming an unknown provider just shows the
     # first step again instead of raising.
@@ -616,11 +638,10 @@ async def on_units_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
     Callback data can be forged: the chat, the user's access and the value (from the fixed set) are checked.
     """
-    q = update.callback_query
-    parts = (q.data or "").split(":")
-    uid = q.from_user.id
-    if (not _private(update) or access.state(uid) not in ("admin", "allowed") or len(parts) != 3
-            or parts[2] not in UNIT_CHOICES.get(parts[1], {})):
+    if not (checked := await _button(update)):
+        return
+    q, uid, parts = checked
+    if len(parts) != 3 or parts[2] not in UNIT_CHOICES.get(parts[1], {}):
         await q.answer("This isn't available.")
         return
     if parts[1] == "sys":
@@ -671,13 +692,14 @@ async def on_cancel_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 
     Only the job's owner or an admin may cancel it; the data is checked, since callback data can be forged.
     """
-    q = update.callback_query
-    _, _, rid = (q.data or "").partition(":")
-    job = _jobs.get(int(rid)) if rid.isdigit() else None
-    if not _private(update) or job is None or job.cancel_reason:
+    if not (checked := await _button(update, refusal="This request isn't waiting any more.")):
+        return
+    q, uid, parts = checked
+    job = _jobs.get(int(parts[1])) if len(parts) == 2 and parts[1].isdigit() else None
+    if job is None or job.cancel_reason:
         await q.answer("This request isn't waiting any more.")
         return
-    if q.from_user.id != job.user_id and not access.is_admin(q.from_user.id):
+    if not _owns(uid, job.user_id):
         await q.answer("Only the person who sent this link can cancel it.")
         return
     await _cancel_job(ctx.application, job, CANCELLED)
@@ -690,11 +712,10 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     Used by both the access-request message and /users. After the change the user's command menu is
     re-synced, and a newly allowed user is told they're in.
     """
-    q = update.callback_query
     # Only the admins get these buttons, but callback data can be forged: check on every tap.
-    if not _private(update) or not access.is_admin(q.from_user.id):
-        await q.answer("Admins only.")
+    if not (checked := await _button(update, admin_only=True, refusal="Admins only.")):
         return
+    q = checked[0]
     action, _, uid_s = (q.data or "").partition(":")
     if action not in ("allow", "block", "remove") or not uid_s.isdigit():
         await q.answer()
@@ -843,8 +864,13 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
         await update.message.reply_text(refusal)
         return
     status = await update.message.reply_text(_queued_message())
-    kind = "transcript" if opts.get("transcript_only") else "again" if opts.get("use_cache") is False else "summary"
+    kind = _request_kind(opts.get("transcript_only", False), opts.get("use_cache", True))
     await _start_job(uid, update.effective_chat.id, status.message_id, url, kind, **opts)
+
+
+def _request_kind(transcript_only: bool, use_cache: bool) -> str:
+    """The request's kind as /history and the limits record it: "transcript", "again" or "summary"."""
+    return "transcript" if transcript_only else "again" if not use_cache else "summary"
 
 
 # ---------- uploaded documents ----------
@@ -899,8 +925,9 @@ def _chapter_list(upload_id: int, name: str, chapters: list[dict], page: int) ->
     return text, InlineKeyboardMarkup(rows)
 
 
-MEDIA_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".wma", ".amr",
-                    ".mp4", ".mov", ".mkv", ".webm", ".avi", ".3gp", ".m4v", ".mpeg", ".mpg", ".wmv"}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".wma", ".amr"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".3gp", ".m4v", ".mpeg", ".mpg", ".wmv"}
+MEDIA_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS  # recordings, as opposed to documents
 MEDIA_TOO_BIG = ("⚠️ This file is larger than 20 MB, the most Telegram lets bots download. Upload it to Google "
                  "Drive or Dropbox, share it as \"Anyone with the link\" and send me the link.")
 UNREADABLE_MEDIA = "⚠️ I couldn't read this file as audio or video."
@@ -924,8 +951,8 @@ def _media_label(msg) -> tuple[str, object]:
     if msg.video:
         return f"🎬 {msg.video.file_name or 'Video'}", msg.video
     d = msg.document
-    is_video = (d.mime_type or "").startswith("video/") or Path(d.file_name or "").suffix.lower() in {
-        ".mp4", ".mov", ".mkv", ".webm", ".avi", ".3gp", ".m4v", ".mpeg", ".mpg", ".wmv"}
+    is_video = ((d.mime_type or "").startswith("video/")
+                or Path(d.file_name or "").suffix.lower() in VIDEO_EXTENSIONS)
     return f"{'🎬' if is_video else '🎵'} {d.file_name or 'Recording'}", d
 
 
@@ -966,7 +993,7 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     transcript = (msg.caption or "").strip().lower().startswith("/transcript")
     status = await msg.reply_text(_queued_message())
     await _start_job(uid, update.effective_chat.id, status.message_id, label,
-                     "transcript" if transcript else "summary", upload_id=upload_id, media=True,
+                     _request_kind(transcript, True), upload_id=upload_id, media=True,
                      transcript_only=transcript)
 
 
@@ -992,9 +1019,6 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     upload_id = db.add_upload(update.effective_user.id, d.file_id, d.file_unique_id, name, d.file_size)
     await update.message.reply_text(f"📄 {name} ({_fmt_size(d.file_size)})\nHow should I summarize it?",
                                     reply_markup=_book_menu(upload_id))
-
-
-AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".wma", ".amr"}
 
 
 def _link_kind(name: str, content_type: str) -> str | None:
@@ -1062,8 +1086,7 @@ async def _handle_link(update: Update, url: str, link: links.FileLink, transcrip
     upload_id = db.add_link_upload(uid, url, label)
     status = await update.message.reply_text(_queued_message())
     await _start_job(uid, update.effective_chat.id, status.message_id, label,
-                     "transcript" if transcript_only else "again" if not use_cache else "summary",
-                     upload_id=upload_id, media=True, transcript_only=transcript_only, use_cache=use_cache)
+                     _request_kind(transcript_only, use_cache), upload_id=upload_id, media=True, transcript_only=transcript_only, use_cache=use_cache)
 
 
 async def _offer_link(update: Update, url: str, link: links.FileLink) -> None:
@@ -1091,12 +1114,11 @@ async def on_book_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     chapter list; ch:<n> summarizes one chapter. Callback data can be forged, so everything is re-checked:
     private chat, access, and that the upload is the user's own (or the user is an admin).
     """
-    q = update.callback_query
-    parts = (q.data or "").split(":")
-    uid = q.from_user.id
+    if not (checked := await _button(update)):
+        return
+    q, uid, parts = checked
     upload = db.get_upload(int(parts[1])) if len(parts) >= 3 and parts[1].isdigit() else None
-    if (not _private(update) or access.state(uid) not in ("admin", "allowed") or upload is None
-            or (upload["user_id"] != uid and not access.is_admin(uid))):
+    if upload is None or not _owns(uid, upload["user_id"]):
         await q.answer("This isn't available.")
         return
     action, arg = parts[2], (int(parts[3]) if len(parts) == 4 and parts[3].isdigit() else None)
@@ -1304,11 +1326,6 @@ def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True,
         One or more HTML messages, each at most TG_LIMIT characters.
     """
     s = r.summary
-
-    def text(raw: str) -> list[str]:
-        """Escaped pieces for a block of text, one or more per line."""
-        return [piece for line in raw.split("\n") for piece in _escaped_pieces(line)]
-
     title = _cap(s.get("title") or r.meta.get("title", ""), FIELD_LIMITS["title"])
     if s.get("is_clickbait") and s.get("clickbait_answer"):
         answer = _cap(units.convert(s["clickbait_answer"], *units_), FIELD_LIMITS["clickbait_answer"])
@@ -1316,9 +1333,9 @@ def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True,
         answer = "✅ Not clickbait - the title matches the content."
     footer = _cap(details(r, waited, reveal_cache), 1000) + "\n" + r.url
     # A recording someone sent has no published title or thumbnail: nothing to call clickbait.
-    clickbait = [] if r.platform == "file" else ["<b>Clickbait answer:</b>", *text(answer), ""]
-    pieces = ["<b>Title:</b>", *text(title), "", *clickbait,
-              "<b>Summary:</b>", *text(_cap(units.convert(s.get("summary", ""), *units_), FIELD_LIMITS["summary"])), ""]
+    clickbait = [] if r.platform == "file" else ["<b>Clickbait answer:</b>", *_text(answer), ""]
+    pieces = ["<b>Title:</b>", *_text(title), "", *clickbait,
+              "<b>Summary:</b>", *_text(_cap(units.convert(s.get("summary", ""), *units_), FIELD_LIMITS["summary"])), ""]
     # The footer is one italic piece: an <i> split across two messages would break both.
     pieces.append(f"<i>{html.escape(_cap(footer, 1500))}</i>")
     return _pack(pieces)
@@ -1708,20 +1725,7 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             # Replayed in a separate task so the queue keeps moving meanwhile; the task ends the job.
             _delayed[job.request_id] = asyncio.create_task(_deliver_later(app, job, result, waited))
             return True
-        if isinstance(result, documents.DocResult) and result.kind == "pick":
-            await _show_pick_list(app, job, result)
-            return False
-        await _deliver(app, job, result, waited)
-        db.update_request(job.request_id, status="done", cached=int(result.cached))
-        if not result.cached and not job.transcript_only:
-            # Only fresh summaries teach the wait estimate: cache hits (~1 s) and transcripts would drag
-            # the average far below what a queued link really waits for.
-            if total := (result.summary or {}).get("_stats", {}).get("total"):
-                stats.record("job", total)
-        try:
-            await app.bot.delete_message(job.chat_id, job.status_id)
-        except TelegramError:
-            pass  # the user deleted it already, or can't be reached: the result is delivered either way
+        await _finish(app, job, result, waited)
     except Exception as e:
         # A cancel wins over whatever error it caused: e.g. a download killed by the cancel (or by systemd
         # at shutdown) must be reported as the cancel, not as "couldn't load this video".
@@ -1815,13 +1819,12 @@ async def on_ocr_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     Allow/Deny buttons (once per request). Everything is re-checked: chat, access, ownership, the request
     still waiting, the page cap, the OCR limit.
     """
-    q = update.callback_query
-    parts = (q.data or "").split(":")
-    uid = q.from_user.id
+    if not (checked := await _button(update)):
+        return
+    q, uid, parts = checked
     req = db.get_request(int(parts[1])) if len(parts) == 3 and parts[1].isdigit() else None
     hold = db.get_ocr_hold(req["id"]) if req else None
-    if (not _private(update) or access.state(uid) not in ("admin", "allowed") or not hold
-            or (req["user_id"] != uid and not access.is_admin(uid))):
+    if not hold or not _owns(uid, req["user_id"]):
         await q.answer("This isn't available.")
         return
     if req["status"] != "waiting":
@@ -1877,11 +1880,9 @@ async def on_ocr_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def on_ocr_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles an admin's Allow/Deny on a long-scan request (`ocradm:<request id>:yes|no`)."""
-    q = update.callback_query
-    parts = (q.data or "").split(":")
-    if not _private(update) or not access.is_admin(q.from_user.id):
-        await q.answer("Only admins can do this.")
+    if not (checked := await _button(update, admin_only=True, refusal="Only admins can do this.")):
         return
+    q, _, parts = checked
     req = db.get_request(int(parts[1])) if len(parts) == 3 and parts[1].isdigit() else None
     hold = db.get_ocr_hold(req["id"]) if req else None
     if not hold or req["status"] != "waiting":
@@ -1930,6 +1931,28 @@ async def _download_link(upload: dict, path: Path, head: str, progress: "Progres
     return upload
 
 
+async def _fetch_telegram_file(app: Application, file_id: str, path: Path, too_big: str, error) -> None:
+    """Downloads a file the user sent to Telegram (bots may download only up to 20 MB).
+
+    Args:
+        app: The running application.
+        file_id: Telegram's file id.
+        path: Where to save it.
+        too_big: The user message when Telegram refuses the size.
+        error: The exception class to raise, called with (user message, technical detail).
+
+    Raises:
+        error: Too big, or the download failed.
+    """
+    try:
+        tg_file = await app.bot.get_file(file_id)
+        await tg_file.download_to_drive(path)
+    except BadRequest as e:
+        raise error(too_big if "too big" in str(e).lower() else DOWNLOAD_FAILED, str(e))
+    except TelegramError as e:
+        raise error(DOWNLOAD_FAILED, str(e))
+
+
 async def _run_media(app: Application, job: Job, progress: "Progress") -> pipeline.Result:
     """Runs a recording job: gets the file (Telegram or a share link), reads it in the sandbox, summarizes it.
 
@@ -1956,14 +1979,7 @@ async def _run_media(app: Application, job: Job, progress: "Progress") -> pipeli
             if upload["source_url"]:
                 await _download_link(upload, path, head, progress, config.MAX_MEDIA_LINK_MB, rename=False)
             else:
-                try:
-                    tg_file = await app.bot.get_file(upload["file_id"])
-                    await tg_file.download_to_drive(path)
-                except BadRequest as e:
-                    raise pipeline.PipelineError(MEDIA_TOO_BIG if "too big" in str(e).lower() else DOWNLOAD_FAILED,
-                                                 detail=str(e))
-                except TelegramError as e:
-                    raise pipeline.PipelineError(DOWNLOAD_FAILED, detail=str(e))
+                await _fetch_telegram_file(app, upload["file_id"], path, MEDIA_TOO_BIG, pipeline.PipelineError)
             if job.cancel_reason:
                 raise proc.ProcCancelled("cancelled")
             try:
@@ -2014,13 +2030,7 @@ async def _run_document(app: Application, job: Job, progress: "Progress") -> doc
             if upload["source_url"]:
                 upload = await _download_link(upload, path, head, progress)
             else:
-                try:
-                    tg_file = await app.bot.get_file(upload["file_id"])
-                    await tg_file.download_to_drive(path)
-                except BadRequest as e:
-                    raise documents.DocumentError(TOO_BIG if "too big" in str(e).lower() else DOWNLOAD_FAILED, str(e))
-                except TelegramError as e:
-                    raise documents.DocumentError(DOWNLOAD_FAILED, str(e))
+                await _fetch_telegram_file(app, upload["file_id"], path, TOO_BIG, documents.DocumentError)
             if job.cancel_reason:
                 raise proc.ProcCancelled("cancelled")
         return await asyncio.to_thread(
@@ -2037,6 +2047,32 @@ async def _show_pick_list(app: Application, job: Job, result: documents.DocResul
     text, markup = _chapter_list(job.upload_id, result.name, result.doc["chapters"], 0)
     await app.bot.edit_message_text(text, chat_id=job.chat_id, message_id=job.status_id, reply_markup=markup)
     db.update_request(job.request_id, status="waiting")
+
+
+async def _finish(app: Application, job: Job, result, waited: float) -> None:
+    """Hands a finished job's result to the user and closes its request.
+
+    A document in "pick" mode shows its chapter list instead (the request stays open for the pick). Otherwise
+    the result is delivered, the request marked done and the status message deleted.
+
+    Raises:
+        UserBlockedBot: The user can't be reached.
+        TelegramError: Telegram refused the result.
+    """
+    if isinstance(result, documents.DocResult) and result.kind == "pick":
+        await _show_pick_list(app, job, result)
+        return
+    await _deliver(app, job, result, waited)
+    db.update_request(job.request_id, status="done", cached=int(result.cached))
+    # Only fresh summaries teach the wait estimate: cache hits (~1 s) and transcripts would drag the average
+    # far below what a queued link really waits for. The worker's time, without any privacy pause.
+    if not result.cached and not job.transcript_only:
+        if total := (result.summary or {}).get("_stats", {}).get("total"):
+            stats.record("job", total)
+    try:
+        await app.bot.delete_message(job.chat_id, job.status_id)
+    except TelegramError:
+        pass  # the user deleted it already, or can't be reached: the result is delivered either way
 
 
 async def _deliver_later(app: Application, job: Job, result: pipeline.Result, waited: float) -> None:
@@ -2073,17 +2109,7 @@ async def _deliver_later(app: Application, job: Job, result: pipeline.Result, wa
             await progress.close()
         if job.cancel_reason:
             return
-        if isinstance(result, documents.DocResult) and result.kind == "pick":
-            await _show_pick_list(app, job, result)
-            return
-        await _deliver(app, job, result, waited)
-        db.update_request(job.request_id, status="done", cached=int(result.cached))
-        if not result.cached and (total := (result.summary or {}).get("_stats", {}).get("total")):
-            stats.record("job", total)  # the worker's time for it, without the pause
-        try:
-            await app.bot.delete_message(job.chat_id, job.status_id)
-        except TelegramError:
-            pass
+        await _finish(app, job, result, waited)
     except proc.ProcCancelled:
         await _report_cancel(app, job)  # cancelled between parts of the summary
     except UserBlockedBot:
@@ -2191,12 +2217,11 @@ async def on_voice_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     user's own (or the user is an admin) and was delivered. Listening doesn't count toward the daily limit;
     a voice message that has to be made counts toward TTS_DAILY_LIMIT (a reused one is free).
     """
-    q = update.callback_query
-    parts = (q.data or "").split(":")
-    uid = q.from_user.id
+    if not (checked := await _button(update)):
+        return
+    q, uid, parts = checked
     req = db.get_request(int(parts[1])) if len(parts) == 2 and parts[1].isdigit() else None
-    if (not _private(update) or access.state(uid) not in ("admin", "allowed") or req is None
-            or (req["user_id"] != uid and not access.is_admin(uid))):
+    if req is None or not _owns(uid, req["user_id"]):
         await q.answer("This isn't available.")
         return
     spoken = db.get_spoken(req["id"])
