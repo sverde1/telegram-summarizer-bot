@@ -58,6 +58,9 @@ MAX_DURATION_MIN = int(_env("MAX_DURATION_MIN", "180"))
 MAX_QUEUED_PER_USER = int(_env("MAX_QUEUED_PER_USER", "3"))  # queued + running
 MAX_QUEUE = int(_env("MAX_QUEUE", "20"))
 AGAIN_COOLDOWN_MIN = int(_env("AGAIN_COOLDOWN_MIN", "10"))
+# Links a non-admin may send per rolling 24 hours (0 = no limit). Only the starting value: once an admin
+# changes it with /limit, the value stored in the database wins.
+DAILY_LIMIT = int(_env("DAILY_LIMIT", "100"))
 MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
 SHORT_VIDEO_SEC = int(_env("SHORT_VIDEO_SEC", "180"))  # up to this long: denser frame sampling
 # Whisper may use at most this share of the machine's RAM; a video that doesn't fit right now waits (other

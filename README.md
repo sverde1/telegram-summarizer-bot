@@ -227,6 +227,7 @@ The database migrates itself on start.
 | `MAX_QUEUED_PER_USER` | `3` | Videos one user may have queued or running at once (admins: no limit). |
 | `MAX_QUEUE` | `20` | Total videos in the queue; new links are refused beyond that (admins excepted). |
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |
+| `DAILY_LIMIT` | `100` | Links a user may send per rolling 24 h; every accepted link counts (`/again`, `/transcript`, cache hits, failures). `0` = no limit; admins: no limit. Only the starting value: once changed with `/limit`, the stored value wins. |
 | `MAX_FRAMES` / `MAX_SLIDES` | `16` / `35` | Images sent to the LLM. |
 | `SHORT_VIDEO_SEC` | `180` | Up to this length, frames are also sampled every ~2 s. |
 
@@ -252,7 +253,9 @@ The bot test-runs the model when it loads and falls back to the CPU if CUDA isn'
 | `/transcript <url>` | users | The raw transcript as a `.txt` file. |
 | `/history` | users | Your recent requests (admins: everyone's, with who sent them). |
 | `/models` | users | Show or choose the AI: provider first, then model. |
-| `/users` | admins | Users with Allow / Deny / Remove / Unblock buttons and their AI choice. |
+| `/limit` | users | Your daily limit: used in the last 24 h and how many are left. |
+| `/limit` | admins | Show the daily limit and per-user overrides. `/limit 50` sets it for everyone, `/limit <user id> 200` for one user, `/limit <user id> default` removes the override; `0` = no limit. |
+| `/users` | admins | Users with Allow / Deny / Remove / Unblock buttons, their AI choice and daily limit with today's usage. |
 | `/start` | strangers | Request access. |
 
 The command menu adapts per user: strangers only see `/start`.
@@ -260,7 +263,7 @@ The command menu adapts per user: strangers only see `/start`.
 ## How it works
 
 1. **Link check** as soon as the link arrives: only YouTube/TikTok hosts, no network needed; then the
-   queue limits (3 per user, 20 in total; admins exempt).
+   daily limit (100 links per 24 h by default) and queue limits (3 per user, 20 in total); admins exempt.
 2. **URL** → platform + id (tracking parameters stripped, TikTok short links resolved hop by hop).
 3. **Lookup** with yt-dlp. TikTok carousels are detected here (no video formats); live streams and
    videos of unknown length are refused.

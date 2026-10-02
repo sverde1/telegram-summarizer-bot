@@ -1,6 +1,7 @@
 """Telegram bot: send a YouTube/TikTok link, get back title, clickbait answer and summary."""
 import asyncio
 import collections
+import math
 import datetime as dt
 import html
 import io
@@ -36,10 +37,13 @@ HELP = (
     "/again <url> - ignore the cache and summarize again\n"
     "/transcript <url> - send the raw transcript as a file\n"
     "/history - your recent requests\n"
-    "/models - show or choose the AI (Codex or Claude) and model"
+    "/models - show or choose the AI (Codex or Claude) and model\n"
+    "/limit - how many videos you can still send today"
 )
 ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n"
-              "/history - recent requests from all users (who sent what, cache hits)")
+              "/history - recent requests from all users (who sent what, cache hits)\n"
+              "/limit - daily limits: /limit 50 (everyone), /limit <user id> 200 (one user), "
+              "/limit <user id> default, /limit 0 (no limit)")
 
 
 @dataclass
@@ -242,7 +246,7 @@ async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return "default AI"
         return f"{summarize.BACKEND_NAMES.get(u['backend'], u['backend'] or '')} · {u['model'] or 'default'}"
 
-    admins = "\n".join(f"• {access.label(u['id'], u)}: {llm(u)}" for u in users["admin"])
+    admins = "\n".join(f"• {access.label(u['id'], u)}: {llm(u)} · no limit" for u in users["admin"])
     # Admins have a users row too (status "admin", for their settings) but aren't one of the managed
     # STATES; count only the managed ones, or the "no other users" hint would never show.
     others = sum(len(users[st]) for st in access.STATES)
@@ -253,13 +257,16 @@ async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # "remove" doubles as Unblock: forgetting a blocked user lets them /start a new request.
     actions = {"allowed": [("🗑 Remove", "remove")], "pending": [("✅ Allow", "allow"), ("❌ Deny", "block")],
                "blocked": [("↩️ Unblock", "remove")]}
-    titles = {"allowed": "✅ Allowed", "pending": "⏳ Pending", "blocked": "⛔ Blocked"}
+    glob = access.global_daily_limit()
+    titles = {"allowed": f"✅ Allowed (daily limit: {glob or 'none'})", "pending": "⏳ Pending",
+              "blocked": "⛔ Blocked"}
     for st in access.STATES:
         if not users[st]:
             continue
         rows = [[InlineKeyboardButton(f"{text}: {u['name'] or u['id']}", callback_data=f"{act}:{u['id']}")
                  for text, act in actions[st]] for u in users[st]]
-        lines = "\n".join(f"• {access.label(u['id'], u)}" + (f": {llm(u)}" if st == "allowed" else "")
+        lines = "\n".join(f"• {access.label(u['id'], u)}"
+                          + (f": {llm(u)} · {_limit_label(u['id'])}" if st == "allowed" else "")
                           for u in users[st])
         await update.message.reply_text(f"{titles[st]}\n{lines}", reply_markup=InlineKeyboardMarkup(rows))
 
@@ -443,6 +450,61 @@ async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         pass
 
 
+def _limit_label(uid: int) -> str:
+    """Daily-limit status for the /users list, e.g. "12/100 today (default)", "3/200 today" or "no limit"."""
+    used, limit, is_default, _ = _daily_status(uid)
+    if not limit:  # None (admin) or 0 (switched off)
+        return "no limit"
+    return f"{used}/{limit} today" + (" (default)" if is_default else "")
+
+
+async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /limit: users see their own daily status; admins see and change the limits.
+
+    Admin forms: `/limit` (show), `/limit 50` (everyone), `/limit <user id> 200` (one user),
+    `/limit <user id> default` (remove the override), `0` meaning no limit.
+    """
+    if not await guard(update, ctx):
+        return
+    uid = update.effective_user.id
+    if not access.is_admin(uid):
+        used, limit, _, frees_in = _daily_status(uid)
+        if not limit:
+            await update.message.reply_text(f"📊 Today: {used} videos (last 24 h). You have no daily limit.")
+        elif used >= limit:
+            await update.message.reply_text(f"📊 Today: {used} of your {limit} videos (last 24 h). You can send "
+                                            f"more in about {_fmt_until(frees_in or 0)}.")
+        else:
+            await update.message.reply_text(f"📊 Today: {used} of your {limit} videos (last 24 h). "
+                                            f"{limit - used} left.")
+        return
+    args = ctx.args
+    if not args:
+        glob = access.global_daily_limit()
+        overrides = [u for u in access.all_users()["allowed"] if u.get("daily_limit") is not None]
+        lines = [f"📊 Daily limit for everyone: {glob or 'none'} videos per 24 h."]
+        lines += [f"• {access.label(u['id'], u)}: {u['daily_limit'] or 'no limit'}" for u in overrides]
+        lines.append("\nChange it: /limit 50 · one user: /limit <user id> 200 · /limit <user id> default · "
+                     "0 = no limit")
+        await update.message.reply_text("\n".join(lines))
+        return
+    if len(args) == 1 and args[0].isdigit():
+        db.set_setting("daily_limit", str(int(args[0])))
+        await update.message.reply_text(f"✅ Daily limit for everyone: {int(args[0]) or 'none'}.")
+        return
+    if len(args) == 2 and args[0].isdigit() and (args[1].isdigit() or args[1] == "default"):
+        target = int(args[0])
+        value = None if args[1] == "default" else int(args[1])
+        if access.is_admin(target) or not db.set_user_daily_limit(target, value):
+            await update.message.reply_text("⚠️ No such user (admins have no limit).")
+            return
+        who = access.label(target, db.get_user(target))
+        text = "back to the default" if value is None else (value or "no limit")
+        await update.message.reply_text(f"✅ Daily limit for {who}: {text}.")
+        return
+    await update.message.reply_text("Usage: /limit · /limit 50 · /limit <user id> 200 · /limit <user id> default")
+
+
 async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles /history: recent requests, admins see everyone's (with who sent them), users only their own.
 
@@ -531,6 +593,27 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 JOB_SECONDS_DEFAULT = 60  # assumed time per job until real jobs have been measured
+DAY = 86400  # the daily limit counts links in a rolling 24-hour window
+
+
+def _fmt_until(seconds: float) -> str:
+    """Coarse time until something, rounded up: "25 min" under an hour, else "3 h"."""
+    if seconds < 3600:
+        return f"{max(1, math.ceil(seconds / 60))} min"
+    return f"{math.ceil(seconds / 3600)} h"
+
+
+def _daily_status(uid: int) -> tuple[int, int | None, bool, float | None]:
+    """A user's usage against their daily limit.
+
+    Returns:
+        (used in the last 24 h, limit (None for admins, 0 = no limit), whether the limit is the global
+        default, seconds until a slot frees up when the limit is reached, else None).
+    """
+    used, oldest = db.daily_usage(uid, DAY)
+    limit, is_default = access.daily_limit(uid)
+    frees_in = (oldest + DAY - time.time()) if limit and used >= limit and oldest else None
+    return used, limit, is_default, frees_in
 
 
 def _queued_message() -> str:
@@ -575,6 +658,12 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
             return
         # Every unfinished job counts (queued, running, waiting for memory, replaying), not just the queue.
         # The count isn't shown: it would tell users how busy the others are.
+        used, limit, _, frees_in = _daily_status(uid)
+        if limit and used >= limit:
+            await update.message.reply_text(
+                f"⏳ You've reached today's limit of {limit} videos. You can send more in about "
+                f"{_fmt_until(frees_in or 0)}.")
+            return
         if len(_jobs) >= config.MAX_QUEUE:
             await update.message.reply_text("⏳ The bot is busy right now. Please try again in a few minutes.")
             return
@@ -1313,11 +1402,13 @@ USER_COMMANDS = [
     BotCommand("transcript", "Get the raw transcript as a file: /transcript <url>"),
     BotCommand("history", "Your recent requests"),
     BotCommand("models", "Show or choose the AI: Codex or Claude, then the model"),
+    BotCommand("limit", "Your daily limit"),
 ]
 # Admin-specific commands first; /history is re-described ("all users"), so the user version is dropped.
 ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock"),
-                  BotCommand("history", "Recent requests from all users")] + [
-    c for c in USER_COMMANDS if c.command != "history"]
+                  BotCommand("history", "Recent requests from all users"),
+                  BotCommand("limit", "Daily limits: show or set")] + [
+    c for c in USER_COMMANDS if c.command not in ("history", "limit")]
 
 
 async def sync_commands(bot, uid: int) -> None:
@@ -1454,7 +1545,7 @@ def add_handlers(app: Application) -> None:
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     for name, handler in [("start", on_start), ("help", on_help), ("again", command(use_cache=False)),
                           ("transcript", command(transcript_only=True)), ("users", on_users),
-                          ("history", on_history), ("models", on_models)]:
+                          ("history", on_history), ("models", on_models), ("limit", on_limit)]:
         app.add_handler(CommandHandler(name, handler, filters=new))
     # Order matters: the first matching handler wins, so the picker's `llm:` buttons must be registered
     # before the catch-all admin-button handler.

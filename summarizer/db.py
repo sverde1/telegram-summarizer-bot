@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS summaries (
     created_at   REAL NOT NULL,
     PRIMARY KEY (platform, video_id, backend, model)
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,                    -- e.g. daily_limit (set with /limit)
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS requests (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     INTEGER NOT NULL,
@@ -117,6 +121,8 @@ def init() -> None:
         for col in ("backend", "model"):  # databases created before per-user models
             if col not in cols:
                 c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+        if "daily_limit" not in cols:  # databases created before per-user daily limits
+            c.execute("ALTER TABLE users ADD COLUMN daily_limit INTEGER")
         vcols = {r["name"] for r in c.execute("PRAGMA table_info(videos)")}
         if "result" in vcols:  # summaries used to live in videos (one per video): move them out
             for r in c.execute("SELECT platform, video_id, result, frames_used, updated_at FROM videos "
@@ -393,6 +399,41 @@ def update_request(req_id: int, **fields) -> None:
     cols = ", ".join(f"{k}=?" for k in fields)
     with _db() as c:
         c.execute(f"UPDATE requests SET {cols} WHERE id=?", (*fields.values(), req_id))
+
+
+def get_setting(key: str) -> str | None:
+    """A value from the settings table (set by admins at runtime), or None if never set."""
+    with _db() as c:
+        row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    """Stores a setting (overwrites any earlier value)."""
+    with _db() as c:
+        c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  (key, value))
+
+
+def set_user_daily_limit(uid: int, limit: int | None) -> bool:
+    """Sets (or with None removes) one user's daily-limit override. Returns False if the user is unknown."""
+    with _db() as c:
+        return c.execute("UPDATE users SET daily_limit=? WHERE id=?", (limit, uid)).rowcount > 0
+
+
+def daily_usage(uid: int, window: float = 86400) -> tuple[int, float | None]:
+    """How many links a user sent in the last `window` seconds, and when the oldest of them was sent.
+
+    Every request row counts (summaries, /again, /transcript; finished, failed or cancelled): the limit is
+    on links sent. Refused links never get a row.
+
+    Returns:
+        (count, unix time of the oldest counted request or None).
+    """
+    with _db() as c:
+        row = c.execute("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM requests WHERE user_id=? AND created_at>?",
+                        (uid, time.time() - window)).fetchone()
+    return row["n"], row["oldest"]
 
 
 def fail_stale_requests() -> int:

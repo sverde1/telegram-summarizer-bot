@@ -83,3 +83,24 @@ def label(uid: int, info: dict | None) -> str:
     info = info or {}
     name = info.get("name") or "?"
     return f"{name} (@{info['username']}, {uid})" if info.get("username") else f"{name} ({uid})"
+
+
+def global_daily_limit() -> int:
+    """Links per 24 h for users without an override: the /limit setting, else DAILY_LIMIT (0 = no limit)."""
+    stored = db.get_setting("daily_limit")
+    return int(stored) if stored is not None else config.DAILY_LIMIT
+
+
+def daily_limit(uid: int) -> tuple[int | None, bool]:
+    """A user's daily limit.
+
+    Returns:
+        (limit, is_default): limit None for admins (never limited), 0 = no limit; is_default is True when it
+        comes from the global setting rather than a per-user override.
+    """
+    if is_admin(uid):
+        return None, False
+    u = db.get_user(uid)
+    if u and u.get("daily_limit") is not None:
+        return u["daily_limit"], False
+    return global_daily_limit(), True

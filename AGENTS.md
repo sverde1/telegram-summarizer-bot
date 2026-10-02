@@ -83,9 +83,10 @@ How the tests are isolated (`tests/conftest.py`):
 user message and put raw tool output, paths or exception text in `detail` (admins see it, users never).
 Anything unexpected becomes the generic "something went wrong" message plus an admin notice.
 
-**Abuse limits** (keep them when changing the queue): per-user and total queue limits, the `/again`
-cooldown, the pending-request cap and reply throttling, the memory guard, and the frame-grab cap. Admins
-are exempt from the queue limits.
+**Abuse limits** (keep them when changing the queue): the daily limit (global in the `settings` table,
+per-user override in `users.daily_limit`, read from the database on each check), per-user and total queue
+limits, the `/again` cooldown, the pending-request cap and reply throttling, the memory guard, and the
+frame-grab cap. Admins are exempt from the daily and queue limits.
 
 **Privacy:** who submitted which video is visible only to admins. Regular users may only learn that a
 result was cached if they requested that video themselves (`db.user_saw_video`); otherwise a cached
