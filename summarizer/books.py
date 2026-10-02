@@ -8,8 +8,11 @@ Every summary is cached by document, part, style and model as soon as it exists,
 re-run after a cancel or a restart) only does what is missing.
 """
 import html
+import math
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import config, db, pipeline, proc, stats, summarize
 
@@ -72,6 +75,7 @@ class Books:
         self.chapters = self.doc["chapters"]
         self.llm = summarize.llm_label(backend, model)
         self.steps: list[tuple[str, float]] = []  # (label, seconds) for the footer
+        self._lock = threading.Lock()  # calls run in parallel threads (chapters_summaries)
 
     @property
     def pages(self) -> dict[int, str]:
@@ -86,11 +90,12 @@ class Books:
         answer, answered_by = summarize.ask(self.backend, self.model, summarize.BOOK_SYSTEM,
                                             f"{system_extra}\n\n{text}", schema)
         proc.check_cancelled()  # an API call can't be interrupted; at least don't go on after it
-        if answered_by:
-            self.llm = summarize.llm_label(self.backend, answered_by)
         took = time.monotonic() - t
         stats.record(f"llm:{self.backend}", took / pipeline._llm_load(len(text), 0))
-        self.steps.append(("summary", took))
+        with self._lock:
+            if answered_by:
+                self.llm = summarize.llm_label(self.backend, answered_by)
+            self.steps.append(("summary", took))
         return answer
 
     def _eta(self, chars: int, calls: int = 1) -> float:
@@ -124,40 +129,77 @@ class Books:
             size += n
         if current:
             batches.append(current)
-        total_chars = sum(len(chapter_text(self.pages, self.chapters[i])) for i in todo)
-        calls = len(batches) + sum(len(_pieces(chapter_text(self.pages, self.chapters[i]), chunk)) + 1 for i in big)
-        finished = len(indices) - len(todo)
-        for batch in batches:
-            label = self._label(batch, finished, len(indices))
-            self.status(f"🧠 {self.llm}: {label}…", self._eta(total_chars, calls))
-            body = "\n".join(f'<chapter index="{i}" title="{html.escape(self.chapters[i]["title"])}">\n'
-                             f'{chapter_text(self.pages, self.chapters[i])}\n</chapter>' for i in batch)
-            answer = self._ask(summarize.CHAPTERS_PROMPT.format(length=_length(style, budget)),
-                               f"{_material(self.doc)}\n{body}", summarize.CHAPTERS_SCHEMA)
-            got = {e["index"]: e["summary"] for e in answer["chapters"] if e.get("index") in batch}
-            if missing := [i for i in batch if not got.get(i, "").strip()]:
-                raise summarize.SummaryError(summarize.AI_FAILED, f"the AI left out chapters {missing}")
-            for i in batch:
-                db.save_doc_summary(self.sha, str(i), style, self.backend, self.model, {"summary": got[i]})
-                done[i] = got[i]
-            finished += len(batch)
-            calls -= 1
-            total_chars -= sum(len(chapter_text(self.pages, self.chapters[i])) for i in batch)
-        for i in big:
-            done[i] = self._long_chapter(i, style, budget, finished, len(indices))
-            db.save_doc_summary(self.sha, str(i), style, self.backend, self.model, {"summary": done[i]})
-            finished += 1
+        units = [batch for batch in batches] + [[i] for i in big]  # a long chapter is a unit of its own
+        if not units:
+            return {i: done[i] for i in indices}
+        total, lock = len(indices), threading.Lock()
+        finished = [total - len(todo)]
+        workers = min(len(units), max(1, config.BOOK_PARALLEL))
+        per_call = self._eta(sum(len(chapter_text(self.pages, self.chapters[i])) for i in todo), len(units))
+
+        def progress(left: int) -> None:
+            """The status line: chapters done so far, and the time for the units still to do."""
+            label = ("summarizing the chapter" if total == 1 else
+                     f"chapters summarized: {finished[0]} of {total}" if finished[0] else f"summarizing {total} chapters")
+            self.status(f"🧠 {self.llm}: {label}…", math.ceil(left / workers) * per_call)
+
+        def run(unit: list[int]) -> None:
+            """Summarizes one unit (a batch, or one long chapter) and caches its summaries at once."""
+            if unit[0] in big:
+                got = {unit[0]: self._long_chapter(unit[0], style, budget)}
+            else:
+                got = self._batch(unit, style, budget)
+            for i, summary in got.items():
+                db.save_doc_summary(self.sha, str(i), style, self.backend, self.model, {"summary": summary})
+            with lock:
+                done.update(got)
+                finished[0] += len(got)
+
+        progress(len(units))
+        failed: list[list[int]] = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(run, unit): unit for unit in units}
+            left = len(units)
+            for future in as_completed(futures):
+                left -= 1
+                if future.cancelled():
+                    continue  # stopped after a usage limit; already queued to run one by one below
+                error = future.exception()
+                if isinstance(error, proc.ProcCancelled):
+                    raise error  # the other calls see the same cancel and stop; the pool waits for them
+                if isinstance(error, summarize.SummaryError):
+                    # Calls already running are paid for: let them finish (their summaries are cached), and
+                    # retry this unit once on its own afterwards. A usage limit makes the rest run one by one.
+                    failed.append(futures[future])
+                    if str(error) == summarize.AI_LIMIT:
+                        for other, unit in futures.items():
+                            if other.cancel():
+                                failed.append(unit)
+                elif error is not None:
+                    raise error
+                elif left:
+                    progress(left)
+        for unit in failed:  # once more, one at a time; a second failure fails the job
+            progress(len(failed))
+            run(unit)
         return {i: done[i] for i in indices}
 
-    def _label(self, batch: list[int], finished: int, total: int) -> str:
-        """Status text for a batch, e.g. "chapters 4–9 of 24" or "chapter 3 of 24"."""
-        if total == 1:
-            return "summarizing the chapter"
-        if len(batch) == 1:
-            return f"chapter {finished + 1} of {total}"
-        return f"chapters {finished + 1}–{finished + len(batch)} of {total}"
+    def _batch(self, batch: list[int], style: str, budget: int) -> dict[int, str]:
+        """One AI call summarizing several chapters; every one of them must come back.
 
-    def _long_chapter(self, i: int, style: str, budget: int, finished: int, total: int) -> str:
+        Raises:
+            summarize.SummaryError: The call failed or left a chapter out.
+        """
+        body = "\n".join(f'<chapter index="{i}" title="{html.escape(self.chapters[i]["title"])}">\n'
+                         f'{chapter_text(self.pages, self.chapters[i])}\n</chapter>' for i in batch)
+        answer = self._ask(summarize.CHAPTERS_PROMPT.format(length=_length(style, budget)),
+                           f"{_material(self.doc)}\n{body}", summarize.CHAPTERS_SCHEMA)
+        got = {e["index"]: e["summary"] for e in answer["chapters"] if e.get("index") in batch}
+        if missing := [i for i in batch if not got.get(i, "").strip()]:
+            raise summarize.SummaryError(summarize.AI_FAILED, f"the AI left out chapters {missing}")
+        return {i: got[i] for i in batch}
+
+    def _long_chapter(self, i: int, style: str, budget: int) -> str:
         """A chapter too long for one call: its parts are summarized one by one, then merged.
 
         Each part's summary is cached as it's made (style "part", keyed by the chunk size, which decides the
@@ -171,7 +213,7 @@ class Books:
             if key in cached:
                 part_summaries.append(cached[key]["summary"])
                 continue
-            self.status(f"🧠 {self.llm}: chapter {finished + 1} of {total}, part {k} of {len(parts)}…",
+            self.status(f"🧠 {self.llm}: a long chapter, part {k} of {len(parts)}…",
                         self._eta(sum(map(len, parts[k - 1:])), len(parts) - k + 2))
             body = f'<chapter index="0" title="{html.escape(self.chapters[i]["title"])} (part {k})">\n{part}\n</chapter>'
             answer = self._ask(summarize.CHAPTERS_PROMPT.format(length=_length("full", budget)),
@@ -179,7 +221,7 @@ class Books:
             summary = next((e["summary"] for e in answer["chapters"]), "")
             db.save_doc_summary(self.sha, key, "part", self.backend, self.model, {"summary": summary})
             part_summaries.append(summary)
-        self.status(f"🧠 {self.llm}: chapter {finished + 1} of {total}, putting the parts together…", self._eta(0))
+        self.status(f"🧠 {self.llm}: a long chapter, putting the parts together…", self._eta(0))
         joined = "\n\n".join(f"<chapter part={k}>\n{s}\n</chapter>" for k, s in enumerate(part_summaries, 1))
         answer = self._ask(summarize.COMBINE_PROMPT.format(length=_length(style, budget)), joined,
                            summarize.TEXT_SCHEMA)

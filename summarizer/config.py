@@ -68,6 +68,8 @@ MAX_DOC_CHARS = int(_env("MAX_DOC_CHARS", "3000000"))
 # Characters of book text sent to the AI in one call (~75k tokens; fits every backend's context with room for
 # the answer). Longer books and chapters are summarized in pieces, then combined.
 BOOK_CHUNK_CHARS = int(_env("BOOK_CHUNK_CHARS", "300000"))
+# AI calls for one book run side by side (chapter batches): the machine mostly waits for the AI meanwhile.
+BOOK_PARALLEL = int(_env("BOOK_PARALLEL", "3"))
 # Text recognition for scanned documents: auto (RapidOCR on a GPU, Tesseract on the CPU, where it measured 5x
 # faster), rapidocr or tesseract. Tesseract, when installed, also checks a scan's script.
 OCR_ENGINE = _env("OCR_ENGINE", "auto")

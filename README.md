@@ -248,6 +248,7 @@ The database migrates itself on start.
 | `OCR_DAILY_LIMIT` | `5` | Scanned documents a user may have read per rolling 24 h (admins: no limit; `0` = no limit). Once changed with `/limit ocr`, the stored value wins. |
 | `OCR_MAX_PAGES` | `400` | Longest scan read without an admin's approval (pages needing OCR). |
 | `OCR_WORKERS` | `3` | OCR processes in parallel (one thread each); keep below the number of cores. |
+| `BOOK_PARALLEL` | `3` | AI calls for one book that run side by side (chapter batches); the machine mostly waits for the AI meanwhile. `1` runs them one after another. |
 | `BOOK_CHUNK_CHARS` | `300000` | Book text sent to the AI in one call (~75k tokens). Several short chapters share a call; longer books and chapters are summarized in pieces, then combined. |
 | `DAILY_LIMIT` | `100` | Links a user may send per rolling 24 h; every accepted link counts (`/again`, `/transcript`, cache hits, failures). `0` = no limit; admins: no limit. Only the starting value: once changed with `/limit`, the stored value wins. |
 | `MAX_FRAMES` / `MAX_SLIDES` | `16` / `35` | Images sent to the LLM. |
@@ -349,8 +350,9 @@ file names in `/history`.
    from PDF bookmarks, the EPUB contents, DOCX heading styles, or headings in the text.
 4. **OCR** for scans, after a language check on a few pages and the user's confirmation; pages are stored
    as they're done.
-5. **LLM:** chapters are packed several per call; long chapters and books are summarized in pieces, then
-   combined. Every summary is cached as soon as it exists.
+5. **LLM:** chapters are packed several per call, and up to `BOOK_PARALLEL` calls run side by side; long
+   chapters and books are summarized in pieces, then combined. Every summary (and every piece) is cached as
+   soon as it exists, and a failed call is retried once before the job fails.
 6. **Reply:** Title / Author / Summary, or one block per chapter.
 
 Jobs run one at a time from a queue; the status message shows an estimated wait while queued (never the position, which would
