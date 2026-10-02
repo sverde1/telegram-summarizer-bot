@@ -9,21 +9,35 @@ import threading
 from . import config
 
 _FILE = config.DATA_DIR / "stats.json"
-# The pipeline worker thread and the bot's event loop both read and write the file.
+# The pipeline worker thread, OCR and book threads and the bot's event loop all read and write the stats.
 _lock = threading.Lock()
+# The file's contents, kept after the first read: ETAs are asked for on every status line. Keyed by the path,
+# so pointing _FILE elsewhere (tests) reads that file.
+_cache: tuple[object, dict] | None = None
 
 
 def _load() -> dict:
-    """Reads the stats file.
+    """The stored values (read from the file once).
 
     Returns:
         The stored values, or an empty dict if the file is missing or unreadable (a fresh install,
         or a write interrupted mid-way): ETAs then fall back to their defaults instead of failing.
     """
-    try:
-        return json.loads(_FILE.read_text())
-    except (OSError, ValueError):
-        return {}
+    global _cache
+    if _cache is None or _cache[0] != _FILE:
+        try:
+            data = json.loads(_FILE.read_text())
+        except (OSError, ValueError):
+            data = {}
+        _cache = (_FILE, data)
+    return _cache[1]
+
+
+def _save(d: dict) -> None:
+    """Writes the values, atomically: a crash mid-write can't leave a truncated file."""
+    tmp = _FILE.with_name(_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(d, indent=1))
+    tmp.replace(_FILE)
 
 
 def get(key: str, default: float) -> float:
@@ -52,7 +66,7 @@ def remember(key: str, value: str) -> None:
     with _lock:
         d = _load()
         d[key] = value
-        _FILE.write_text(json.dumps(d, indent=1))
+        _save(d)
 
 
 def record(key: str, value: float, alpha: float = 0.3) -> None:
@@ -68,4 +82,4 @@ def record(key: str, value: float, alpha: float = 0.3) -> None:
         d = _load()
         # The first measurement is taken as is: averaging it with a guessed default would only blur it.
         d[key] = value if key not in d else (1 - alpha) * d[key] + alpha * value
-        _FILE.write_text(json.dumps(d, indent=1))
+        _save(d)

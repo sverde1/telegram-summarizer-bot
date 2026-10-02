@@ -107,3 +107,19 @@ def test_stale_requests_are_failed_at_startup():
     assert rows[queued]["status"] == rows[running]["status"] == "failed"
     assert rows[queued]["error"] == "bot restarted" and rows[queued]["finished_at"]
     assert rows[done]["status"] == "done"
+
+
+def test_stats_are_read_once_and_written_atomically(tmp_path, monkeypatch):
+    from summarizer import stats
+    stats.record("x", 2.0)
+    reads = []
+    real = type(stats._FILE).read_text
+    monkeypatch.setattr(type(stats._FILE), "read_text", lambda self, *a, **k: reads.append(1) or real(self, *a, **k))
+    for _ in range(5):
+        assert stats.get("x", 0) == 2.0
+    assert reads == [] and not stats._FILE.with_name("stats.json.tmp").exists()
+
+
+def test_database_uses_wal():
+    with db._db() as c:
+        assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"

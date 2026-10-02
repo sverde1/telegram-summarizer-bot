@@ -60,7 +60,8 @@ def sniff(path: Path) -> str:
     Raises:
         DocError: "unsupported" for anything else (images, archives, old .doc, Kindle files...).
     """
-    head = path.read_bytes()[:8192]
+    with path.open("rb") as f:
+        head = f.read(8192)  # not the whole file: a linked document can be 100 MB
     if head.startswith(b"%PDF-"):
         return "pdf"
     if head.startswith(b"PK\x03\x04"):

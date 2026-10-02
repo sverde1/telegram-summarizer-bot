@@ -143,7 +143,6 @@ def _connect() -> sqlite3.Connection:
     # timeout: wait for a lock rather than fail if another process (e.g. a manual sqlite3 session) holds it.
     c = sqlite3.connect(PATH, timeout=30)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")  # readers don't block the writer (and vice versa)
     return c
 
 
@@ -170,6 +169,8 @@ def init() -> None:
     keep existing rows: ALTER/move data, never drop a table that still holds data.
     """
     with _db() as c:
+        # WAL: readers don't block the writer (and vice versa). Stored in the database file, so once is enough.
+        c.execute("PRAGMA journal_mode=WAL")
         c.executescript(SCHEMA)
         cols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
         for col in ("backend", "model"):  # databases created before per-user models

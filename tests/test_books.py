@@ -1,4 +1,6 @@
 """Book summaries: batching chapters, long chapters in parts, whole books, caching, short-mode budget."""
+import re
+
 import pytest
 
 from summarizer import books, config, db, summarize
@@ -34,7 +36,9 @@ def test_chapters_are_batched_and_cached(ai, monkeypatch):
     assert b.chapters_summaries(list(range(6)), "short") == {i: f"S{i}" for i in range(6)}
     assert len(ai) == 2 and all(c.closed for c in ai)  # 3 chapters fit per call; one conversation each
     assert "&lt;0&gt;" in ai[0].text and "<0>" not in ai[0].text  # chapter titles from the file are escaped
-    assert "summarizing 6 chapters" in b.seen[0] and any("chapters summarized: 3 of 6" in t for t in b.seen)
+    assert "summarizing 6 chapters" in b.seen[0]
+    # Progress after the first batch: 3, or 6 when both parallel batches finished at once.
+    assert any(re.search(r"chapters summarized: [36] of 6", t) for t in b.seen)
     assert b.chapters_summaries([2, 5], "short") == {2: "S2", 5: "S5"} and len(ai) == 2  # from the cache
 
 
