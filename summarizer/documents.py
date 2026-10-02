@@ -334,15 +334,16 @@ def _summaries_cached(b: "books.Books", kind: str, chapter: int | None) -> bool:
 def _plan_replay(result: DocResult, backend: str) -> None:
     """A cached answer for a first-time requester: the steps a fresh run shows, at half their time (≤ 2 min)."""
     pages = result.doc.get("pages") or 0
-    chars = sum(len(t) for t in db.get_pages(result.video_id).values())
+    text = db.get_pages(result.video_id)  # once: it's the whole book
+    chars = sum(len(t) for t in text.values())
     calls = 1 if result.kind in ("book", "chapter") else max(1, -(-len(result.chapters) // books.PER_CALL[
         "short" if result.kind == "short" else "full"]))
     steps = [("reading the file", read_seconds(pages)),
              ("summary", calls * pipeline._eta_llm(min(chars, config.BOOK_CHUNK_CHARS) / calls, 0, backend))]
     if result.kind == "chapter":
         ch = result.doc["chapters"][result.chapters[0][0]]
-        steps[1] = ("summary", pipeline._eta_llm(sum(len(db.get_pages(result.video_id).get(i, ""))
-                                                     for i in range(ch["start"], ch["end"])), 0, backend))
+        steps[1] = ("summary", pipeline._eta_llm(sum(len(text.get(i, "")) for i in range(ch["start"], ch["end"])),
+                                                 0, backend))
     total = sum(sec for _, sec in steps)
     delay = min(total * pipeline.REPLAY_SHARE, pipeline.REPLAY_MAX)
     result.replay_steps = [(name, sec * delay / total) for name, sec in steps]

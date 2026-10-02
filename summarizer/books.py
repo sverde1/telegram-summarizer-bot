@@ -68,10 +68,17 @@ class Books:
         """Loads the document and its text."""
         self.sha, self.backend, self.model, self.status = sha256, backend, model, status
         self.doc = db.get_document(sha256)
-        self.pages = db.get_pages(sha256)
+        self._pages: dict[int, str] | None = None
         self.chapters = self.doc["chapters"]
         self.llm = summarize.llm_label(backend, model)
         self.steps: list[tuple[str, float]] = []  # (label, seconds) for the footer
+
+    @property
+    def pages(self) -> dict[int, str]:
+        """The document's text by page, loaded on first use (a chapter list or a cached answer needs none)."""
+        if self._pages is None:
+            self._pages = db.get_pages(self.sha)
+        return self._pages
 
     def _ask(self, system_extra: str, text: str, schema: dict) -> dict:
         """One AI call with timing, speed statistics and a cancel check afterwards."""
@@ -151,16 +158,27 @@ class Books:
         return f"chapters {finished + 1}–{finished + len(batch)} of {total}"
 
     def _long_chapter(self, i: int, style: str, budget: int, finished: int, total: int) -> str:
-        """A chapter too long for one call: its parts are summarized one by one, then merged."""
+        """A chapter too long for one call: its parts are summarized one by one, then merged.
+
+        Each part's summary is cached as it's made (style "part", keyed by the chunk size, which decides the
+        parts), so a failed merge or an interrupted run redoes only what's missing; both styles share them.
+        """
         parts = _pieces(chapter_text(self.pages, self.chapters[i]), config.BOOK_CHUNK_CHARS)
+        cached = db.get_doc_summaries(self.sha, "part", self.backend, self.model)
         part_summaries = []
         for k, part in enumerate(parts, 1):
+            key = f"{i}:p{k}/{config.BOOK_CHUNK_CHARS}"
+            if key in cached:
+                part_summaries.append(cached[key]["summary"])
+                continue
             self.status(f"🧠 {self.llm}: chapter {finished + 1} of {total}, part {k} of {len(parts)}…",
                         self._eta(sum(map(len, parts[k - 1:])), len(parts) - k + 2))
             body = f'<chapter index="0" title="{html.escape(self.chapters[i]["title"])} (part {k})">\n{part}\n</chapter>'
             answer = self._ask(summarize.CHAPTERS_PROMPT.format(length=_length("full", budget)),
                                f"{_material(self.doc)}\n{body}", summarize.CHAPTERS_SCHEMA)
-            part_summaries.append(next((e["summary"] for e in answer["chapters"]), ""))
+            summary = next((e["summary"] for e in answer["chapters"]), "")
+            db.save_doc_summary(self.sha, key, "part", self.backend, self.model, {"summary": summary})
+            part_summaries.append(summary)
         self.status(f"🧠 {self.llm}: chapter {finished + 1} of {total}, putting the parts together…", self._eta(0))
         joined = "\n\n".join(f"<chapter part={k}>\n{s}\n</chapter>" for k, s in enumerate(part_summaries, 1))
         answer = self._ask(summarize.COMBINE_PROMPT.format(length=_length(style, budget)), joined,

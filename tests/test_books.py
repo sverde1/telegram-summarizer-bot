@@ -93,3 +93,33 @@ def test_ask_uses_a_fresh_closed_conversation_each_time(ai):
     summarize.ask("codex", None, "sys", "q", summarize.TEXT_SCHEMA)
     summarize.ask("codex", None, "sys", "q", summarize.TEXT_SCHEMA)
     assert len(ai) == 2 and all(c.closed for c in ai)
+
+
+def test_a_failed_merge_keeps_the_parts(ai, monkeypatch):
+    monkeypatch.setattr(config, "BOOK_CHUNK_CHARS", 100)
+    b = _doc([250])  # 3 parts
+
+    class FailingMerge(BookAI):
+        """Summarizes parts, then fails the merge."""
+
+        def _send(self, system, text, images, schema, first):
+            """Raises on the merge call (the text-only schema)."""
+            if "chapters" not in schema["properties"]:
+                raise summarize.SummaryError(summarize.AI_FAILED, "merge failed")
+            return super()._send(system, text, images, schema, first)
+
+    monkeypatch.setattr(summarize, "conversation", lambda backend=None, model=None: FailingMerge())
+    with pytest.raises(summarize.SummaryError):
+        b.chapters_summaries([0], "full")
+    assert len(ai) == 4  # 3 parts + the failed merge
+    monkeypatch.setattr(summarize, "conversation", lambda backend=None, model=None: BookAI())
+    assert books.Books(SHA, "codex", "gpt-test", lambda *a: None).chapters_summaries([0], "short") == {0: "merged"}
+    assert len(ai) == 5  # only the merge again: the parts came from the cache, for the other style too
+
+
+def test_a_chapter_list_does_not_load_the_book(monkeypatch):
+    _doc([10, 10])
+    loaded = []
+    monkeypatch.setattr(db, "get_pages", lambda sha: loaded.append(sha) or {})
+    b = books.Books(SHA, "codex", "gpt-test", lambda *a: None)
+    assert len(b.chapters) == 2 and loaded == []
