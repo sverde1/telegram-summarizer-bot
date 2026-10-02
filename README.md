@@ -89,7 +89,7 @@ Other steps, on either machine:
 | Step | Time |
 |---|---|
 | LLM summary | 5–20 s per turn; a second turn when it asks for frames |
-| Cached video | ~1 s |
+| Cached video | ~1 s for admins and repeat requests; others get half the original time (at most 2 min) |
 | Memory | ~200 MB idle, up to ~1.5 GB with Whisper `small` loaded |
 
 **What that means per video:** a captioned YouTube video takes 15–30 s anywhere. Speech-to-text dominates
@@ -295,9 +295,11 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 | OpenAI API | A plain Responses call with no tools. Turn 2 continues server-side via `previous_response_id`; the stored responses are deleted after each job. |
 
 - Who submitted what is visible only to admins. Someone requesting a video another user already
-  summarized can't tell: they see the same stages as a real run, the answer arrives after half the original
-  processing time (at most 2 minutes), and the footer's timings match. Only a repeat of their own request
-  is answered instantly from the cache.
+  processed can't tell: they see the same stages as a real run, the answer arrives after half the original
+  processing time (at most 2 minutes), and the footer's timings match. This covers summaries, `/transcript`
+  and summaries written from a saved transcript (the transcript step is shown and paced, too). Missing
+  timings (older summaries) are estimated. Only admins and a repeat of a user's own request are answered
+  instantly from the cache.
 - All users share the admin's subscription limits.
 - The bot works only in private chats and leaves any group it's added to.
 - Users only see fixed, expected error messages (never raw tool output, paths or stack traces). Admins see

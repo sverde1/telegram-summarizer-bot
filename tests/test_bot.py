@@ -106,8 +106,12 @@ def test_render_escapes_html_and_splits_long_messages():
 def test_footer_hides_cache_from_first_time_requesters():
     stats = {"steps": [["lookup", 2.0], ["summary", 9.0]], "total": 11.0, "llm": "Codex (gpt-test)"}
     assert "from cache" in bot.details(_result("x", cached=True, stats=stats), reveal_cache=True)
-    hidden = bot.details(_result("x", cached=True, stats=stats), reveal_cache=False)
-    assert "cache" not in hidden and "⏱ 6 s total" in hidden  # scaled to the replay: 50 % of 11 s
+    replayed = _result("x", cached=True, stats=stats)
+    replayed.replay_steps, replayed.replay_total = [("lookup", 1.0), ("captions", 2.0), ("summary", 4.0)], 7.0
+    hidden = bot.details(replayed, reveal_cache=False)
+    assert "cache" not in hidden and "⏱ 7 s total: lookup 1 s · captions 2 s · summary 4 s" in hidden
+    backstop = bot.details(_result("x", cached=True, stats=stats), reveal_cache=False)  # no replay planned
+    assert "cache" not in backstop and "⏱" not in backstop
     assert "11 s total" in bot.details(_result("x", stats=stats))
 
 

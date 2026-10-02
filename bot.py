@@ -737,41 +737,27 @@ def _secs(sec: float) -> str:
     return f"{sec} s" if sec < 60 else f"{sec // 60}:{sec % 60:02d}"
 
 
-CACHED_DELAY_SHARE = 0.5  # a first-time requester of a cached video waits this share of the original run…
-CACHED_DELAY_MAX = 120  # …but at most this many seconds
-
-
-def cached_delay(stats: dict) -> float:
-    """Seconds to hold back a cached summary from someone who mustn't learn it was cached.
-
-    An instant answer would give away that someone else submitted the video before; half the original
-    processing time looks like a normal (quick) run. Without recorded timings (old summaries): no delay.
-    """
-    return min(stats.get("total", 0) * CACHED_DELAY_SHARE, CACHED_DELAY_MAX) if stats else 0.0
-
-
 def details(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> str:
     """Builds the footer: how long each step took and what was used (transcript, frames, LLM).
 
     Args:
         r: The pipeline result.
         waited: Seconds the job waited in the queue; shown when it's 5 s or more.
-        reveal_cache: Whether this user may learn the result came from the cache. When False, a cached
-            result shows timings like a fresh run: the original steps scaled to the replay's duration (see
-            cached_delay), so the footer matches how long they actually waited.
+        reveal_cache: Whether this user may learn the result came from the cache. A result with replay
+            steps (see pipeline.plan_replay) shows them, like a fresh run's timings, so the footer matches how
+            long the user actually waited.
 
     Returns:
         One or two lines of plain text (the caller HTML-escapes it).
     """
     stats = (r.summary or {}).get("_stats") or {}
-    if r.cached and not reveal_cache:
-        delay = cached_delay(stats)
-        scale = delay / stats["total"] if stats and stats.get("total") else 0
-        if scale:
-            steps = " · ".join(f"{name} {_secs(sec * scale)}" for name, sec in stats["steps"])
-            timing = f"⏱ {_secs(delay)} total: {steps}"
-        else:
-            timing = ""
+    if r.replay_steps:
+        steps = " · ".join(f"{name} {_secs(sec)}" for name, sec in r.replay_steps)
+        timing = f"⏱ {_secs(r.replay_total)} total: {steps}"
+        if waited >= 5:
+            timing += f" (+ {_secs(waited)} waiting in queue)"
+    elif r.cached and not reveal_cache:
+        timing = ""  # never "from cache" (pipeline sets replay steps for these users; this is a backstop)
     elif r.cached:
         timing = "⚡ from cache" + (f" (first run took {_secs(stats['total'])})" if stats else "")
     elif stats:
@@ -1182,12 +1168,9 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             await progress.close()
         if job.cancel_reason:  # cancelled while the pipeline ran but finished before noticing (e.g. cached)
             raise proc.ProcCancelled("cancelled")
-        stats = (result.summary or {}).get("_stats") or {}
-        if result.cached and not job.transcript_only and cached_delay(stats) and not (
-                access.is_admin(job.user_id)
-                or db.user_saw_video(job.user_id, result.platform, result.video_id, job.request_id)):
+        if result.cached and result.replay_steps:  # a first-time requester (see pipeline.plan_replay)
             # Replayed in a separate task so the queue keeps moving meanwhile; the task ends the job.
-            _delayed[job.request_id] = asyncio.create_task(_deliver_later(app, job, result, waited, stats))
+            _delayed[job.request_id] = asyncio.create_task(_deliver_later(app, job, result, waited))
             return True
         await _deliver(app, job, result, waited)
         db.update_request(job.request_id, status="done", cached=int(result.cached))
@@ -1236,45 +1219,28 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
 _delayed: dict[int, asyncio.Task] = {}  # request id -> replay task of a cached summary (see _deliver_later)
 
 
-def _replay_stage(name: str, llm: str) -> str:
-    """The status line a real run shows for a recorded step (see pipeline's took() labels)."""
-    if name == "lookup":
-        return "🔎 Looking up the video…"
-    if name == "captions":
-        return "📝 Checking for YouTube captions…"
-    if name.startswith("Whisper"):
-        return "🗣 Transcribing the audio with Whisper…"
-    if name.endswith("slides"):
-        return "🖼 Photo post: downloading the slides…"
-    if name.endswith("frames"):
-        return "🎞 Grabbing frames…"
-    if name == "update with frames":
-        return f"🧠 {llm} is updating the summary with frames…"
-    return f"🧠 Summarizing with {llm}…"
+async def _deliver_later(app: Application, job: Job, result: pipeline.Result, waited: float) -> None:
+    """Replays a cached answer (summary or transcript) like a fresh run, for a user who mustn't learn it was
+    cached.
 
-
-async def _deliver_later(app: Application, job: Job, result: pipeline.Result, waited: float, stats: dict) -> None:
-    """Replays a cached summary like a fresh run, for a user who mustn't learn it was cached.
-
-    Shows the original run's stages, scaled to cached_delay(), then delivers. Runs beside the worker (which
-    doesn't wait for it), and stops if the job is cancelled meanwhile. Always ends the job.
+    Shows the steps of result.replay_steps for their (already scaled) times, then delivers. Runs beside the
+    worker (which doesn't wait for it), and stops if the job is cancelled meanwhile. Always ends the job.
     """
     try:
-        delay = cached_delay(stats)
-        scale = delay / stats["total"]
+        stats = (result.summary or {}).get("_stats") or {}
         progress = Progress(app, asyncio.get_running_loop(), job)
         meta = result.meta or {}
         head = (f"🖼 {meta.get('title', '')[:80]} (photo post)" if meta.get("is_carousel")
                 else f"🎬 {meta.get('title', '')[:80]} ({pipeline._fmt_duration(meta.get('duration') or 0)})")
-        llm = stats.get("llm") or summarize.llm_label()
-        remaining = delay
+        llm = stats.get("llm") or summarize.llm_label(job.backend, job.model or "")
+        remaining = result.replay_total
         try:
-            for name, sec in stats["steps"]:
+            for name, sec in result.replay_steps:
                 if job.cancel_reason:
                     return
-                progress(f"{head}\n{_replay_stage(name, llm)}", remaining)
-                await asyncio.sleep(sec * scale)
-                remaining -= sec * scale
+                progress(f"{head}\n{pipeline.replay_stage(name, llm)}", remaining)
+                await asyncio.sleep(sec)
+                remaining -= sec
         finally:
             await progress.close()
         if job.cancel_reason:

@@ -66,9 +66,34 @@ def test_duration_format_and_etas():
     assert pipeline._eta_llm(0, 0) == 25  # starting guess before anything was measured
 
 
-def test_reused_transcript_is_not_announced_to_first_time_requesters(fake_media, llm):
+def test_reused_transcript_is_paced_for_first_time_requesters(fake_media, llm, monkeypatch):
     pipeline.run(URL, lambda *a: None)  # someone summarized it before
+    paused = []
+    monkeypatch.setattr(pipeline, "_pause", paused.append)
     seen = []
-    pipeline.run(URL, lambda text, eta=None: seen.append(text), backend="codex", model="other-model",
-                 hide_cache_from=60)
+    r = pipeline.run(URL, lambda text, eta=None: seen.append(text), backend="codex", model="other-model",
+                     hide_cache_from=60)
     assert not any("from cache" in s for s in seen) and any("Transcript ready" in s for s in seen)
+    assert any("Checking for YouTube captions" in s for s in seen)  # the step a fresh run shows
+    assert paused == [pipeline.CAPTIONS_SECONDS * pipeline.REPLAY_SHARE]
+    assert [n for n, _ in r.replay_steps] == ["lookup", "captions", "summary"]  # footer: what the user saw
+    saved = db.get_summary("youtube", "abcdefghijk", "codex", "other-model")["result"]["_stats"]
+    assert [n for n, _ in saved["steps"]] == ["lookup", "summary"]  # stored: the real work only
+
+
+def test_reused_transcript_is_not_paced_for_admins_or_repeat_requesters(fake_media, llm, monkeypatch):
+    pipeline.run(URL, lambda *a: None)
+    paused = []
+    monkeypatch.setattr(pipeline, "_pause", paused.append)
+    r = pipeline.run(URL, lambda *a: None, backend="codex", model="other-model")  # admin: hide_cache_from=None
+    assert paused == [] and r.replay_steps is None
+
+
+def test_pause_stops_at_once_on_cancel():
+    from summarizer import proc
+    proc.current_job_cancel.set()
+    try:
+        with pytest.raises(proc.ProcCancelled):
+            pipeline._pause(60)
+    finally:
+        proc.current_job_cancel.clear()

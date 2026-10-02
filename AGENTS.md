@@ -89,9 +89,11 @@ limits, the `/again` cooldown, the pending-request cap and reply throttling, the
 frame-grab cap. Admins are exempt from the daily and queue limits.
 
 **Privacy:** who submitted which video is visible only to admins. Regular users may only learn that a
-result was cached if they requested that video themselves (`db.user_saw_video`); otherwise a cached
-result is replayed with the original stages at half the original time (`bot._deliver_later`), and status
-lines must not mention the cache (`hide_cache`).
+result was cached if they requested that video themselves (`db.user_saw_video`). Otherwise every reuse is
+paced like a fresh run at half its time, at most 2 min: cached summaries and transcripts get a replay plan
+(`pipeline.plan_replay`, played back by `bot._deliver_later`), a saved transcript reused for a new summary
+gets a paced transcript step (`pipeline._pause`); the footer shows `Result.replay_steps`, so it always
+matches the wait. Status lines must not mention the cache (`hide_cache`).
 
 **Platform gotchas** (each was hit in practice):
 - Run yt-dlp / gallery-dl from the venv (`config.YTDLP`), never a system binary.

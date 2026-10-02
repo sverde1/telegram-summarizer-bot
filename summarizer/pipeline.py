@@ -32,6 +32,11 @@ class Result:
         frames_used: Whether frames or slides were shown to the LLM.
         cached: Whether the result came from the database without new work.
         notes: Non-fatal problems hit along the way (for logs/debugging).
+        replay_steps: For a requester who mustn't learn that earlier work was reused: the (step, seconds)
+            a fresh run shows. On a cached result the bot plays them back before delivering; on a fresh
+            one they include the paced transcript step. None for everyone else. The footer shows them, so
+            what the user waited and what the footer says always agree.
+        replay_total: Seconds those steps add up to.
     """
     platform: str
     video_id: str
@@ -44,6 +49,8 @@ class Result:
     frames_used: bool = False
     cached: bool = False
     notes: list[str] = field(default_factory=list)
+    replay_steps: list[tuple[str, float]] | None = None
+    replay_total: float = 0.0
 
 
 class PipelineError(RuntimeError):
@@ -136,6 +143,95 @@ def _eta_frames(duration: float) -> float:
     return 10 + duration / 20
 
 
+# A first-time requester of reused work (a cached answer, or a saved transcript) waits this share of what a
+# fresh run takes, at most REPLAY_MAX seconds: an instant answer would give away that someone else sent the
+# video before, and half a run still looks like a normal, quick one.
+REPLAY_SHARE = 0.5
+REPLAY_MAX = 120
+CAPTIONS_SECONDS = 3.0  # rough time to fetch captions (not measured: it's a single quick request)
+LOOKUP_SECONDS = 3.0    # rough time for the lookup, for summaries saved before timings were recorded
+TRANSCRIPT_STEPS = {"captions", "Whisper", "Whisper + captions"}  # took() labels of the transcript step
+
+
+def _transcript_step(source: str, duration: float) -> tuple[str, float]:
+    """The transcript step a fresh run of this video would show, with its estimated time.
+
+    Args:
+        source: The transcript source (captions, whisper-<model>, tiktok-webvtt, none).
+        duration: Video length in seconds.
+
+    Returns:
+        (took() label, seconds).
+    """
+    label = {"captions": "captions", "tiktok-webvtt": "Whisper + captions"}.get(source, "Whisper")
+    if label == "captions":
+        return label, CAPTIONS_SECONDS
+    return label, _eta_audio(duration) + transcribe.estimate(duration)
+
+
+def replay_stage(name: str, llm: str) -> str:
+    """The status line a real run shows for a step (see the took() labels in _process)."""
+    if name == "lookup":
+        return "🔎 Looking up the video…"
+    if name == "captions":
+        return "📝 Checking for YouTube captions…"
+    if name.startswith("Whisper"):
+        return "🗣 Transcribing the audio with Whisper…"
+    if name.endswith("slides"):
+        return "🖼 Photo post: downloading the slides…"
+    if name.endswith("frames"):
+        return "🎞 Grabbing frames…"
+    if name == "update with frames":
+        return f"🧠 {llm} is updating the summary with frames…"
+    return f"🧠 Summarizing with {llm}…"
+
+
+def _full_steps(r: Result, transcript_only: bool, backend: str) -> list[tuple[str, float]]:
+    """Every step a fresh run producing this result would show, with its time.
+
+    Recorded times are used where the original run has them; missing steps are estimated: summaries saved
+    before timings were recorded have none, a summary written from a reused transcript has no transcript
+    step, and a /transcript has no summary of its own.
+    """
+    stats_ = (r.summary or {}).get("_stats") or {}
+    steps = [(name, float(sec)) for name, sec in stats_.get("steps", [])]
+    if transcript_only:  # what a /transcript run does: lookup, transcript (or slides), nothing after
+        steps = [(n, s) for n, s in steps if n == "lookup" or n in TRANSCRIPT_STEPS or n.endswith("slides")]
+    if not any(n == "lookup" for n, _ in steps):
+        steps.insert(0, ("lookup", LOOKUP_SECONDS))
+    if not r.meta.get("is_carousel") and not any(n in TRANSCRIPT_STEPS for n, _ in steps):
+        steps.insert(1, _transcript_step(r.transcript_source, r.meta.get("duration") or 0))
+    if not transcript_only and not any(n == "summary" for n, _ in steps):
+        steps.append(("summary", _eta_llm(len(r.transcript), 1, backend)))
+    return steps
+
+
+def plan_replay(r: Result, transcript_only: bool, backend: str) -> None:
+    """Sets a cached result's replay: all of a fresh run's steps, scaled to REPLAY_SHARE (at most REPLAY_MAX).
+
+    Computed once per job, so the bot's playback and the footer use the same numbers.
+    """
+    steps = _full_steps(r, transcript_only, backend)
+    total = sum(sec for _, sec in steps)
+    delay = min(total * REPLAY_SHARE, REPLAY_MAX)
+    scale = delay / total if total else 0
+    r.replay_steps = [(name, sec * scale) for name, sec in steps]
+    r.replay_total = delay
+
+
+def _pause(seconds: float) -> None:
+    """Waits, stopping at once if the job is cancelled (checked every 0.5 s).
+
+    Raises:
+        proc.ProcCancelled: The job was cancelled.
+    """
+    end = time.monotonic() + seconds
+    while (left := end - time.monotonic()) > 0:
+        proc.check_cancelled()
+        time.sleep(min(0.5, left))
+    proc.check_cancelled()
+
+
 def _chars_for(duration: float) -> int:
     """Expected transcript length for a video, for ETAs made before the transcript exists.
 
@@ -224,18 +320,21 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
             raise PipelineError(f"⏳ You redid this video {ago} min ago; you can redo it again in "
                                 f"{max(1, round(wait / 60))} min.")
 
+    hide_cache = bool(hide_cache_from) and not db.user_saw_video(hide_cache_from, video.platform,
+                                                                 video.video_id, request_id or 0)
     cached = db.get_video(video.platform, video.video_id)
     saved = db.get_summary(video.platform, video.video_id, backend, model) if model else None
     if cached and use_cache and cached["meta"] and (
             saved or (transcript_only and cached["transcript_source"])):
-        return Result(video.platform, video.video_id, video.url, cached["meta"], cached["transcript"] or "",
-                      cached["transcript_source"] or "none", cached["language"] or "",
-                      saved["result"] if saved else None, bool(saved and saved["frames_used"]), cached=True)
+        result = Result(video.platform, video.video_id, video.url, cached["meta"], cached["transcript"] or "",
+                        cached["transcript_source"] or "none", cached["language"] or "",
+                        saved["result"] if saved else None, bool(saved and saved["frames_used"]), cached=True)
+        if hide_cache:
+            plan_replay(result, transcript_only, backend)
+        return result
 
     # The videos row exists from the start (status "processing") and is filled in as data arrives, so a
     # crash mid-way still leaves a record of what was attempted and how far it got.
-    hide_cache = bool(hide_cache_from) and not db.user_saw_video(hide_cache_from, video.platform,
-                                                                 video.video_id, request_id or 0)
     db.start_video(video.platform, video.video_id, video.url)
     try:
         return _process(video, progress, cached, transcript_only, t0, backend, model, hide_cache)
@@ -314,6 +413,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
     shutil.rmtree(workdir, ignore_errors=True)  # leftovers from a crashed earlier run
     workdir.mkdir(parents=True)
     llm = summarize.llm_label(backend, model or "")  # replaced by the model that actually answers, below
+    paced: tuple[str, float] | None = None  # the paced transcript step shown to a first-time requester
     try:
         cues, source, lang, images, notes = [], "none", "", [], []
         # The probe detects carousels shared as /video/ links (no video formats), not just /photo/ URLs.
@@ -336,8 +436,18 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             # never fetch captions or run Whisper twice. It is already formatted, so it becomes one cue.
             cues = [(0.0, cached["transcript"])]
             source, lang = cached["transcript_source"], cached["language"]
-            # "from cache" would tell a first-time requester that someone else sent this video before.
-            st.ok("✅ Transcript ready" if hide_cache else f"✅ Transcript: from cache ({source})")
+            if hide_cache:
+                # An instant transcript would tell a first-time requester that someone else sent this video
+                # before: show the step a fresh run takes, at the pace of a cached answer. This holds the
+                # queue for at most half a transcription, less than a real run would.
+                label, eta = _transcript_step(source, dur)
+                pause = min(eta * REPLAY_SHARE, REPLAY_MAX)
+                st.show(replay_stage(label, llm), pause + _eta_llm(len(cached["transcript"]), 1, backend))
+                _pause(pause)
+                paced = (label, pause)
+                st.ok("✅ Transcript ready")
+            else:
+                st.ok(f"✅ Transcript: from cache ({source})")
         else:
             t = time.monotonic()
             cues, source, lang = _transcript(video, meta, workdir, st, notes, transcript_only)
@@ -398,11 +508,17 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             raise PipelineError(str(e), detail=e.detail)
         finally:
             conv.close()  # deletes the CLI session files; they're only needed for the follow-up turn
-        summary["_stats"] = {"steps": timings, "total": time.time() - t0, "llm": llm,  # cached with the summary
+        # The saved timings are the real work only: a pause shown to one user isn't part of the video's cost.
+        total = time.time() - t0
+        summary["_stats"] = {"steps": list(timings), "total": total - (paced[1] if paced else 0), "llm": llm,
                              "backend": backend, "model": model or conv.model}
         # Keyed by backend + model so users on different models don't overwrite each other's summaries.
         db.save_summary(video.platform, video.video_id, backend, model or conv.model, summary, bool(images))
-        return _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
+        result = _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
+        if paced:  # the footer shows what this user saw: the paced transcript step after the lookup
+            result.replay_steps = timings[:1] + [paced] + timings[1:]
+            result.replay_total = total
+        return result
     finally:
         shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media
 
