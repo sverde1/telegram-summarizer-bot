@@ -18,6 +18,12 @@ Environment=PYTHONUNBUFFERED=1
 # Files the bot creates are private to its user (the code sets the same umask; this covers child processes
 # started before that, and keeps it if the code changes).
 UMask=0077
+# On stop, SIGTERM only the bot itself: it stops its own downloads/transcodes and tells waiting users. With
+# the default (control-group) yt-dlp and ffmpeg would be killed at the same moment, and users would get
+# "couldn't load this video" instead of "the bot was stopped".
+KillMode=mixed
+# The bot waits up to 30 s for the running job to stop; SIGKILL only comes after that.
+TimeoutStopSec=60
 # GPU later: the CUDA libs from the nvidia-* wheels must be on the loader path before Python starts.
 #Environment=LD_LIBRARY_PATH=%h/scripts/telegram-summarizer-bot/.venv/lib/python3.14/site-packages/nvidia/cublas/lib:%h/scripts/telegram-summarizer-bot/.venv/lib/python3.14/site-packages/nvidia/cudnn/lib
 

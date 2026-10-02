@@ -318,6 +318,10 @@ Also there: `codex-home/` (the bot's Codex login), `stats.json` (measured speeds
 
 ## Maintenance
 
+- **Stopping the bot** (`systemctl --user stop`/`restart`) tells everyone still waiting for a summary that
+  the bot was stopped and they can retry later, and stops their downloads and transcriptions. The service
+  file uses `KillMode=mixed` and `TimeoutStopSec=60` for this; after changing it, copy it again and run
+  `systemctl --user daemon-reload`. Requests lost in a crash are marked failed at the next start.
 - **Blocks:** if YouTube or TikTok throttle or block the server ("too many requests", "confirm you're not a
   bot"), users are told to try later and the admins get the raw error, at most once per platform every 6 h.
 - **yt-dlp / gallery-dl** break when YouTube or TikTok change. The weekly timer runs

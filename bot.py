@@ -1380,15 +1380,32 @@ async def update_checker(app: Application) -> None:
         await asyncio.sleep(UPDATE_CHECK_EVERY)
 
 
-async def post_stop(app: Application) -> None:
-    """Shutdown: cancels the background tasks so they don't outlive the event loop.
+STOPPED = "⏹ The bot was stopped before your summary was ready. Please send the link again later."
+SHUTDOWN_WAIT = 30  # seconds to let the running job stop and report (systemd's TimeoutStopSec is 60)
 
-    Without this, the worker blocked in `queue.get()` was destroyed while pending, which logged
-    "Event loop is closed" errors on every stop.
+
+async def post_stop(app: Application) -> None:
+    """Shutdown: tells everyone still waiting that the bot stopped, stops their work, then the tasks.
+
+    PTB calls this after polling stopped but before the bot's connection closes, so messages can still be
+    sent. Every unfinished job is cancelled with STOPPED (queued, waiting for memory or replaying ones are
+    reported at once; the running one has its programs killed and the worker reports it). The running job
+    gets SHUTDOWN_WAIT seconds to do so (an API call or a model load can't be interrupted sooner); if it
+    doesn't make it, it's reported from here. Only then are the worker and update checker cancelled (without
+    that, the worker blocked in `queue.get()` was destroyed while pending: "Event loop is closed" errors).
 
     Args:
         app: The application being stopped.
     """
+    running = _running
+    for job in list(_jobs.values()):
+        await _cancel_job(app, job, STOPPED)
+    deadline = time.monotonic() + SHUTDOWN_WAIT
+    while running is not None and _running is running and time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
+    if running is not None and running.request_id in _jobs:  # the worker didn't get to report it in time
+        _end_job(running)
+        await _report_cancel(app, running)
     for name in ("worker", "update_checker"):
         if task := app.bot_data.get(name):
             task.cancel()
