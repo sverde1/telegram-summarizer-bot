@@ -795,8 +795,9 @@ def _fmt_size(n: int) -> str:
     return f"{n / 1024 ** 2:.1f} MB" if n >= 1024 ** 2 else f"{max(1, round(n / 1024))} KB"
 
 
-def _book_menu(upload_id: int, chapters: bool = False) -> InlineKeyboardMarkup:
-    """The choice buttons under an upload: whole / by chapter, or the three chapter options."""
+def _book_menu(upload_id: int, chapters: bool = False, back: bool = True) -> InlineKeyboardMarkup:
+    """The choice buttons under an upload: whole / by chapter, or the three chapter options (with ◀ Back to
+    the first choice unless `back` is False, as under a whole-book summary)."""
     if not chapters:
         return InlineKeyboardMarkup([[InlineKeyboardButton("📖 Whole book", callback_data=f"book:{upload_id}:whole"),
                                       InlineKeyboardButton("📑 By chapter", callback_data=f"book:{upload_id}:chapters")]])
@@ -804,8 +805,7 @@ def _book_menu(upload_id: int, chapters: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("All chapters, short", callback_data=f"book:{upload_id}:short")],
         [InlineKeyboardButton("All chapters, one per message", callback_data=f"book:{upload_id}:each")],
         [InlineKeyboardButton("Pick a chapter", callback_data=f"book:{upload_id}:pick")],
-        [InlineKeyboardButton("◀ Back", callback_data=f"book:{upload_id}:back")],
-    ])
+    ] + ([[InlineKeyboardButton("◀ Back", callback_data=f"book:{upload_id}:back")]] if back else []))
 
 
 def _chapter_list(upload_id: int, name: str, chapters: list[dict], page: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -1805,9 +1805,14 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
     if isinstance(result, documents.DocResult):
         reveal = access.is_admin(job.user_id) or db.user_saw_video(job.user_id, "document", result.video_id,
                                                                     job.request_id)
-        for chunk in render_document(result, waited, reveal):
-            await _send_with_retry(lambda chunk=chunk: bot_.send_message(
-                job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True), job)
+        chunks = render_document(result, waited, reveal)
+        # Under a whole-book summary: the chapter options, for a reader who wants more detail.
+        more = (_book_menu(job.upload_id, chapters=True, back=False)
+                if result.kind == "book" and len(result.doc.get("chapters") or []) > 1 else None)
+        for k, chunk in enumerate(chunks, 1):
+            await _send_with_retry(lambda chunk=chunk, k=k: bot_.send_message(
+                job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+                reply_markup=more if k == len(chunks) else None), job)
         return
     if job.transcript_only:
         if not result.transcript:

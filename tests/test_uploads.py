@@ -102,6 +102,26 @@ async def test_whole_book(app, telegram, tmp_path):
     assert telegram.sent("deleteMessage")  # the status message
 
 
+async def test_whole_book_offers_the_chapters_too(app, telegram, tmp_path):
+    up = await _upload(app, telegram, ANA, _book_pdf(tmp_path))
+    await send(app, callback_update(ANA, f"book:{up}:whole"))
+    await _work(app)
+    markup = str(telegram.sent("sendMessage")[-1]["reply_markup"])
+    assert f"book:{up}:short" in markup and f"book:{up}:each" in markup and f"book:{up}:pick" in markup
+    assert f"book:{up}:back" not in markup
+    await send(app, callback_update(ANA, f"book:{up}:short"))  # the button works like the menu's
+    await _work(app)
+    assert "<b>Cats</b>\nS0" in telegram.sent("sendMessage")[-1]["text"]
+
+
+async def test_single_chapter_document_gets_no_chapter_button(app, telegram, tmp_path):
+    (tmp_path / "memo.txt").write_text("A short memo about the budget for next year. " * 20)
+    up = await _upload(app, telegram, ANA, tmp_path / "memo.txt")
+    await send(app, callback_update(ANA, f"book:{up}:whole"))
+    await _work(app)
+    assert telegram.sent("sendMessage")[-1].get("reply_markup") is None
+
+
 async def test_by_chapter_menu_and_short_mode(app, telegram, tmp_path):
     up = await _upload(app, telegram, ANA, make_epub(tmp_path / "b.epub", [("One", "a " * 50), ("Two", "b " * 50)]))
     await send(app, callback_update(ANA, f"book:{up}:chapters"))

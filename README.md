@@ -295,7 +295,8 @@ Send a **PDF, EPUB, DOCX or TXT** file (up to 20 MB, the most Telegram lets bots
 Drive or Dropbox link** to one (up to `MAX_LINK_DOWNLOAD_MB`, default 100 MB; shared as "Anyone with the
 link"; Google Docs documents work too), and pick:
 
-- **📖 Whole book**: title, author and a summary of the whole thing.
+- **📖 Whole book**: title, author and a summary of the whole thing, with the chapter options below it
+  for more detail.
 - **📑 By chapter**, then one of:
   - **All chapters, short**: 1–2 paragraphs per chapter, in 1–3 messages.
   - **All chapters, one per message**: a full summary of every chapter.
