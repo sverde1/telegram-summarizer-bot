@@ -22,9 +22,31 @@ def rapid_cuda(monkeypatch):
     return providers
 
 
-def test_unknown_engine_means_rapidocr(monkeypatch):
-    monkeypatch.setattr(config, "OCR_ENGINE", "magic")
+def test_auto_is_tesseract_on_the_cpu(monkeypatch):
+    monkeypatch.setattr(config, "OCR_ENGINE", "auto")
+    monkeypatch.setattr(config, "OCR_DEVICE", "cpu")
+    assert (ocr.engine(), ocr.device()) == ("tesseract", "cpu")
+    monkeypatch.setattr(ocr.shutil, "which", lambda name: None)  # no Tesseract installed
     assert ocr.engine() == "rapidocr"
+
+
+def test_auto_is_rapidocr_on_a_gpu(rapid_cuda, monkeypatch):
+    monkeypatch.setattr(config, "OCR_ENGINE", "auto")
+    rapid_cuda("CUDAExecutionProvider")
+    assert (ocr.engine(), ocr.device()) == ("rapidocr", "cuda")
+
+
+def test_auto_without_cuda_falls_back_to_tesseract(rapid_cuda, monkeypatch):
+    monkeypatch.setattr(config, "OCR_ENGINE", "auto")
+    rapid_cuda("CPUExecutionProvider")
+    assert (ocr.engine(), ocr.device()) == ("tesseract", "cpu")
+
+
+def test_languages_missing_for_the_engine_are_reported(monkeypatch):
+    from summarizer import db
+    db.set_setting("ocr_languages", "eng,slv")
+    monkeypatch.setattr(config, "OCR_ENGINE", "tesseract")
+    assert ocr.missing_languages() == ["slv"]  # added for RapidOCR, say: no slv.traineddata
 
 
 def test_cuda_when_onnxruntime_has_it(rapid_cuda):

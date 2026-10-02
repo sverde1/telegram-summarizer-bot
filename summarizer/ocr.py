@@ -29,7 +29,7 @@ SAMPLE_PAGES = 3
 LOW_CONFIDENCE = 65   # Tesseract mean word confidence (0-100) below which a language mismatch is believed
 TIMEOUT = 900         # seconds per batch
 # Seconds per page with all workers busy, until measured on this machine.
-SPEED_DEFAULT = {"tesseract": 1.5, "rapidocr": 4.0, "rapidocr-cuda": 0.3}
+SPEED_DEFAULT = {"tesseract": 1.2, "rapidocr": 6.4, "rapidocr-cuda": 0.3}  # CPU values measured on 4 cores
 TESSDATA_SYSTEM = sorted(Path("/usr/share/tesseract-ocr").glob("*/tessdata"))
 
 # code (Tesseract's) -> (name, ISO 639-1 as py3langid reports it, script as Tesseract's OSD names it,
@@ -71,22 +71,17 @@ class UnsupportedLanguage(Exception):
         self.code = code
 
 
-def engine() -> str:
-    """The configured OCR engine."""
-    return config.OCR_ENGINE if config.OCR_ENGINE in ("tesseract", "rapidocr") else "rapidocr"
-
-
 _cuda_ok: bool | None = None  # whether onnxruntime can use CUDA here (checked once)
 
 
-def device() -> str:
-    """Where OCR runs: "cuda" when asked for, RapidOCR is the engine and CUDA works; else "cpu".
+def _cuda_available() -> bool:
+    """Whether OCR may use the GPU: OCR_DEVICE=cuda and onnxruntime has CUDA (checked once, warned once).
 
     Like Whisper, a missing GPU or CUDA runtime means the CPU, with a warning, not a broken OCR.
     """
     global _cuda_ok
-    if config.OCR_DEVICE != "cuda" or engine() != "rapidocr":
-        return "cpu"
+    if config.OCR_DEVICE != "cuda":
+        return False
     if _cuda_ok is None:
         try:
             import onnxruntime
@@ -96,7 +91,33 @@ def device() -> str:
         if not _cuda_ok:
             log.warning("OCR_DEVICE=cuda, but onnxruntime has no CUDA support (install onnxruntime-gpu); "
                         "OCR runs on the CPU")
-    return "cuda" if _cuda_ok else "cpu"
+    return _cuda_ok
+
+
+def engine() -> str:
+    """The OCR engine in use.
+
+    "auto" (the default) picks by hardware: RapidOCR on a GPU; on the CPU Tesseract, which read the owner's
+    test book 5x faster than RapidOCR with the same text (1.2 vs 6.4 s/page, 3 workers, 4 cores), or
+    RapidOCR if Tesseract isn't installed.
+    """
+    if config.OCR_ENGINE in ("tesseract", "rapidocr"):
+        return config.OCR_ENGINE
+    if _cuda_available():
+        return "rapidocr"
+    return "tesseract" if shutil.which("tesseract") else "rapidocr"
+
+
+def device() -> str:
+    """Where OCR runs: "cuda" when RapidOCR is the engine and the GPU is usable, else "cpu"."""
+    return "cuda" if engine() == "rapidocr" and _cuda_available() else "cpu"
+
+
+def missing_languages() -> list[str]:
+    """Installed languages (the /ocrlang list) the engine in use has no model for, e.g. after switching
+    engines: they're skipped until an admin adds them again."""
+    stored = [c for c in (db.get_setting("ocr_languages") or "eng").split(",") if c in LANGUAGES]
+    return [c for c in stored if not _usable(c)]
 
 
 def _speed_key() -> str:
@@ -170,20 +191,40 @@ def estimate(pages: int) -> float:
 
 # ---------- running the engines ----------
 
+def _runs(pages: list[int]) -> list[tuple[int, int]]:
+    """Groups sorted page numbers into contiguous (first, last) runs: [0,1,2,5] -> [(0,2), (5,5)]."""
+    runs: list[list[int]] = []
+    for page in sorted(set(pages)):
+        if runs and page == runs[-1][1] + 1:
+            runs[-1][1] = page
+        else:
+            runs.append([page, page])
+    return [(a, b) for a, b in runs]
+
+
 def _render(pdf: Path, pages: list[int], workdir: Path, tag: str) -> dict[int, Path]:
-    """Renders PDF pages (0-based) to grayscale PNGs in the sandbox.
+    """Renders PDF pages (0-based) to grayscale PNGs in the sandbox, one poppler run per contiguous range.
+
+    One run per range instead of per page: each run parses the whole PDF again. poppler names the files
+    `<prefix>-<page>.png`, zero-padded to the *document's* page count, so the page number is read back from
+    each name rather than predicted.
 
     Returns:
-        {page: image path}.
+        {page: image path} for the pages that rendered.
     """
     out = workdir / f"img-{tag}"
     out.mkdir(exist_ok=True)
-    for page in pages:
-        args = ["pdftoppm", "-gray", "-png", "-singlefile", "-scale-to", str(RENDER_EDGE),
-                "-f", str(page + 1), "-l", str(page + 1), f"/job/{pdf.relative_to(workdir)}",
-                f"/job/{out.relative_to(workdir)}/p{page}"]
+    images = {}
+    for first, last in _runs(pages):
+        prefix = f"r{first}"
+        args = ["pdftoppm", "-gray", "-png", "-scale-to", str(RENDER_EDGE), "-f", str(first + 1),
+                "-l", str(last + 1), f"/job/{pdf.relative_to(workdir)}", f"/job/{out.relative_to(workdir)}/{prefix}"]
         proc.run(sandbox.command(workdir, args, memory=2 * 1024 ** 3), timeout=TIMEOUT)
-    return {p: out / f"p{p}.png" for p in pages if (out / f"p{p}.png").exists()}
+        for path in out.glob(f"{prefix}-*.png"):
+            number = path.stem.rsplit("-", 1)[1]
+            if number.isdigit() and first <= int(number) - 1 <= last:
+                images[int(number) - 1] = path
+    return images
 
 
 def _tesseract(images: list[Path], langs: str, workdir: Path, tag: str, tsv: bool = False) -> list[str]:

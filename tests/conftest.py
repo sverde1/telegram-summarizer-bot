@@ -88,6 +88,11 @@ def fresh_state(tmp_path, monkeypatch):
     import threading
     from summarizer import proc
     monkeypatch.setattr(proc, "current_job_cancel", threading.Event())
+    # OCR models live in the worker's data dir, shared by its tests: start each test with none added.
+    for folder in ("tessdata", "rapidocr"):
+        shutil.rmtree(config.DATA_DIR / folder, ignore_errors=True)
+    from summarizer import ocr
+    monkeypatch.setattr(ocr, "_cuda_ok", None)
     # Pretend the installed Codex knows every feature we disable (asking it would spawn codex).
     monkeypatch.setattr(summarize, "_codex_known_features", set(summarize.CODEX_DISABLED_FEATURES))
 

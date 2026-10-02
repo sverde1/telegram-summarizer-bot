@@ -48,9 +48,9 @@ Dropbox link): the whole book, or chapter by chapter. Scanned PDFs are read with
 ### Software
 
 - Linux with Python 3.11+ and `bwrap` (bubblewrap) for the Codex and document sandboxes.
-- poppler-utils (`pdftotext`, `pdftoppm`) for PDFs. Scanned documents are read by RapidOCR (installed with
-  the Python dependencies; can use an NVIDIA GPU) or Tesseract (`OCR_ENGINE=tesseract`). Tesseract is
-  recommended either way: it also checks a scan's script (Latin, Cyrillic, …) before OCR.
+- poppler-utils (`pdftotext`, `pdftoppm`) for PDFs, and Tesseract for scanned documents: on the CPU it read
+  a test book 5× faster than RapidOCR with the same text, and it checks a scan's script (Latin, Cyrillic, …)
+  before OCR. With an NVIDIA GPU, RapidOCR (installed with the Python dependencies) is used instead.
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 - At least one LLM:
   - [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) and a ChatGPT plan, or
@@ -124,8 +124,7 @@ sudo apt install git python3 python3-venv bubblewrap nodejs npm poppler-utils te
 ```
 
 `bubblewrap` (`bwrap`) sandboxes the Codex CLI and the reading of uploaded files; `nodejs`/`npm` are only
-needed to install Codex. `poppler-utils` reads PDFs; `tesseract-ocr` checks a scan's script (and reads
-scans itself with `OCR_ENGINE=tesseract`).
+needed to install Codex. `poppler-utils` reads PDFs; `tesseract-ocr` reads scanned ones.
 Further OCR languages are added from Telegram with `/ocrlang`, no system packages needed.
 
 ### 2. Get the code and install the Python dependencies
@@ -244,8 +243,8 @@ The database migrates itself on start.
 | `MAX_DOC_PAGES` | `2000` | Most pages read from an uploaded document (EPUB/DOCX/TXT count ~2000 characters as a page). |
 | `MAX_DOC_CHARS` | `3000000` | Most characters read from an uploaded document. |
 | `MAX_LINK_DOWNLOAD_MB` | `100` | Largest document downloaded from a Google Drive / Dropbox link. |
-| `OCR_ENGINE` | `rapidocr` | Text recognition for scanned PDFs: `rapidocr` (Python/ONNX, no system install, can use a GPU) or `tesseract` (system package, CPU only; often slightly more accurate on clean scans). |
-| `OCR_DEVICE` | `cpu` | `cuda` runs RapidOCR on an NVIDIA GPU (see GPU below); falls back to the CPU when CUDA isn't available. |
+| `OCR_ENGINE` | `auto` | Text recognition for scanned PDFs. `auto`: RapidOCR when `OCR_DEVICE=cuda` works, else Tesseract (measured on a 475-page scanned book, 4 cores, 3 workers: Tesseract 1.2 s/page, RapidOCR 6.4 s/page, same text). Or force `tesseract` / `rapidocr`. Switching engines needs the OCR languages added again (`/ocrlang`); the bot logs which at startup. |
+| `OCR_DEVICE` | `cpu` | `cuda` runs OCR with RapidOCR on an NVIDIA GPU (see GPU below); falls back to Tesseract on the CPU when CUDA isn't available. |
 | `OCR_DAILY_LIMIT` | `5` | Scanned documents a user may have read per rolling 24 h (admins: no limit; `0` = no limit). Once changed with `/limit ocr`, the stored value wins. |
 | `OCR_MAX_PAGES` | `400` | Longest scan read without an admin's approval (pages needing OCR). |
 | `OCR_WORKERS` | `3` | OCR processes in parallel (one thread each); keep below the number of cores. |
@@ -267,8 +266,9 @@ To run Whisper on an NVIDIA GPU:
 
 The bot test-runs the model when it loads and falls back to the CPU if CUDA isn't working.
 
-To run OCR (RapidOCR) on the GPU too: `.venv/bin/pip uninstall -y onnxruntime && .venv/bin/pip install
-onnxruntime-gpu` (faster-whisper works with either), set `OCR_DEVICE=cuda`, and restart. A page then takes
+To run OCR on the GPU too: `.venv/bin/pip uninstall -y onnxruntime && .venv/bin/pip install
+onnxruntime-gpu` (faster-whisper works with either), set `OCR_DEVICE=cuda`, and restart; with the default
+`OCR_ENGINE=auto` that switches OCR to RapidOCR (add the OCR languages again with `/ocrlang`). A page then takes
 a fraction of a second instead of a few seconds; OCR runs as one process that gets the GPU's devices in its
 sandbox. Without a working CUDA runtime it logs a warning and stays on the CPU.
 
@@ -307,7 +307,7 @@ failing that, from headings like "Chapter 3" / "Poglavje 3"; very many short cha
 without any structure is split into parts. Old Word `.doc` and Kindle files must be converted to PDF or
 EPUB first; password-protected PDFs and copy-protected (DRM) e-books can't be read.
 
-**Scanned PDFs** (pages that are pictures, no text) need OCR, which is slow on a CPU (about 1–3 s per page
+**Scanned PDFs** (pages that are pictures, no text) need OCR, which is slow on a CPU (about 1.2 s per page
 with 3 workers; a 300-page book takes 10–15 minutes) and has its own daily limit (`OCR_DAILY_LIMIT`, default
 5). The bot first checks a few pages for the language, then asks: "312 pages need text recognition, about
 10 min. Start?" Scans longer than `OCR_MAX_PAGES` (400) can't be started by the user; they can ask an admin,

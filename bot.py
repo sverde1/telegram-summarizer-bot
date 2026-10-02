@@ -1962,6 +1962,9 @@ async def post_init(app: Application) -> None:
     Args:
         app: The application being started.
     """
+    if missing := ocr.missing_languages():
+        log.warning("OCR (%s) has no model for installed language(s) %s: add them again with /ocrlang add",
+                    ocr.engine(), ", ".join(missing))
     await app.bot.set_my_commands(STRANGER_COMMANDS, scope=BotCommandScopeDefault())
     for uid in [*access.ADMINS, *(u["id"] for u in access.all_users()["allowed"])]:
         await sync_commands(app.bot, uid)

@@ -313,3 +313,39 @@ def test_cancel_keeps_the_finished_pages(monkeypatch, tmp_path):
 
     _, error = _batched_run(monkeypatch, tmp_path, read)
     assert isinstance(error, proc.ProcCancelled) and db.get_pages("d" * 64).get(0) == "p0"
+
+
+# ---------- rendering ----------
+
+def test_contiguous_runs():
+    assert ocr._runs([5, 0, 1, 2, 9, 10]) == [(0, 2), (5, 5), (9, 10)]
+
+
+def test_rendering_maps_pages_by_the_names_poppler_writes(tmp_path, monkeypatch):
+    scan = make_scan(tmp_path / "s.pdf", [f"Page {i}" for i in range(12)])  # 2-digit names: r0-01.png
+    calls = []
+    real_run = proc.run
+
+    def counting(cmd, **kw):
+        """Counts poppler runs."""
+        calls.append(cmd)
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(proc, "run", counting)
+    images = ocr._render(scan, [0, 1, 2, 7, 10, 11], tmp_path, "t")
+    assert sorted(images) == [0, 1, 2, 7, 10, 11] and len(calls) == 3
+    assert all(path.exists() for path in images.values())
+
+
+def test_page_numbers_for_four_digit_names(tmp_path, monkeypatch):
+    out = tmp_path / "img-t"
+
+    def fake_run(cmd, **kw):
+        """Writes what poppler writes for pages 1000-1001 of a 1500-page PDF."""
+        out.mkdir(exist_ok=True)
+        for n in (1000, 1001):
+            (out / f"r999-{n:04d}.png").write_bytes(b"x")
+
+    monkeypatch.setattr(proc, "run", fake_run)
+    images = ocr._render(tmp_path / "s.pdf", [999, 1000], tmp_path, "t")
+    assert sorted(images) == [999, 1000] and images[999].name == "r999-1000.png"
