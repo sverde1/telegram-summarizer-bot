@@ -38,7 +38,7 @@ def test_block_during_lookup_is_reported(monkeypatch, llm):
 
 def test_block_during_captions_is_not_swallowed(monkeypatch, llm):
     from helpers import meta
-    monkeypatch.setattr(media, "probe", lambda v: meta())
+    monkeypatch.setattr(media, "probe", lambda v, *a, **k: meta())
     monkeypatch.setattr(media, "_ytdlp", _blocked)  # fetch_captions catches other errors and carries on
     with pytest.raises(pipeline.Blocked):
         pipeline.run(LINK, lambda *a: None)

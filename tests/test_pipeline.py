@@ -30,7 +30,7 @@ def test_again_skips_the_cache(fake_media, llm):
 
 
 def test_too_long_video_is_refused(monkeypatch, llm):
-    monkeypatch.setattr(media, "probe", lambda v: meta(duration=10 ** 6))
+    monkeypatch.setattr(media, "probe", lambda v, *a, **k: meta(duration=10 ** 6))
     with pytest.raises(pipeline.PipelineError, match="longer than"):
         pipeline.run(URL, lambda *a: None)
 
@@ -75,13 +75,17 @@ def test_reused_transcript_is_paced_off_the_worker(fake_media, llm):
     assert __import__("time").monotonic() - start < 1  # no sleep in the worker any more
     assert not any("from cache" in s for s in seen) and any("Checking for YouTube captions" in s for s in seen)
     assert not any("Summarizing" in s for s in seen)  # the paced stage stays up while the real work runs
-    pause = pipeline.CAPTIONS_SECONDS * pipeline.REPLAY_SHARE
+    # Owed: the paced transcript step, and the lookup (skipped: the transcript's metadata is stored).
+    pause = (pipeline.CAPTIONS_SECONDS + pipeline.LOOKUP_SECONDS) * pipeline.REPLAY_SHARE
     (text, owed), = r.hold  # the bot waits this out, off the worker
     assert owed == pause and "✅ Transcript ready" in text and text.endswith("Summarizing with Codex (other-model)…")
     assert [n for n, _ in r.replay_steps] == ["lookup", "captions", "summary"]  # footer: what the user saw
+    assert all(sec > 0 for _, sec in r.replay_steps)  # no "lookup 0 s" giving the cache away
     assert r.replay_total == pytest.approx(r.summary["_stats"]["total"] + pause)
+    assert any("Looking up the video" in s for s in seen)
+    assert fake_media.count("probe") == 1  # only the first run looked the video up
     saved = db.get_summary("youtube", "abcdefghijk", "codex", "other-model")["result"]["_stats"]
-    assert [n for n, _ in saved["steps"]] == ["lookup", "summary"]  # stored: the real work only
+    assert [n for n, _ in saved["steps"]] == ["summary"]  # stored: the real work only (no lookup needed)
 
 
 def test_reused_transcript_is_not_paced_for_admins_or_repeat_requesters(fake_media, llm):

@@ -118,7 +118,9 @@ worker for pacing: it would hold up everyone else's jobs. The footer shows `repl
 matches the wait. Status lines must not mention the cache (`hide_cache`).
 
 **Platform gotchas** (each was hit in practice):
-- Run yt-dlp / gallery-dl from the venv (`config.YTDLP`), never a system binary.
+- Run yt-dlp / gallery-dl from the venv (`config.YTDLP`), never a system binary. After the probe, yt-dlp
+  calls for the same job go through `media._from_info` (the stored `info.json`, no new lookup); TikTok's
+  Whisper download is the video file that frames reuse (`download_video` returns an existing `vid.*`).
 - Probe TikTok via the `/video/` URL (yt-dlp rejects `/photo/`). Carousels show up as posts without
   video formats, or without any formats when there's no music (`--ignore-no-formats-error`).
 - Whisper: always auto-detect the language and use multilingual models; forcing English on other

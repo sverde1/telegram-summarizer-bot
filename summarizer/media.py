@@ -123,13 +123,45 @@ def _ytdlp(*args: str, timeout: int = 900) -> subprocess.CompletedProcess:
                 timeout=timeout)
 
 
+INFO_JSON = "info.json"  # yt-dlp's full answer from the probe, in the job's workdir (see _from_info)
+# yt-dlp errors that mean the stored info's media URLs have expired (YouTube signs them for a few hours).
+_EXPIRED = re.compile(r"\b(403|410)\b|forbidden|expired", re.I)
+
+
+def _from_info(video: Video, workdir: Path, args: list[str], timeout: int) -> subprocess.CompletedProcess:
+    """Runs yt-dlp for this job's video, from the probe's stored info when there is one.
+
+    `--load-info-json` makes yt-dlp skip extraction: no second (third, fourth) load of the video page, no
+    `--sleep-requests` waits, and the same formats and subtitles the probe saw. If the stored URLs have
+    expired, the video is looked up again once. Without stored info (e.g. a summary written from a cached
+    transcript, where the probe was skipped) the URL is used, which does the lookup then.
+
+    Raises:
+        MediaError: yt-dlp failed (Blocked for a platform ban, never retried).
+    """
+    info = workdir / INFO_JSON
+    if info.exists():
+        try:
+            return _ytdlp(*args, "--load-info-json", str(info), timeout=timeout)
+        except Blocked:
+            raise
+        except MediaError as e:
+            if not _EXPIRED.search(str(e)):
+                raise
+            log.info("stored video info expired (%s); looking the video up again", e)
+            info.unlink(missing_ok=True)
+    return _ytdlp(*args, video.url, timeout=timeout)
+
+
 # ---------- metadata ----------
 
-def probe(video: Video) -> dict:
+def probe(video: Video, info_path: Path | None = None) -> dict:
     """Fetches a video's metadata in one cheap request, without downloading media.
 
     Args:
         video: The classified video.
+        info_path: Where to keep yt-dlp's full answer, so this job's later yt-dlp calls don't look the
+            video up again (see _from_info). Job workdir only: it holds signed URLs and cookies.
 
     Returns:
         A dict with id, title, description (first 3000 characters), uploader, duration (seconds, 0 if
@@ -142,7 +174,8 @@ def probe(video: Video) -> dict:
     # A TikTok carousel without music has no formats at all; still return its metadata.
     extra = ["--ignore-no-formats-error"] if video.platform == "tiktok" else []
     try:
-        d = json.loads(_ytdlp("--skip-download", "-J", *extra, video.url, timeout=120).stdout)
+        raw = _ytdlp("--skip-download", "-J", *extra, video.url, timeout=120).stdout
+        d = json.loads(raw)
     except MediaError as e:
         # yt-dlp often refuses live streams itself ("This live stream recording is not available.", "This
         # live event will begin in …", "Premieres in …"): give those the same clear message.
@@ -160,6 +193,8 @@ def probe(video: Video) -> dict:
         raise NotProcessable(LIVE)
     if live == "is_upcoming":
         raise NotProcessable(UPCOMING)
+    if info_path is not None:
+        info_path.write_text(raw)
     title = d.get("title") or ""
     if video.platform == "tiktok":
         # TikTok "title" is a truncated description; the full caption is more useful.
@@ -287,8 +322,8 @@ def fetch_captions(video: Video, meta: dict, workdir: Path) -> tuple[list[tuple[
     lang, is_auto = choice
     flag = "--write-auto-subs" if is_auto else "--write-subs"
     try:
-        _ytdlp("--skip-download", flag, "--sub-langs", lang, "--sub-format", "vtt/best",
-               "-o", str(workdir / "cap.%(ext)s"), video.url, timeout=120)
+        _from_info(video, workdir, ["--skip-download", flag, "--sub-langs", lang, "--sub-format", "vtt/best",
+                                    "-o", str(workdir / "cap.%(ext)s")], timeout=120)
     except Blocked:
         raise  # a ban affects every download: report it instead of carrying on without captions
     except MediaError as e:
@@ -311,14 +346,19 @@ def download_audio(video: Video, workdir: Path) -> Path:
         workdir: The job's temp directory.
 
     Returns:
-        Path of the audio file, in whatever container the platform serves (m4a, webm, mp3...).
+        Path of the audio file, in whatever container the platform serves (m4a, webm, mp3...). For TikTok
+        it is the video file itself (see below), which frames then reuse.
 
     Raises:
         MediaError: yt-dlp failed or produced no file.
     """
+    if video.platform == "tiktok":
+        # TikTok has no separate audio stream: "bestaudio" was the whole video anyway, and frames downloaded
+        # it a second time. One download, of the format frames want, serves both.
+        return download_video(video, workdir)
     # No re-encode (no -x): transcribe decodes any container with ffmpeg itself, and yt-dlp's audio
     # extraction would need ffprobe, which the bundled imageio-ffmpeg doesn't include.
-    _ytdlp("-f", "bestaudio/best", "-o", str(workdir / "audio.%(ext)s"), video.url)
+    _from_info(video, workdir, ["-f", "bestaudio/best", "-o", str(workdir / "audio.%(ext)s")], timeout=900)
     # A .part file is an interrupted download, not the result.
     files = [f for f in workdir.glob("audio.*") if f.suffix != ".part"]
     if not files:
@@ -334,21 +374,23 @@ def download_video(video: Video, workdir: Path) -> Path:
         workdir: The job's temp directory.
 
     Returns:
-        Path of the video file.
+        Path of the video file (one already downloaded in this job is reused).
 
     Raises:
         MediaError: yt-dlp failed or produced no file.
     """
+    if existing := [f for f in workdir.glob("vid.*") if f.suffix != ".part"]:
+        return existing[0]  # TikTok: already downloaded for Whisper
     if video.platform == "tiktok":
-        # "download" is TikTok's watermark-free format; then any h264 stream (decodes everywhere; some
-        # TikTok formats are h265), then whatever exists.
-        fmt = "download/best[vcodec^=h264]/best"
+        # An h264 stream (decodes everywhere; some TikTok formats are h265), else whatever exists. Not
+        # "download": in yt-dlp's TikTok extractor that is the watermarked web file.
+        fmt = "best[vcodec^=h264]/best"
     else:
         # 720p is plenty to read on-screen text, and keeps long YouTube downloads small. A combined file
         # (b) first, else video-only (bv*: frames don't need audio, and nothing has to be merged);
         # h264 (avc1) first within each, since it decodes everywhere.
         fmt = "b[height<=720][vcodec^=avc1]/bv*[height<=720][vcodec^=avc1]/b[height<=720]/bv*[height<=720]/b"
-    _ytdlp("-f", fmt, "-o", str(workdir / "vid.%(ext)s"), video.url, timeout=1800)
+    _from_info(video, workdir, ["-f", fmt, "-o", str(workdir / "vid.%(ext)s")], timeout=1800)
     files = [f for f in workdir.glob("vid.*") if f.suffix != ".part"]
     if not files:
         raise MediaError("video download produced no file")

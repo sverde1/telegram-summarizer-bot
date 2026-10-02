@@ -298,7 +298,7 @@ def codex_home():
 def fake_media(monkeypatch):
     """Replaces all downloads: a captioned 10-minute YouTube video, no thumbnail."""
     calls = []
-    monkeypatch.setattr(media, "probe", lambda v: calls.append("probe") or meta())
+    monkeypatch.setattr(media, "probe", lambda v, *a, **k: calls.append("probe") or meta())
     monkeypatch.setattr(media, "fetch_captions",
                         lambda v, m, w: calls.append("captions") or ([(0.0, "word " * 400)], "en"))
     monkeypatch.setattr(media, "download_thumbnail", lambda m, w: None)

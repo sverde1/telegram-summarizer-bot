@@ -78,7 +78,7 @@ def test_a_cancelled_video_is_not_marked_failed(monkeypatch, llm):
     from summarizer import media
     from helpers import meta
 
-    def probe(v):
+    def probe(v, *a, **k):
         """Probes, then the job gets cancelled."""
         proc.current_job_cancel.set()
         return meta()

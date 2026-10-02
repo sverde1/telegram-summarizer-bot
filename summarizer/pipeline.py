@@ -9,6 +9,7 @@ import shutil
 from pathlib import Path
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from . import config, db, frames, media, memory, proc, stats, summarize, transcribe
@@ -385,32 +386,49 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         """
         timings.append((label, time.monotonic() - since))
 
-    st.show("🔎 Looking up the video…")
-    t = time.monotonic()
-    try:
-        meta = media.probe(video)
-        took("lookup", t)
-        db.update_video(video.platform, video.video_id, meta=meta, title=meta["title"][:300])
-    except media.Blocked:
-        raise  # handled in run(): a ban has its own message and admin notice
-    except media.MediaError as e:
-        raise PipelineError(media.describe(e), detail=str(e))
-    dur = meta["duration"] or 0
-    if video.kind == "photo" or meta.get("is_carousel"):
-        st.head = f"🖼 {meta['title'][:80]} (photo post)"  # "duration" would be the music's
-    else:
-        st.head = f"🎬 {meta['title'][:80]} ({_fmt_duration(dur)})"
-    if dur > config.MAX_DURATION_MIN * 60:
-        raise PipelineError(f"Video is longer than {config.MAX_DURATION_MIN} min; skipping.")
-    if not dur and not (video.kind == "photo" or meta.get("is_carousel")):
-        # Without a length there's no limit on the download (and the length check above can't work).
-        # Carousels are fine: their "duration" is just the background music's, if any.
-        raise PipelineError("Couldn't determine this video's length, so it can't be processed.")
-
     workdir = config.DATA_DIR / "work" / f"{video.platform}_{video.video_id}"
     shutil.rmtree(workdir, ignore_errors=True)  # leftovers from a crashed earlier run
     workdir.mkdir(parents=True)
+    # A saved transcript makes the lookup unnecessary: its metadata is stored with it, and nothing needs
+    # downloading unless the LLM asks for frames (then the video download looks it up itself).
+    reuse_meta = bool(cached and cached.get("meta") and cached["transcript_source"] not in (None, "none"))
+    owed_lookup = 0.0  # a first-time requester is still shown a lookup step (paced, see Result.hold)
+    try:
+        if reuse_meta:
+            meta = cached["meta"]
+            if hide_cache:
+                st.show("🔎 Looking up the video…")
+                owed_lookup = LOOKUP_SECONDS * REPLAY_SHARE
+        else:
+            st.show("🔎 Looking up the video…")
+            t = time.monotonic()
+            try:
+                # The full answer is kept for this job's later yt-dlp calls (captions, downloads).
+                meta = media.probe(video, workdir / media.INFO_JSON)
+                took("lookup", t)
+                db.update_video(video.platform, video.video_id, meta=meta, title=meta["title"][:300])
+            except media.Blocked:
+                raise  # handled in run(): a ban has its own message and admin notice
+            except media.MediaError as e:
+                raise PipelineError(media.describe(e), detail=str(e))
+        dur = meta["duration"] or 0
+        if video.kind == "photo" or meta.get("is_carousel"):
+            st.head = f"🖼 {meta['title'][:80]} (photo post)"  # "duration" would be the music's
+        else:
+            st.head = f"🎬 {meta['title'][:80]} ({_fmt_duration(dur)})"
+        if dur > config.MAX_DURATION_MIN * 60:
+            raise PipelineError(f"Video is longer than {config.MAX_DURATION_MIN} min; skipping.")
+        if not dur and not (video.kind == "photo" or meta.get("is_carousel")):
+            # Without a length there's no limit on the download (and the length check above can't work).
+            # Carousels are fine: their "duration" is just the background music's, if any.
+            raise PipelineError("Couldn't determine this video's length, so it can't be processed.")
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
     llm = summarize.llm_label(backend, model or "")  # replaced by the model that actually answers, below
+    # The thumbnail (for the clickbait check) downloads while the transcript is made; not for /transcript.
+    side = ThreadPoolExecutor(max_workers=1)
+    thumb_job = None if transcript_only else side.submit(media.download_thumbnail, meta, workdir)
     paced: tuple[str, float] | None = None  # the paced transcript step shown to a first-time requester
     try:
         cues, source, lang, images, notes = [], "none", "", [], []
@@ -466,7 +484,18 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             images = _frames(video, meta, cues, [], workdir, st, notes, why="no speech, looking at the video")
             took(f"{len(images)} frames", t)
 
-        thumb = media.download_thumbnail(meta, workdir)  # needed to judge clickbait thumbnails
+        try:
+            thumb = thumb_job.result(timeout=35) if thumb_job else None  # needed to judge clickbait thumbnails
+        except Exception:  # noqa: BLE001  (the thumbnail is optional)
+            thumb = None
+        if thumb is None and reuse_meta and meta.get("thumbnail"):
+            # Stored metadata may hold an expired thumbnail URL (TikTok signs them): look the video up again.
+            try:
+                thumb = media.download_thumbnail(media.probe(video, workdir / media.INFO_JSON), workdir)
+            except media.Blocked:
+                raise
+            except media.MediaError as e:
+                notes.append(f"thumbnail lookup failed: {e}")
         first_images = ([(thumb, "thumbnail")] if thumb else []) + images  # slides or frames, if any
         conv = summarize.conversation(backend, model)
         try:
@@ -514,12 +543,15 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         # Keyed by backend + model so users on different models don't overwrite each other's summaries.
         db.save_summary(video.platform, video.video_id, backend, model or conv.model, summary, bool(images))
         result = _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
-        if paced:  # the footer shows what this user saw: the paced transcript step after the lookup
-            result.replay_steps = timings[:1] + [paced] + timings[1:]
-            result.replay_total = total + paced[1]
-            result.hold = [(st.text(f"🧠 Summarizing with {llm}…"), paced[1])]
+        if paced:  # the footer shows what this user saw: the lookup, the paced transcript step, the rest
+            owed = paced[1] + owed_lookup
+            lookup = [("lookup", owed_lookup)] if reuse_meta else timings[:1]
+            result.replay_steps = lookup + [paced] + (timings if reuse_meta else timings[1:])
+            result.replay_total = total + owed
+            result.hold = [(st.text(f"🧠 Summarizing with {llm}…"), owed)]
         return result
     finally:
+        side.shutdown(wait=True)  # the thumbnail download must be done before its folder goes
         shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media
 
 
@@ -647,7 +679,8 @@ def _whisper(video, meta, workdir, st: Status, notes, why: str, rest: float) -> 
     st.show(f"🗣 {why} → transcribing {_fmt_duration(dur)} of audio with {whisper}…",
             transcribe.estimate(dur) + rest)
     cues, lang, prob = transcribe.transcribe(str(audio))
-    audio.unlink(missing_ok=True)
+    if not audio.name.startswith("vid."):  # a TikTok video file stays for frames (deleted with the workdir)
+        audio.unlink(missing_ok=True)
     log.info("whisper: %d segments, lang=%s p=%.2f", len(cues), lang, prob)
     st.ok(f"✅ Transcript: Whisper, language {lang}" if cues else "✅ Whisper: no speech found")
     return cues, f"whisper-{config.WHISPER_MODEL}", lang

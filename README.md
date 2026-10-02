@@ -326,8 +326,10 @@ file names in `/history`.
 1. **Link check** as soon as the link arrives: only YouTube/TikTok hosts, no network needed; then the
    daily limit (100 links per 24 h by default) and queue limits (3 per user, 20 in total); admins exempt.
 2. **URL** → platform + id (tracking parameters stripped, TikTok short links resolved hop by hop).
-3. **Lookup** with yt-dlp. TikTok carousels are detected here (no video formats); live streams and
-   videos of unknown length are refused.
+3. **Lookup** with yt-dlp, once per job: captions and downloads reuse its answer (`--load-info-json`), so
+   the video page isn't fetched again (it is once more only if the stored links expired). A summary written
+   from a saved transcript (another model, `/again`) needs no lookup at all. TikTok carousels are detected
+   here (no video formats); live streams and videos of unknown length are refused.
 4. **Transcript:** YouTube captions → Whisper. TikTok: Whisper → TikTok's captions. Carousels: slides
    via gallery-dl instead. No or hardly any speech → frames are grabbed right away. Before Whisper, the
    memory guard checks the transcription fits in RAM; if not, the job waits while others go first.

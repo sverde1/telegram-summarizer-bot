@@ -33,7 +33,7 @@ def test_fit_checks(monkeypatch):
 @pytest.fixture
 def needs_whisper(monkeypatch, llm):
     """A 30-minute YouTube video without captions, so it needs Whisper."""
-    monkeypatch.setattr(media, "probe", lambda v: meta(duration=1800, subtitles={}))
+    monkeypatch.setattr(media, "probe", lambda v, *a, **k: meta(duration=1800, subtitles={}))
     monkeypatch.setattr(media, "fetch_captions", lambda *a: None)
 
 

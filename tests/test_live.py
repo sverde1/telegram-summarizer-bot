@@ -35,13 +35,13 @@ def test_finished_stream_with_recording_is_fine(monkeypatch):
 
 
 def test_unknown_length_is_refused(monkeypatch, llm):
-    monkeypatch.setattr(media, "probe", lambda v: meta(duration=0))
+    monkeypatch.setattr(media, "probe", lambda v, *a, **k: meta(duration=0))
     with pytest.raises(pipeline.PipelineError, match="Couldn't determine this video's length"):
         pipeline.run(LINK, lambda *a: None)
 
 
 def test_carousel_without_music_has_no_length_and_is_fine(monkeypatch, llm, tmp_path):
-    monkeypatch.setattr(media, "probe", lambda v: meta(duration=0, is_carousel=True))
+    monkeypatch.setattr(media, "probe", lambda v, *a, **k: meta(duration=0, is_carousel=True))
     slide = tmp_path / "01.jpg"
     from PIL import Image
     Image.new("RGB", (10, 10)).save(slide)
