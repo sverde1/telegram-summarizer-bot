@@ -21,7 +21,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
                           MessageHandler, filters)
 
 import access
-from summarizer import config, db, memory, pipeline, proc, stats, summarize, updates
+from summarizer import config, db, memory, pipeline, proc, stats, summarize, transcribe, updates
 from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -71,7 +71,8 @@ class Job:
     model: str | None = None
     cancel_reason: str | None = None  # set when the job is cancelled; the text shown to the user
     waiting_since: float | None = None  # when it was first set aside for lack of memory (monotonic)
-    memory_needed: int = 0  # bytes its transcription needs (for the re-checks while it waits)
+    memory_needed: int = 0  # bytes its transcription needs (shown while it waits)
+    audio_seconds: float = 0  # its audio length, to re-estimate the memory need on each re-check
 
 
 # A single queue drained by a single worker: jobs run one at a time, so Whisper (CPU-heavy) never runs
@@ -950,11 +951,11 @@ def _unpark(job: "Job") -> bool:
     return False
 
 
-async def _set_aside(app: Application, job: "Job", needed: int) -> None:
+async def _set_aside(app: Application, job: "Job", needed: int, duration: float = 0) -> None:
     """Parks a job that needs more memory than is free, and shows why, with a button to stop waiting."""
     if job.waiting_since is None:
         job.waiting_since = time.monotonic()
-    job.memory_needed = needed
+    job.memory_needed, job.audio_seconds = needed, duration
     _waiting_for_memory.append(job)
     db.update_request(job.request_id, status="queued")
     text = (f"🧠 Not enough free memory to transcribe this video right now (needs about "
@@ -966,6 +967,14 @@ async def _set_aside(app: Application, job: "Job", needed: int) -> None:
         await app.bot.edit_message_text(text, job.chat_id, job.status_id, reply_markup=button)
     except TelegramError as e:
         log.debug("couldn't show the memory wait: %s", e)
+
+
+def _memory_needed_now(job: "Job") -> int:
+    """A waiting job's memory need, re-estimated: the model may have been loaded by another job since (it's
+    then part of the bot's memory already and mustn't be counted again)."""
+    if not job.audio_seconds:
+        return job.memory_needed
+    return memory.whisper_needs(job.audio_seconds, transcribe.is_loaded())
 
 
 async def _next_job(app: Application) -> tuple["Job | None", bool]:
@@ -991,7 +1000,7 @@ async def _next_job(app: Application) -> tuple["Job | None", bool]:
             db.update_request(job.request_id, status="failed", error="waited too long for memory")
             await _fail(app, job, f"🧠 Still not enough free memory after {config.WHISPER_RAM_WAIT_MIN} min. "
                                   "Please try again later.")
-        elif memory.fits_now(job.memory_needed):
+        elif memory.fits_now(_memory_needed_now(job)):
             _unpark(job)
             return job, False
     try:
@@ -1089,7 +1098,7 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             await _report_cancel(app, job)
             return False
         if isinstance(e, memory.NeedsMemory):
-            await _set_aside(app, job, e.needed)
+            await _set_aside(app, job, e.needed, e.duration)
             return True
         if isinstance(e, UserBlockedBot):
             db.update_request(job.request_id, status="failed", error="user blocked the bot")

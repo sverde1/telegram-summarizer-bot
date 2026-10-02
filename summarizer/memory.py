@@ -21,10 +21,12 @@ _DEFAULT_MODEL_BYTES = 3.5 * GB  # large-v2 / large-v3 and anything unknown
 class NeedsMemory(Exception):
     """There isn't enough free memory to transcribe this video right now; the job should wait."""
 
-    def __init__(self, needed: int):
-        """Stores how many bytes the transcription needs."""
+    def __init__(self, needed: int, duration: float = 0):
+        """Stores how many bytes the transcription needs, and the audio length it was estimated for (so a
+        waiting job can re-estimate later, e.g. once the model is loaded and no longer needs counting)."""
         super().__init__(f"needs {needed / GB:.1f} GB")
         self.needed = needed
+        self.duration = duration
 
 
 def _meminfo(field: str) -> int:

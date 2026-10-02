@@ -513,7 +513,7 @@ def _whisper(video, meta, workdir, st: Status, notes, why: str, rest: float) -> 
                             f"{needed / memory.GB:.1f} GB of memory, more than the bot may use.",
                             detail=f"needs {needed} B, cap {memory.cap()} B")
     if not memory.fits_now(needed):
-        raise memory.NeedsMemory(needed)  # the worker sets the job aside and retries it later
+        raise memory.NeedsMemory(needed, dur)  # the worker sets the job aside and retries it later
     whisper = f"Whisper ({config.WHISPER_MODEL}, {config.WHISPER_DEVICE.upper()})"
     st.show(f"🎧 {why} → downloading audio for {whisper}…",
             _eta_audio(dur) + transcribe.estimate(dur) + rest)

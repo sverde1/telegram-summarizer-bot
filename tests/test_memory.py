@@ -124,3 +124,26 @@ async def test_waiting_gives_up_after_the_limit(app, telegram, two_jobs, monkeyp
     task.cancel()
     assert "Still not enough free memory" in telegram.sent("editMessageText")[-1]["text"]
     assert bot._user_jobs.get(60, 0) == 0
+
+
+async def test_waiting_job_is_re_estimated_after_the_model_loads(app, telegram, monkeypatch):
+    from summarizer import transcribe
+    monkeypatch.setattr(bot, "MEMORY_RECHECK", 0.05)
+    monkeypatch.setattr(transcribe, "_model", None)
+    budget = memory.whisper_needs(600, model_loaded=True)  # fits only without the model counted
+    monkeypatch.setattr(memory, "fits_now", lambda needed: needed <= budget)
+    access.set_state(60, "allowed")
+    job = bot.Job("https://youtu.be/aaaaaaaaaaa", chat_id=60, status_id=1, user_id=60,
+                  request_id=db.add_request(60, "u", "summary"))
+    bot._jobs[job.request_id] = job
+    bot._user_jobs[60] += 1
+    await bot._set_aside(app, job, memory.whisper_needs(600, model_loaded=False), 600)
+    resumed = []
+    monkeypatch.setattr(pipeline, "run", lambda url, *a, **k: resumed.append(url) or (_ for _ in ()).throw(
+        pipeline.PipelineError("x")))
+    task = asyncio.create_task(bot.worker(app))
+    await asyncio.sleep(0.2)
+    assert resumed == []  # model not loaded yet: still doesn't fit
+    monkeypatch.setattr(transcribe, "_model", object())  # another job loaded Whisper
+    await _wait_for(lambda: resumed)
+    task.cancel()
