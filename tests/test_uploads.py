@@ -157,6 +157,31 @@ async def test_pick_a_chapter_counts_once(app, telegram, tmp_path):
     assert db.daily_usage(ANA)[0] == 2
 
 
+async def test_pick_is_immediate_once_the_upload_was_read(app, telegram, tmp_path):
+    up = await _upload(app, telegram, ANA, _book_pdf(tmp_path))
+    await send(app, callback_update(ANA, f"book:{up}:whole"))
+    await _work(app)
+    requests = len(db.recent_requests(ANA))
+    await send(app, callback_update(ANA, f"book:{up}:pick"))  # no worker running: it must not need one
+    listing = telegram.sent("sendMessage")[-1]
+    assert "pick a chapter" in listing["text"] and f"book:{up}:ch:1" in str(listing["reply_markup"])
+    assert bot.queue.qsize() == 0 and len(db.recent_requests(ANA)) == requests  # nothing queued or counted
+    await send(app, callback_update(ANA, f"book:{up}:ch:1"))
+    await _work(app)
+    assert "<b>Dogs</b>\nS1" in telegram.sent("sendMessage")[-1]["text"]
+    assert len(db.recent_requests(ANA)) == requests + 1  # the chapter is the request
+
+
+async def test_pick_on_someone_elses_copy_still_reads_it_first(app, telegram, tmp_path):
+    pdf = _book_pdf(tmp_path)
+    up = await _upload(app, telegram, ANA, pdf)
+    await send(app, callback_update(ANA, f"book:{up}:whole"))
+    await _work(app)
+    up2 = await _upload(app, telegram, BOB, pdf, file_id="F2")
+    await send(app, callback_update(BOB, f"book:{up2}:pick"))
+    assert bot.queue.qsize() == 1  # a job, like a fresh upload: nothing reveals the file was known
+
+
 async def test_chapter_list_pages(app, telegram, tmp_path):
     chapters = [(f"Chapter {i}", "text " * 20) for i in range(1, 13)]
     up = await _upload(app, telegram, ANA, make_epub(tmp_path / "b.epub", chapters))

@@ -316,7 +316,8 @@ kept like any other, so a scan is read only once. A scan in a language that isn'
 the list of supported ones; admins add languages with `/ocrlang`.
 
 Each request counts toward the daily limit (picking a chapter from a list you just requested doesn't count
-again). Files are parsed in a sandbox without network access. Only the extracted text is kept (by the file's
+again). Once a file has been read, "Pick a chapter" shows the list at once, without queueing; only the
+chapter you tap is a request. Files are parsed in a sandbox without network access. Only the extracted text is kept (by the file's
 SHA-256, like video transcripts), so the same file is read once; summaries are cached per model. Admins see
 file names in `/history`.
 

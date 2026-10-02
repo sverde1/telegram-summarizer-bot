@@ -898,6 +898,17 @@ async def on_book_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if action not in (*BOOK_MODES, "ch") or (action == "ch" and arg is None):
         await q.answer("This isn't available.")
         return
+    if action == "pick":
+        # This upload was read already: its chapter list is stored, so show it now instead of queueing a
+        # job (which would wait behind whatever runs, e.g. this book's other summaries). Nothing is
+        # summarized, so nothing counts; the chapter tapped next is the request. Only for this very upload:
+        # another user's upload of the same file reads it first, which keeps that a fresh-looking run.
+        doc = db.get_document(upload["sha256"]) if upload["sha256"] else None
+        if doc and doc["status"] == "done" and doc["chapters"]:
+            text, markup = _chapter_list(upload["id"], upload["name"], doc["chapters"], 0)
+            await q.answer()
+            await ctx.bot.send_message(q.message.chat.id, text, reply_markup=markup)
+            return
     request_id = None
     if action == "ch":  # the first chapter picked from a list continues the list's request
         request_id = db.waiting_request(uid, upload["sha256"]) if upload["sha256"] else None
