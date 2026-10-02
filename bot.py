@@ -89,6 +89,7 @@ class Job:
     book_mode: str = ""  # whole | short | each | pick
     chapter: int | None = None  # for "pick": the chosen chapter (None: show the chapter list)
     ocr_ok: bool = False  # the user confirmed OCR of this scanned document
+    voice_of: int = 0  # 🔊: the request whose summary to read aloud; 0 for everything else
     started_at: float = 0.0  # when the worker started it (monotonic); the status's elapsed time counts from it
 
 
@@ -1483,7 +1484,9 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
     try:
         progress = Progress(app, loop, job)
         try:
-            if job.upload_id:
+            if job.voice_of:
+                result = await _run_voice(app, job, progress)
+            elif job.upload_id:
                 result = await _run_document(app, job, progress)
             else:
                 # The pipeline blocks (downloads, Whisper, LLM subprocesses): run it off the event loop.
@@ -1840,6 +1843,9 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
         TelegramError: Telegram refused the message.
     """
     bot_ = app.bot
+    if isinstance(result, tts.VoiceResult):
+        await _send_voice(app, job, result)
+        return
     if isinstance(result, documents.DocResult):
         reveal = access.is_admin(job.user_id) or db.user_saw_video(job.user_id, "document", result.video_id,
                                                                     job.request_id)
@@ -1847,6 +1853,7 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
         # Under a whole-book summary: the chapter options, for a reader who wants more detail.
         more = (_book_menu(job.upload_id, chapters=True, back=False)
                 if result.kind == "book" and len(result.doc.get("chapters") or []) > 1 else None)
+        more = _with_listen(more, job, *tts.document_text(result))
         for k, chunk in enumerate(chunks, 1):
             await _send_with_retry(lambda chunk=chunk, k=k: bot_.send_message(
                 job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
@@ -1867,9 +1874,144 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
     # would reveal what other users submit.
     reveal = access.is_admin(job.user_id) or db.user_saw_video(
         job.user_id, result.platform, result.video_id, job.request_id)
-    for chunk in render(result, waited, reveal_cache=reveal):
-        await _send_with_retry(lambda chunk=chunk: bot_.send_message(
-            job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True), job)
+    chunks = render(result, waited, reveal_cache=reveal)
+    listen = _with_listen(None, job, *tts.video_text(result.summary or {}, (result.meta or {}).get("title", "")))
+    for k, chunk in enumerate(chunks, 1):
+        await _send_with_retry(lambda chunk=chunk, k=k: bot_.send_message(
+            job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+            reply_markup=listen if k == len(chunks) else None), job)
+
+
+def _with_listen(markup: InlineKeyboardMarkup | None, job: Job, title: str, text: str) -> InlineKeyboardMarkup | None:
+    """Adds the 🔊 Listen button to a summary's last message, storing first what it will read.
+
+    Stored before the message is sent, so even an immediate tap finds it; it's exactly what the user reads.
+    No button when voice messages aren't available or there's nothing to read.
+    """
+    lang = tts.language()
+    if not tts.available() or not lang or not text.strip():
+        return markup
+    db.save_spoken(job.request_id, title, text, *lang)
+    rows = list(markup.inline_keyboard) if markup else []
+    return InlineKeyboardMarkup(rows + [[InlineKeyboardButton("🔊 Listen", callback_data=f"voice:{job.request_id}")]])
+
+
+VOICE_TOO_OLD = "This summary is too old to read aloud; ask for it again."
+
+
+async def on_voice_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles 🔊 Listen (`voice:<request id>`): queues a voice-message job for that summary.
+
+    Callback data can be forged, so everything is re-checked: private chat, access, that the summary is the
+    user's own (or the user is an admin) and was delivered. Listening doesn't count toward the daily limit;
+    a voice message that has to be made counts toward TTS_DAILY_LIMIT (a reused one is free).
+    """
+    q = update.callback_query
+    parts = (q.data or "").split(":")
+    uid = q.from_user.id
+    req = db.get_request(int(parts[1])) if len(parts) == 2 and parts[1].isdigit() else None
+    if (not _private(update) or access.state(uid) not in ("admin", "allowed") or req is None
+            or (req["user_id"] != uid and not access.is_admin(uid))):
+        await q.answer("This isn't available.")
+        return
+    spoken = db.get_spoken(req["id"])
+    if not spoken or not tts.available():
+        await q.answer(VOICE_TOO_OLD if not spoken else "Voice messages aren't available right now.", show_alert=True)
+        return
+    if any(j.voice_of == req["id"] and not j.cancel_reason for j in _jobs.values()):
+        await q.answer("Already on its way.")
+        return
+    key = tts.key(spoken["text"], spoken["lang"], spoken["voice"])
+    if not access.is_admin(uid) and not db.get_voice(key, config.VOICE_CACHE_DAYS * DAY):
+        used, limit, _, frees_in = _tts_status(uid)
+        if limit and used >= limit:
+            await q.answer(f"You've made {limit} new voice messages today; more in about "
+                           f"{_fmt_until(frees_in or 0)}.", show_alert=True)
+            return
+    if refusal := _refusal(uid, new_request=False):
+        await q.answer(refusal[:200], show_alert=True)
+        return
+    await q.answer()
+    status = await ctx.bot.send_message(q.message.chat.id, _queued_message())
+    job = await _start_job(uid, q.message.chat.id, status.message_id, req["url"], "voice", voice_of=req["id"])
+    db.update_request(job.request_id, platform="voice", video_id=key)  # what db.user_saw_video looks for
+
+
+async def _run_voice(app: Application, job: Job, progress: "Progress") -> tts.VoiceResult:
+    """Makes (or reuses) the voice message for a summary.
+
+    A reused one is paced for a user who hasn't had it before (like other cached answers), off the worker.
+
+    Raises:
+        pipeline.PipelineError: The summary is no longer stored, or the speech failed.
+    """
+    spoken = db.get_spoken(job.voice_of)
+    if not spoken:
+        raise pipeline.PipelineError(VOICE_TOO_OLD)
+    text, lang, voice = spoken["text"], spoken["lang"], spoken["voice"]
+    key = tts.key(text, lang, voice)
+    db.update_request(job.request_id, status="processing")
+    result = tts.VoiceResult(spoken["title"], text, lang, voice, key)
+    estimate = tts.estimate(len(text))
+    status = "🔊 Making the voice message…"
+    if saved := db.get_voice(key, config.VOICE_CACHE_DAYS * DAY):
+        result.file_id, result.duration, result.cached = saved["file_id"], saved["duration"], True
+        if not access.is_admin(job.user_id) and not db.user_saw_video(job.user_id, "voice", key, job.request_id):
+            result.hold = [(status, min(estimate * pipeline.REPLAY_SHARE, pipeline.REPLAY_MAX))]
+        return result
+    progress(status, estimate)
+    result.ogg = await _make_voice(job, result)
+    return result
+
+
+async def _make_voice(job: Job, result: tts.VoiceResult) -> Path:
+    """Runs the speech in the sandbox (off the event loop); returns the .ogg in the job's work folder."""
+    workdir = config.DATA_DIR / "work" / f"voice_{job.request_id}"
+    shutil.rmtree(workdir, ignore_errors=True)
+    workdir.mkdir(parents=True)
+    estimate = tts.estimate(len(result.text))
+    started = time.monotonic()
+    try:
+        ogg = await asyncio.to_thread(tts.synthesize, tts.split(result.text), workdir, voice=result.voice,
+                                      lang=result.lang, speed=config.TTS_SPEED, timeout=estimate * 3 + 120)
+    except proc.ProcCancelled:  # a ProcError, so a RuntimeError too: must stay a cancel
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
+    except RuntimeError as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise pipeline.PipelineError("⚠️ Couldn't make the voice message. Please try again later.", detail=str(e))
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
+    tts.record_speed(len(result.text), time.monotonic() - started)
+    return ogg
+
+
+async def _send_voice(app: Application, job: Job, result: tts.VoiceResult) -> None:
+    """Sends the voice message: the made file, or the reused one by Telegram's id (made again if Telegram no
+    longer knows that id). A made one's id is remembered for VOICE_CACHE_DAYS."""
+    caption = f"🔊 {html.escape(result.title[:200])}"
+    try:
+        if result.file_id:
+            try:
+                await _send_with_retry(lambda: app.bot.send_voice(job.chat_id, result.file_id, caption=caption,
+                                                                  parse_mode=ParseMode.HTML), job)
+                return
+            except BadRequest as e:  # an expired or unknown id: make it again
+                log.info("voice %s no longer usable (%s); making it again", result.key[:12], e)
+                db.delete_voice(result.key)
+                result.ogg, result.cached = await _make_voice(job, result), False
+                db.update_request(job.request_id, cached=0)
+        data = result.ogg.read_bytes()
+        sent = await _send_with_retry(lambda: app.bot.send_voice(
+            job.chat_id, io.BytesIO(data), caption=caption, parse_mode=ParseMode.HTML, write_timeout=120), job)
+        if sent and sent.voice:
+            duration = sent.voice.duration  # a timedelta with PTB_TIMEDELTA (see the top of this file)
+            seconds = int(duration.total_seconds()) if hasattr(duration, "total_seconds") else duration
+            db.save_voice(result.key, sent.voice.file_id, seconds)
+    finally:
+        if result.ogg:
+            shutil.rmtree(result.ogg.parent, ignore_errors=True)
 
 
 INTERNAL_ERROR = "⚠️ Something went wrong on the bot's side."
@@ -2120,6 +2262,7 @@ def add_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(on_llm_button, pattern=r"^llm:"))
     app.add_handler(CallbackQueryHandler(on_cancel_button, pattern=r"^cancel:"))
     app.add_handler(CallbackQueryHandler(on_book_button, pattern=r"^book:"))
+    app.add_handler(CallbackQueryHandler(on_voice_button, pattern=r"^voice:"))
     app.add_handler(CallbackQueryHandler(on_ocr_button, pattern=r"^ocr:"))
     app.add_handler(CallbackQueryHandler(on_ocr_admin_button, pattern=r"^ocradm:"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(allow|block|remove):"))

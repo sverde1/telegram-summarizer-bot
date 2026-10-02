@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import config, fetch, proc, sandbox, stats
@@ -220,3 +221,23 @@ def record_speed(chars: int, seconds: float) -> None:
     """Learns the speed from a finished run (short texts are dominated by the model load)."""
     if chars >= 300:
         stats.record("tts:cpu", max(seconds - LOAD_SECONDS, 0.1) / chars)
+
+
+@dataclass
+class VoiceResult:
+    """A voice message ready to send: a made one (ogg) or a reused one (Telegram's file id).
+
+    The other fields mirror what the bot reads from every result (cache flag, pacing hold, no summary).
+    """
+    title: str
+    text: str
+    lang: str
+    voice: str
+    key: str
+    file_id: str | None = None
+    duration: int | None = None
+    ogg: Path | None = None
+    cached: bool = False
+    hold: list[tuple[str, float]] | None = None
+    replay_steps: list[tuple[str, float]] | None = None
+    summary: dict | None = None

@@ -106,7 +106,8 @@ How the tests are isolated (`tests/conftest.py`):
 user message and put raw tool output, paths or exception text in `detail` (admins see it, users never).
 Anything unexpected becomes the generic "something went wrong" message plus an admin notice.
 
-**Abuse limits** (keep them when changing the queue): the OCR limit (`requests.ocr`, set when an OCR run
+**Abuse limits** (keep them when changing the queue): the voice-message limit (new ones only:
+`requests.kind='voice'` with `cached=0`; listening never counts toward the daily limit), the OCR limit (`requests.ocr`, set when an OCR run
 starts; cancelled runs count), the OCR page cap with admin approval (`ocr_holds`), the daily limit (global in the `settings` table,
 per-user override in `users.daily_limit`, read from the database on each check), per-user and total queue
 limits, the `/again` cooldown, the pending-request cap and reply throttling, the memory guard, and the

@@ -39,6 +39,8 @@ Dropbox link): the whole book, or chapter by chapter. Scanned PDFs are read with
   link (up to 100 MB); the whole book or chapter by chapter (short, one per message, or a picked chapter).
   Scanned PDFs are read with OCR (Tesseract or RapidOCR) after the user confirms the estimated time, with
   their own daily limit; admins add OCR languages with `/ocrlang`.
+- **🔊 Listen**: any summary as a Telegram voice message (Kokoro text-to-speech, made on this machine),
+  e.g. for the car.
 - **Cache**: a video is downloaded and transcribed once, a document read (or OCRed) once; summaries are
   kept per model.
 - **Private by design**: users can't see what others submitted, and the LLM can't touch the machine.
@@ -56,7 +58,7 @@ Dropbox link): the whole book, or chapter by chapter. Scanned PDFs are read with
   - [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) and a ChatGPT plan, or
   - [Claude Code](https://code.claude.com) logged in with a Claude plan, or
   - an Anthropic or OpenAI API key (billed per token).
-- Text-to-speech for the upcoming 🔊 voice messages: [Kokoro](https://github.com/thewh1teagle/kokoro-onnx)
+- Text-to-speech for 🔊 voice messages: [Kokoro](https://github.com/thewh1teagle/kokoro-onnx)
   (`kokoro-onnx`, its v1.0 model and voices, and the system's espeak-ng: `sudo apt install espeak-ng-data`).
   **Why Kokoro:** compared with Piper on a real English summary (2¼ min of audio), Kokoro sounded much more
   natural, which matters for listening to whole summaries, e.g. in the car. It is slower on the CPU (61 s for
@@ -295,7 +297,7 @@ sandbox. Without a working CUDA runtime it logs a warning and stays on the CPU.
 | `/transcript <url>` | users | The raw transcript as a `.txt` file. |
 | `/history` | users | Your recent requests (admins: everyone's, with who sent them). |
 | `/models` | users | Show or choose the AI: provider first, then model. |
-| `/limit` | users | Your daily limit: used in the last 24 h and how many are left. |
+| `/limit` | users | Your limits: requests, scanned documents (OCR) and new voice messages in the last 24 h, and how many are left. |
 | `/limit` | admins | Show the daily and OCR limits and per-user overrides. `/limit 50` sets the daily limit for everyone, `/limit <user id> 200` for one user, `/limit <user id> default` removes the override; `0` = no limit. The same with `ocr` first (`/limit ocr 5`) for the OCR limit. |
 | `/ocrlang` | admins | Languages for scanned documents: `/ocrlang` lists them, `/ocrlang add slv` downloads and installs one (Tesseract: from tesseract-ocr's `tessdata_fast` on GitHub, checked with a test run; RapidOCR: the script's model, checked against RapidOCR's pinned SHA-256), `/ocrlang remove slv`. |
 | `/users` | admins | Users with Allow / Deny / Remove / Unblock buttons, their AI choice and daily limit with today's usage. |
@@ -334,6 +336,23 @@ again). Once a file has been read, "Pick a chapter" shows the list at once, with
 chapter you tap is a request. Files are parsed in a sandbox without network access. Only the extracted text is kept (by the file's
 SHA-256, like video transcripts), so the same file is read once; summaries are cached per model. Admins see
 file names in `/history`.
+
+### Voice messages (🔊 Listen)
+
+Every summary (videos, books, chapters) has a **🔊 Listen** button. Tapping it makes a Telegram voice
+message of what you read: title, clickbait answer, summary (or the book / chapters), without the footer and
+links, with bullets read as sentences. The whole summary is read, however long.
+
+- Made with [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) on this machine, in the sandbox: about
+  1 minute for a typical summary on the CPU (2.4× faster than real time), seconds with a GPU
+  (`TTS_DEVICE=cuda`). The model (338 MB) is downloaded once at startup; until it's ready, there's no button.
+- A made voice message is reused for `VOICE_CACHE_DAYS` (7): only Telegram's id for it is stored, no audio
+  on disk. Someone hearing a voice message another user had made first gets it after the usual privacy
+  pause.
+- Listening doesn't count toward the daily limit; new voice messages have their own (`TTS_DAILY_LIMIT`,
+  20 per 24 h, `/limit voice`); reused ones are free.
+- Read in the language of `SUMMARY_LANGUAGE` (English, Spanish, French, Italian, Portuguese or Hindi; others
+  get no button).
 
 ## How it works
 

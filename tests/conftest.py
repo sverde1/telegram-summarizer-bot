@@ -179,6 +179,10 @@ class TelegramRecorder:
             chat_id = data.get("chat_id", 0)
             return {"message_id": data.get("message_id") or next(self._ids), "date": 0,
                     "chat": {"id": chat_id, "type": "private"}, "text": data.get("text", "")}
+        if endpoint == "sendVoice":
+            n = next(self._ids)
+            return {"message_id": n, "date": 0, "chat": {"id": data.get("chat_id", 0), "type": "private"},
+                    "voice": {"file_id": f"VOICE{n}", "file_unique_id": f"u{n}", "duration": 42}}
         return True
 
 
