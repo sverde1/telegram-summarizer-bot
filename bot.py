@@ -87,6 +87,44 @@ _jobs: dict[int, "Job"] = {}
 _running: "Job | None" = None
 
 
+async def _report_cancel(app: Application, job: "Job") -> None:
+    """Records a job as cancelled and shows the reason on its status message."""
+    reason = job.cancel_reason or CANCELLED
+    db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
+    await _fail(app, job, reason)
+
+
+async def _cancel_job(app: Application, job: "Job", reason: str) -> bool:
+    """Cancels one job, whatever state it's in, and tells its user why.
+
+    The running job only gets its programs killed (via the cancel event); the worker then reports it. Every
+    other state is finished right here (status message, request row, registry, the user's slot): a queued job
+    is later skipped by the worker, a parked one leaves the memory-wait list, and a replay task is cancelled,
+    possibly before it ever ran, so its own cleanup can't be relied on.
+
+    Args:
+        app: The running application.
+        job: The job to cancel.
+        reason: The message shown on its status.
+
+    Returns:
+        False if the job was already cancelled or finished.
+    """
+    if job.cancel_reason or job.request_id not in _jobs:
+        return False
+    job.cancel_reason = reason
+    if job is _running:
+        proc.current_job_cancel.set()
+        return True
+    task = _delayed.pop(job.request_id, None)
+    if task:
+        task.cancel()
+    _unpark(job)
+    _end_job(job)
+    await _report_cancel(app, job)
+    return True
+
+
 async def cancel_user_jobs(app: Application, uid: int, reason: str) -> int:
     """Cancels all of a user's queued and running jobs and tells them why.
 
@@ -103,21 +141,7 @@ async def cancel_user_jobs(app: Application, uid: int, reason: str) -> int:
     """
     mine = [j for j in _jobs.values() if j.user_id == uid and not j.cancel_reason]
     for job in mine:
-        job.cancel_reason = reason
-        if job is _running:
-            proc.current_job_cancel.set()  # the worker reports it when the pipeline stops
-        elif job.request_id in _delayed:
-            _delayed[job.request_id].cancel()  # its finally ends the job
-            db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
-            await _fail(app, job, reason)
-        elif job in _waiting_for_memory:
-            _waiting_for_memory.remove(job)
-            _end_job(job)
-            db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
-            await _fail(app, job, reason)
-        else:
-            db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
-            await _fail(app, job, reason)
+        await _cancel_job(app, job, reason)
     if mine:
         log.info("cancelled %d job(s) of user %s", len(mine), uid)
     return len(mine)
@@ -463,14 +487,7 @@ async def on_cancel_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     if q.from_user.id != job.user_id and not access.is_admin(q.from_user.id):
         await q.answer("Only the person who sent this link can cancel it.")
         return
-    job.cancel_reason = CANCELLED
-    db.update_request(job.request_id, status="cancelled", error="cancelled by the user")
-    if job is _running:
-        proc.current_job_cancel.set()  # stops it at once; the worker shows CANCELLED
-    elif job in _waiting_for_memory:
-        _waiting_for_memory.remove(job)
-        _end_job(job)
-        await _fail(app=ctx.application, job=job, msg=CANCELLED)
+    await _cancel_job(ctx.application, job, CANCELLED)
     await q.answer("Cancelled.")
 
 
@@ -1001,6 +1018,8 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             # Before replying or deleting the status message: a late status edit must not land
             # after the final result.
             await progress.close()
+        if job.cancel_reason:  # cancelled while the pipeline ran but finished before noticing (e.g. cached)
+            raise proc.ProcCancelled("cancelled")
         stats = (result.summary or {}).get("_stats") or {}
         if result.cached and not job.transcript_only and cached_delay(stats) and not (
                 access.is_admin(job.user_id)
@@ -1014,38 +1033,37 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             await app.bot.delete_message(job.chat_id, job.status_id)
         except TelegramError:
             pass  # the user deleted it already, or can't be reached: the result is delivered either way
-    except memory.NeedsMemory as e:
-        await _set_aside(app, job, e.needed)
-        return True
-    except proc.ProcCancelled:
-        reason = job.cancel_reason or CANCELLED
-        db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
-        await _fail(app, job, reason)
-    except UserBlockedBot:
-        db.update_request(job.request_id, status="failed", error="user blocked the bot")
-        log.info("job %s: user %s blocked the bot", job.request_id, job.user_id)
-    except (pipeline.PipelineError, UnsupportedURL) as e:
-        # Expected failures: the message is written for the user; the technical detail is for the admin.
-        detail = getattr(e, "detail", None)
-        db.update_request(job.request_id, status="failed", error=(detail or str(e))[:500])
-        if detail:
-            log.warning("job %s failed: %s (%s)", job.request_id, e, detail)
-        await _fail(app, job, str(e), detail if access.is_admin(job.user_id) else None)
-        if isinstance(e, pipeline.Blocked):
-            await _notify_admins_of_block(app, e)
-    except Exception as e:  # report, don't crash the worker
-        if job.cancel_reason:  # e.g. an API call that ended oddly because of the cancel: report the cancel
-            db.update_request(job.request_id, status="cancelled", error="cancelled: " + job.cancel_reason[:200])
-            await _fail(app, job, job.cancel_reason)
-            return
-        log.exception("job failed: %s", job.url)
-        detail = f"{type(e).__name__}: {e}"
-        db.update_request(job.request_id, status="failed", error=f"unexpected: {detail}"[:500])
-        if access.is_admin(job.user_id):
-            await _fail(app, job, INTERNAL_ERROR, detail)
-        else:
-            await _fail(app, job, INTERNAL_ERROR_NOTIFIED)
-            await _notify_admins_of_error(app, job, e)
+    except Exception as e:
+        # A cancel wins over whatever error it caused: e.g. a download killed by the cancel (or by systemd
+        # at shutdown) must be reported as the cancel, not as "couldn't load this video".
+        if job.cancel_reason or isinstance(e, proc.ProcCancelled):
+            await _report_cancel(app, job)
+            return False
+        if isinstance(e, memory.NeedsMemory):
+            await _set_aside(app, job, e.needed)
+            return True
+        if isinstance(e, UserBlockedBot):
+            db.update_request(job.request_id, status="failed", error="user blocked the bot")
+            log.info("job %s: user %s blocked the bot", job.request_id, job.user_id)
+        elif isinstance(e, (pipeline.PipelineError, UnsupportedURL)):
+            # Expected failures: the message is written for the user; the technical detail is for the admin.
+            detail = getattr(e, "detail", None)
+            db.update_request(job.request_id, status="failed", error=(detail or str(e))[:500])
+            if detail:
+                log.warning("job %s failed: %s (%s)", job.request_id, e, detail)
+            await _fail(app, job, str(e), detail if access.is_admin(job.user_id) else None)
+            if isinstance(e, pipeline.Blocked):
+                await _notify_admins_of_block(app, e)
+        else:  # report, don't crash the worker
+            log.exception("job failed: %s", job.url)
+            detail = f"{type(e).__name__}: {e}"
+            db.update_request(job.request_id, status="failed", error=f"unexpected: {detail}"[:500])
+            if access.is_admin(job.user_id):
+                await _fail(app, job, INTERNAL_ERROR, detail)
+            else:
+                await _fail(app, job, INTERNAL_ERROR_NOTIFIED)
+                await _notify_admins_of_error(app, job, e)
+    return False
 
 
 _delayed: dict[int, asyncio.Task] = {}  # request id -> replay task of a cached summary (see _deliver_later)
