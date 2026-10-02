@@ -83,6 +83,7 @@ class DocResult:
     cached: bool = False
     replay_steps: list[tuple[str, float]] | None = None
     replay_total: float = 0.0
+    hold: list[tuple[str, float]] | None = None  # as for videos (pipeline.Result.hold)
     platform: str = "document"  # with video_id, what db.user_saw_video looks for
     video_id: str = ""
     summary: dict | None = None  # videos only; here for the code that handles both
@@ -285,12 +286,14 @@ def run(upload: dict, mode: str, chapter: int | None, path: Path | None, workdir
     if kind == "chapter" and not 0 <= chapter < len(doc["chapters"]):
         raise DocumentError("⚠️ That chapter doesn't exist any more. Please pick again.", f"chapter {chapter}")
     summary_cached = _summaries_cached(b, result.kind, chapter)
+    pause = 0.0
     if hide and not read_now and not summary_cached:
         # The text was read before, for someone else: show the reading step a fresh run takes (paced like a
-        # cached answer), or an instant "file read" would tell them.
+        # cached answer), or an instant "file read" would tell them. It stays on screen while the real work
+        # runs; the time still owed is waited out by the bot, off the worker (DocResult.hold).
         pause = min(read_seconds(doc["pages"]) * pipeline.REPLAY_SHARE, pipeline.REPLAY_MAX)
         st.show("📄 Reading the file…")
-        pipeline._pause(pause)
+        st.frozen = True
         steps.append(("reading the file", pause))
     try:
         if result.kind == "book":
@@ -306,7 +309,10 @@ def run(upload: dict, mode: str, chapter: int | None, path: Path | None, workdir
         raise DocumentError(str(e), e.detail)
     if b.steps:
         steps.append(("summary", sum(sec for _, sec in b.steps)))
-    result.steps, result.llm, result.total = steps, b.llm, time.time() - t0
+    result.steps, result.llm, result.total = steps, b.llm, time.time() - t0 + pause
+    if pause:
+        result.hold = [(st.text("📑 Listing the chapters…" if result.kind == "pick"
+                                else f"🧠 Summarizing with {b.llm}…"), pause)]
     result.cached = not read_now and not b.steps and result.kind != "pick"
     if result.cached and hide:
         _plan_replay(result, backend)

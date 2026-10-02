@@ -111,8 +111,10 @@ frame-grab cap. Admins are exempt from the daily and queue limits.
 **Privacy:** who submitted which video is visible only to admins. Regular users may only learn that a
 result was cached if they requested that video themselves (`db.user_saw_video`). Otherwise every reuse is
 paced like a fresh run at half its time, at most 2 min: cached summaries and transcripts get a replay plan
-(`pipeline.plan_replay`, played back by `bot._deliver_later`), a saved transcript reused for a new summary
-gets a paced transcript step (`pipeline._pause`); the footer shows `Result.replay_steps`, so it always
+(`pipeline.plan_replay`, played back by `bot._deliver_later`); a saved transcript or document text reused
+for new work shows the paced step (frozen `Status`) while the real work runs, and the time still owed is
+waited out off the worker (`Result.hold` / `DocResult.hold`, also via `_deliver_later`). Never sleep in the
+worker for pacing: it would hold up everyone else's jobs. The footer shows `replay_steps`, so it always
 matches the wait. Status lines must not mention the cache (`hide_cache`).
 
 **Platform gotchas** (each was hit in practice):

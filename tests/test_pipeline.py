@@ -66,34 +66,25 @@ def test_duration_format_and_etas():
     assert pipeline._eta_llm(0, 0) == 25  # starting guess before anything was measured
 
 
-def test_reused_transcript_is_paced_for_first_time_requesters(fake_media, llm, monkeypatch):
+def test_reused_transcript_is_paced_off_the_worker(fake_media, llm):
     pipeline.run(URL, lambda *a: None)  # someone summarized it before
-    paused = []
-    monkeypatch.setattr(pipeline, "_pause", paused.append)
     seen = []
+    start = __import__("time").monotonic()
     r = pipeline.run(URL, lambda text, eta=None: seen.append(text), backend="codex", model="other-model",
                      hide_cache_from=60)
-    assert not any("from cache" in s for s in seen) and any("Transcript ready" in s for s in seen)
-    assert any("Checking for YouTube captions" in s for s in seen)  # the step a fresh run shows
-    assert paused == [pipeline.CAPTIONS_SECONDS * pipeline.REPLAY_SHARE]
+    assert __import__("time").monotonic() - start < 1  # no sleep in the worker any more
+    assert not any("from cache" in s for s in seen) and any("Checking for YouTube captions" in s for s in seen)
+    assert not any("Summarizing" in s for s in seen)  # the paced stage stays up while the real work runs
+    pause = pipeline.CAPTIONS_SECONDS * pipeline.REPLAY_SHARE
+    (text, owed), = r.hold  # the bot waits this out, off the worker
+    assert owed == pause and "✅ Transcript ready" in text and text.endswith("Summarizing with Codex (other-model)…")
     assert [n for n, _ in r.replay_steps] == ["lookup", "captions", "summary"]  # footer: what the user saw
+    assert r.replay_total == pytest.approx(r.summary["_stats"]["total"] + pause)
     saved = db.get_summary("youtube", "abcdefghijk", "codex", "other-model")["result"]["_stats"]
     assert [n for n, _ in saved["steps"]] == ["lookup", "summary"]  # stored: the real work only
 
 
-def test_reused_transcript_is_not_paced_for_admins_or_repeat_requesters(fake_media, llm, monkeypatch):
+def test_reused_transcript_is_not_paced_for_admins_or_repeat_requesters(fake_media, llm):
     pipeline.run(URL, lambda *a: None)
-    paused = []
-    monkeypatch.setattr(pipeline, "_pause", paused.append)
     r = pipeline.run(URL, lambda *a: None, backend="codex", model="other-model")  # admin: hide_cache_from=None
-    assert paused == [] and r.replay_steps is None
-
-
-def test_pause_stops_at_once_on_cancel():
-    from summarizer import proc
-    proc.current_job_cancel.set()
-    try:
-        with pytest.raises(proc.ProcCancelled):
-            pipeline._pause(60)
-    finally:
-        proc.current_job_cancel.clear()
+    assert r.hold is None and r.replay_steps is None

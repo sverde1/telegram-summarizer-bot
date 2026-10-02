@@ -36,9 +36,13 @@ async def _upload(app, telegram, uid, path, file_id="F1") -> int:
 
 
 async def _work(app):
-    """Runs the worker until the queue is empty."""
+    """Runs the worker until the queue is empty and any paced deliveries are done."""
     task = asyncio.create_task(bot.worker(app))
     await asyncio.wait_for(bot.queue.join(), 60)
+    for _ in range(500):
+        if not bot._delayed:
+            break
+        await asyncio.sleep(0.02)
     task.cancel()
 
 

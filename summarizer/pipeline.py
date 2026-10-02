@@ -37,6 +37,8 @@ class Result:
             one they include the paced transcript step. None for everyone else. The footer shows them, so
             what the user waited and what the footer says always agree.
         replay_total: Seconds those steps add up to.
+        hold: For a first-time requester whose answer reused earlier work: (status text, seconds) still owed
+            before delivery, so the wait matches a fresh run. The bot waits them out off the worker.
     """
     platform: str
     video_id: str
@@ -51,6 +53,7 @@ class Result:
     notes: list[str] = field(default_factory=list)
     replay_steps: list[tuple[str, float]] | None = None
     replay_total: float = 0.0
+    hold: list[tuple[str, float]] | None = None
 
 
 class PipelineError(RuntimeError):
@@ -221,19 +224,6 @@ def plan_replay(r: Result, transcript_only: bool, backend: str) -> None:
     r.replay_total = delay
 
 
-def _pause(seconds: float) -> None:
-    """Waits, stopping at once if the job is cancelled (checked every 0.5 s).
-
-    Raises:
-        proc.ProcCancelled: The job was cancelled.
-    """
-    end = time.monotonic() + seconds
-    while (left := end - time.monotonic()) > 0:
-        proc.check_cancelled()
-        time.sleep(min(0.5, left))
-    proc.check_cancelled()
-
-
 def _chars_for(duration: float) -> int:
     """Expected transcript length for a video, for ETAs made before the transcript exists.
 
@@ -256,6 +246,7 @@ class Status:
             progress: Callback taking (text, eta); the bot edits its status message with it.
         """
         self.progress, self.head, self.done = progress, "", []
+        self.frozen = False  # keep the stage on screen (pacing): later shows only check for a cancel
 
     def show(self, current: str, eta: float | None = None) -> None:
         """Report the header, the finished steps and the current step.
@@ -266,7 +257,12 @@ class Status:
         """
         # Every stage change is a cancellation checkpoint: a removed user's job stops before its next step.
         proc.check_cancelled()
-        self.progress("\n".join(filter(None, [self.head, *self.done, current])), eta)
+        if not self.frozen:
+            self.progress(self.text(current), eta)
+
+    def text(self, current: str) -> str:
+        """The full status text with `current` as the stage in progress."""
+        return "\n".join(filter(None, [self.head, *self.done, current]))
 
     def ok(self, line: str) -> None:
         """Record a finished step; it appears from the next show() on.
@@ -440,12 +436,13 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             source, lang = cached["transcript_source"], cached["language"]
             if hide_cache:
                 # An instant transcript would tell a first-time requester that someone else sent this video
-                # before: show the step a fresh run takes, at the pace of a cached answer. This holds the
-                # queue for at most half a transcription, less than a real run would.
+                # before: show the step a fresh run takes, at the pace of a cached answer. The stage stays on
+                # screen while the real work runs (frozen); the time still owed afterwards is waited out by the
+                # bot off the worker (Result.hold), so nobody else's job waits for this pause.
                 label, eta = _transcript_step(source, dur)
                 pause = min(eta * REPLAY_SHARE, REPLAY_MAX)
                 st.show(replay_stage(label, llm), pause + _eta_llm(len(cached["transcript"]), 1, backend))
-                _pause(pause)
+                st.frozen = True
                 paced = (label, pause)
                 st.ok("✅ Transcript ready")
             else:
@@ -512,14 +509,15 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             conv.close()  # deletes the CLI session files; they're only needed for the follow-up turn
         # The saved timings are the real work only: a pause shown to one user isn't part of the video's cost.
         total = time.time() - t0
-        summary["_stats"] = {"steps": list(timings), "total": total - (paced[1] if paced else 0), "llm": llm,
+        summary["_stats"] = {"steps": list(timings), "total": total, "llm": llm,
                              "backend": backend, "model": model or conv.model}
         # Keyed by backend + model so users on different models don't overwrite each other's summaries.
         db.save_summary(video.platform, video.video_id, backend, model or conv.model, summary, bool(images))
         result = _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
         if paced:  # the footer shows what this user saw: the paced transcript step after the lookup
             result.replay_steps = timings[:1] + [paced] + timings[1:]
-            result.replay_total = total
+            result.replay_total = total + paced[1]
+            result.hold = [(st.text(f"🧠 Summarizing with {llm}…"), paced[1])]
         return result
     finally:
         shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media

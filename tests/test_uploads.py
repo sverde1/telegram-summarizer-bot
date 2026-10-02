@@ -246,3 +246,18 @@ async def test_same_file_from_someone_else_is_replayed_like_a_fresh_run(app, tel
     stages = [d["text"] for d in telegram.sent("editMessageText") if d["chat_id"] == BOB]
     assert any("Reading the file" in s for s in stages)
     assert len(BookAI.calls) == 1
+
+
+async def test_pick_on_a_known_file_shows_the_list_after_the_pacing(app, telegram, tmp_path, monkeypatch):
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(bot.asyncio, "sleep", lambda s: real_sleep(s / 1000))
+    pdf = _book_pdf(tmp_path)
+    up = await _upload(app, telegram, ADMIN_ID, pdf)
+    await send(app, callback_update(ADMIN_ID, f"book:{up}:whole"))
+    await _work(app)
+    up2 = await _upload(app, telegram, BOB, pdf, file_id="F2", name="mine.pdf")
+    await send(app, callback_update(BOB, f"book:{up2}:pick"))
+    await _work(app)
+    shown = [d["text"] for d in telegram.sent("editMessageText") if d["chat_id"] == BOB]
+    assert any("Listing the chapters" in t for t in shown) and "pick a chapter" in shown[-1]
+    assert db.recent_requests(BOB)[0]["status"] == "waiting"

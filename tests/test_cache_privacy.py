@@ -160,3 +160,72 @@ async def test_removed_user_replay_is_cancelled(app, telegram, monkeypatch):
     task.cancel()
     assert bot._delayed == {} and bot._user_jobs == {}
     assert not [d for d in telegram.sent("sendMessage") if d["chat_id"] == 60]  # summary never sent
+
+
+# ---------- pacing off the worker (hold) ----------
+
+def _held(url, seconds=0.6) -> pipeline.Result:
+    """A fresh summary written from reused work for a first-time requester: `seconds` still owed."""
+    r = _cached_result(url, stats={**STATS, "total": 9.0})
+    r.cached = False
+    r.hold = [("🎬 Video (10:00)\n✅ Transcript ready\n🧠 Summarizing with Codex (gpt-test)…", seconds)]
+    r.replay_steps, r.replay_total = [("lookup", 1.0), ("Whisper", 3.0), ("summary", 5.0)], 9.0 + seconds
+    return r
+
+
+async def test_a_hold_does_not_block_the_next_user(app, telegram, monkeypatch):
+    for uid in (60, 70):
+        access.set_state(uid, "allowed")
+    monkeypatch.setattr(pipeline, "run", lambda url, *a, **k: _held(url) if url.endswith("1") else _cached_result(url))
+    await _run(app, [_job(60, 1), _job(ADMIN_ID, 2)])
+    to = [m["chat_id"] for m in telegram.sent("sendMessage")]
+    assert to.index(ADMIN_ID) < to.index(60)  # the second job was answered while the first one held
+    held = [d["text"] for d in telegram.sent("editMessageText") if d["chat_id"] == 60]
+    assert any(t.startswith("🎬 Video (10:00)\n✅ Transcript ready\n🧠 Summarizing") for t in held)
+    footer = [m["text"] for m in telegram.sent("sendMessage") if m["chat_id"] == 60][-1]
+    assert "⏱ 10 s total: lookup 1 s · Whisper 3 s · summary 5 s" in footer and "cache" not in footer
+    req = db.recent_requests(60)[0]
+    assert (req["status"], req["cached"]) == ("done", 0)
+    assert bot.stats.get("job", 0) == 9.0  # the worker's time, without the pause
+    assert bot._user_jobs == {}
+
+
+async def test_elapsed_time_continues_through_the_hold(app):
+    job = _job(60)
+    job.started_at = bot.time.monotonic() - 100
+    progress = bot.Progress(app, asyncio.get_running_loop(), job)
+    try:
+        assert bot.time.monotonic() - progress.started >= 100
+    finally:
+        await progress.close()
+
+
+async def test_cancel_during_a_hold_frees_the_slot_once(app, telegram, monkeypatch):
+    access.set_state(60, "allowed")
+    monkeypatch.setattr(pipeline, "run", lambda url, *a, **k: _held(url, seconds=30))
+    job = _job(60)
+    other = _job(60, 2)  # a second job of the same user, still queued
+    await bot.queue.put(job)
+    task = asyncio.create_task(bot.worker(app))
+    for _ in range(200):
+        if bot._delayed:
+            break
+        await asyncio.sleep(0.01)
+    await bot._cancel_job(app, job, bot.ACCESS_REMOVED)
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert bot._user_jobs[60] == 1 and other.request_id in bot._jobs  # only the held job's slot was freed
+    assert not [m for m in telegram.sent("sendMessage") if m["chat_id"] == 60]
+
+
+async def test_shutdown_during_a_hold_tells_the_user(app, telegram, monkeypatch):
+    access.set_state(60, "allowed")
+    monkeypatch.setattr(pipeline, "run", lambda url, *a, **k: _held(url, seconds=30))
+    await bot.queue.put(_job(60))
+    app.bot_data["worker"] = asyncio.create_task(bot.worker(app))
+    for _ in range(200):
+        if bot._delayed:
+            break
+        await asyncio.sleep(0.01)
+    await bot.post_stop(app)
+    assert telegram.sent("editMessageText")[-1]["text"] == bot.STOPPED and bot._jobs == {}

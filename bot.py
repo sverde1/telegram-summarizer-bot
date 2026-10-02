@@ -89,6 +89,7 @@ class Job:
     book_mode: str = ""  # whole | short | each | pick
     chapter: int | None = None  # for "pick": the chosen chapter (None: show the chapter list)
     ocr_ok: bool = False  # the user confirmed OCR of this scanned document
+    started_at: float = 0.0  # when the worker started it (monotonic); the status's elapsed time counts from it
 
 
 # A single queue drained by a single worker: jobs run one at a time, so Whisper (CPU-heavy) never runs
@@ -1206,12 +1207,13 @@ class Progress:
         Args:
             app: The running application (for the bot).
             loop: The bot's event loop; edits are scheduled onto it from the worker thread.
-            job: The job whose status message to edit.
+            job: The job whose status message to edit. Its started_at, when set, is where "elapsed" counts
+                from, so a job continued off the worker (a hold or replay) doesn't restart at 0:00.
         """
         self.app, self.loop, self.job = app, loop, job
         self.lock = asyncio.Lock()
         self.text, self.eta, self.eta_at, self.shown, self.last_edit = "", None, 0.0, "", 0.0
-        self.started, self.closed = time.monotonic(), False
+        self.started, self.closed = job.started_at or time.monotonic(), False
         self.ticker = asyncio.run_coroutine_threadsafe(self._tick(), loop)
 
     def __call__(self, text: str, eta: float | None = None) -> None:
@@ -1462,6 +1464,7 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
     """
     global _running
     waited = time.monotonic() - job.queued_at
+    job.started_at = time.monotonic()
     proc.current_job_cancel.clear()
     _running = job
     try:
@@ -1482,17 +1485,13 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
             await progress.close()
         if job.cancel_reason:  # cancelled while the pipeline ran but finished before noticing (e.g. cached)
             raise proc.ProcCancelled("cancelled")
-        if isinstance(result, documents.DocResult) and result.kind == "pick":
-            # The status message becomes the chapter list (kept, not deleted); the first chapter picked from
-            # it continues this request.
-            text, markup = _chapter_list(job.upload_id, result.name, result.doc["chapters"], 0)
-            await app.bot.edit_message_text(text, chat_id=job.chat_id, message_id=job.status_id, reply_markup=markup)
-            db.update_request(job.request_id, status="waiting")
-            return False
-        if result.cached and result.replay_steps:  # a first-time requester (see pipeline.plan_replay)
+        if result.hold or (result.cached and result.replay_steps):  # a first-time requester (see plan_replay)
             # Replayed in a separate task so the queue keeps moving meanwhile; the task ends the job.
             _delayed[job.request_id] = asyncio.create_task(_deliver_later(app, job, result, waited))
             return True
+        if isinstance(result, documents.DocResult) and result.kind == "pick":
+            await _show_pick_list(app, job, result)
+            return False
         await _deliver(app, job, result, waited)
         db.update_request(job.request_id, status="done", cached=int(result.cached))
         if not result.cached and not job.transcript_only:
@@ -1758,15 +1757,23 @@ async def _run_document(app: Application, job: Job, progress: "Progress") -> doc
         shutil.rmtree(workdir, ignore_errors=True)  # only the extracted text is kept
 
 
-async def _deliver_later(app: Application, job: Job, result: pipeline.Result, waited: float) -> None:
-    """Replays a cached answer (summary or transcript) like a fresh run, for a user who mustn't learn it was
-    cached.
+async def _show_pick_list(app: Application, job: Job, result: documents.DocResult) -> None:
+    """The status message becomes the chapter list (kept, not deleted); the first chapter picked from it
+    continues this request."""
+    text, markup = _chapter_list(job.upload_id, result.name, result.doc["chapters"], 0)
+    await app.bot.edit_message_text(text, chat_id=job.chat_id, message_id=job.status_id, reply_markup=markup)
+    db.update_request(job.request_id, status="waiting")
 
-    Shows the steps of result.replay_steps for their (already scaled) times, then delivers. Runs beside the
-    worker (which doesn't wait for it), and stops if the job is cancelled meanwhile. Always ends the job.
+
+async def _deliver_later(app: Application, job: Job, result: pipeline.Result, waited: float) -> None:
+    """Finishes a first-time requester's job off the worker, so its pacing doesn't hold up anyone else.
+
+    Either waits out the time still owed after real work on reused data (result.hold: status text and
+    seconds), or replays a fully cached answer like a fresh run (result.replay_steps, already scaled); then
+    delivers (or shows the chapter list). Stops if the job is cancelled meanwhile. Always ends the job.
     """
     try:
-        stats = (result.summary or {}).get("_stats") or {}
+        saved = (result.summary or {}).get("_stats") or {}
         progress = Progress(app, asyncio.get_running_loop(), job)
         meta = getattr(result, "meta", None) or {}
         if isinstance(result, documents.DocResult):
@@ -1775,21 +1782,28 @@ async def _deliver_later(app: Application, job: Job, result: pipeline.Result, wa
             head = f"🖼 {meta.get('title', '')[:80]} (photo post)"
         else:
             head = f"🎬 {meta.get('title', '')[:80]} ({pipeline._fmt_duration(meta.get('duration') or 0)})"
-        llm = getattr(result, "llm", "") or stats.get("llm") or summarize.llm_label(job.backend, job.model or "")
-        remaining = result.replay_total
+        llm = getattr(result, "llm", "") or saved.get("llm") or summarize.llm_label(job.backend, job.model or "")
+        stages = result.hold or [(f"{head}\n{pipeline.replay_stage(name, llm)}", sec)
+                                 for name, sec in result.replay_steps]
+        remaining = sum(sec for _, sec in stages)
         try:
-            for name, sec in result.replay_steps:
+            for text, sec in stages:
                 if job.cancel_reason:
                     return
-                progress(f"{head}\n{pipeline.replay_stage(name, llm)}", remaining)
+                progress(text, remaining)
                 await asyncio.sleep(sec)
                 remaining -= sec
         finally:
             await progress.close()
         if job.cancel_reason:
             return
+        if isinstance(result, documents.DocResult) and result.kind == "pick":
+            await _show_pick_list(app, job, result)
+            return
         await _deliver(app, job, result, waited)
-        db.update_request(job.request_id, status="done", cached=1)
+        db.update_request(job.request_id, status="done", cached=int(result.cached))
+        if not result.cached and (total := (result.summary or {}).get("_stats", {}).get("total")):
+            stats.record("job", total)  # the worker's time for it, without the pause
         try:
             await app.bot.delete_message(job.chat_id, job.status_id)
         except TelegramError:
