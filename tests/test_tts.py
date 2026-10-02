@@ -110,9 +110,9 @@ def test_voice_requests_are_not_counted_in_the_daily_limit():
     db.add_request(60, "u", "summary")
     v = db.add_request(60, "u", "voice")
     db.update_request(v, status="done")
-    assert db.daily_usage(60)[0] == 1 and db.tts_usage(60)[0] == 1
+    assert db.usage(60, "daily")[0] == 1 and db.usage(60, "voice")[0] == 1
     db.update_request(v, cached=1)  # a reused voice message is free
-    assert db.tts_usage(60)[0] == 0
+    assert db.usage(60, "voice")[0] == 0
 
 
 def test_voice_messages_expire(monkeypatch):

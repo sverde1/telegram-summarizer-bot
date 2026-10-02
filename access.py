@@ -1,5 +1,6 @@
 """Who may use the bot. Admins come from .env; everyone else lives in the users table."""
 import os
+from dataclasses import dataclass
 
 from summarizer import config, db  # noqa: F401  (config loads .env)
 
@@ -85,14 +86,36 @@ def label(uid: int, info: dict | None) -> str:
     return f"{name} (@{info['username']}, {uid})" if info.get("username") else f"{name} ({uid})"
 
 
-def global_daily_limit() -> int:
-    """Links per 24 h for users without an override: the /limit setting, else DAILY_LIMIT (0 = no limit)."""
-    stored = db.get_setting("daily_limit")
-    return int(stored) if stored is not None else config.DAILY_LIMIT
+@dataclass(frozen=True)
+class Limit:
+    """One per-user daily limit: where its global value and per-user override live.
+
+    Attributes:
+        setting: settings-table key of the global value (set with /limit).
+        user_column: users-table column of a per-user override (NULL = the global value).
+        config_attr: the summarizer.config attribute with the default, read at call time.
+    """
+    setting: str
+    user_column: str
+    config_attr: str
 
 
-def daily_limit(uid: int) -> tuple[int | None, bool]:
-    """A user's daily limit.
+# The limits /limit manages. Each also has a usage query (db.USAGE_FILTERS) and a UI entry (bot's LIMIT_UI).
+LIMITS = {
+    "daily": Limit("daily_limit", "daily_limit", "DAILY_LIMIT"),  # requests (links, files, books)
+    "ocr": Limit("ocr_limit", "ocr_limit", "OCR_DAILY_LIMIT"),  # scanned documents read with OCR
+    "voice": Limit("tts_limit", "tts_limit", "TTS_DAILY_LIMIT"),  # newly made voice messages
+}
+
+
+def global_limit(kind: str) -> int:
+    """A limit for users without an override: the /limit setting, else its config default (0 = no limit)."""
+    stored = db.get_setting(LIMITS[kind].setting)
+    return int(stored) if stored is not None else getattr(config, LIMITS[kind].config_attr)
+
+
+def limit(uid: int, kind: str) -> tuple[int | None, bool]:
+    """A user's limit of one kind.
 
     Returns:
         (limit, is_default): limit None for admins (never limited), 0 = no limit; is_default is True when it
@@ -101,38 +124,7 @@ def daily_limit(uid: int) -> tuple[int | None, bool]:
     if is_admin(uid):
         return None, False
     u = db.get_user(uid)
-    if u and u.get("daily_limit") is not None:
-        return u["daily_limit"], False
-    return global_daily_limit(), True
-
-
-def global_ocr_limit() -> int:
-    """OCR runs per 24 h for users without an override: the /limit ocr setting, else OCR_DAILY_LIMIT (0 = none)."""
-    stored = db.get_setting("ocr_limit")
-    return int(stored) if stored is not None else config.OCR_DAILY_LIMIT
-
-
-def ocr_limit(uid: int) -> tuple[int | None, bool]:
-    """A user's OCR limit, like daily_limit: (limit or None for admins, whether it's the global default)."""
-    if is_admin(uid):
-        return None, False
-    u = db.get_user(uid)
-    if u and u.get("ocr_limit") is not None:
-        return u["ocr_limit"], False
-    return global_ocr_limit(), True
-
-
-def global_tts_limit() -> int:
-    """New voice messages per 24 h for users without an override: /limit voice, else TTS_DAILY_LIMIT."""
-    stored = db.get_setting("tts_limit")
-    return int(stored) if stored is not None else config.TTS_DAILY_LIMIT
-
-
-def tts_limit(uid: int) -> tuple[int | None, bool]:
-    """A user's voice-message limit, like daily_limit: (limit or None for admins, whether it's the default)."""
-    if is_admin(uid):
-        return None, False
-    u = db.get_user(uid)
-    if u and u.get("tts_limit") is not None:
-        return u["tts_limit"], False
-    return global_tts_limit(), True
+    column = LIMITS[kind].user_column
+    if u and u.get(column) is not None:
+        return u[column], False
+    return global_limit(kind), True

@@ -31,20 +31,20 @@ async def test_global_limit_refuses_without_creating_a_request(app, telegram):
     _use(ANA, 3)
     await send(app, msg_update(ANA, LINK))
     assert telegram.texts()[-1].startswith("⏳ You've reached today's limit of 3 requests. You can send more in about")
-    assert db.daily_usage(ANA)[0] == 3 and bot.queue.qsize() == 0
+    assert db.usage(ANA, "daily")[0] == 3 and bot.queue.qsize() == 0
 
 
 async def test_under_the_limit_is_accepted_and_counts(app, telegram):
     _use(ANA, 2)
     await send(app, msg_update(ANA, LINK))
-    assert bot.queue.qsize() == 1 and db.daily_usage(ANA)[0] == 3
+    assert bot.queue.qsize() == 1 and db.usage(ANA, "daily")[0] == 3
 
 
 async def test_override_takes_precedence_both_ways(app, telegram):
     _use(ANA, 3)
     _use(BOB, 1)
-    db.set_user_daily_limit(ANA, 10)
-    db.set_user_daily_limit(BOB, 1)
+    db.set_user_limit(ANA, "daily", 10)
+    db.set_user_limit(BOB, "daily", 1)
     await send(app, msg_update(ANA, LINK))
     await send(app, msg_update(BOB, LINK))
     assert bot.queue.qsize() == 1 and "limit of 1 requests" in telegram.texts()[-1]
@@ -64,19 +64,19 @@ async def test_admin_sets_global_and_per_user_limits_and_they_persist(app, teleg
     assert telegram.texts()[-1] == "✅ Daily limit for everyone: 50."
     await send(app, msg_update(ADMIN_ID, f"/limit {ANA} 200"))
     assert "Ana" in telegram.texts()[-1] and telegram.texts()[-1].endswith(": 200.")
-    assert access.global_daily_limit() == 50 and access.daily_limit(ANA) == (200, False)
+    assert access.global_limit("daily") == 50 and access.limit(ANA, "daily") == (200, False)
     await send(app, msg_update(ADMIN_ID, "/limit"))
     view = telegram.texts()[-1]
     assert "everyone: 50" in view and "Ana" in view and "200" in view
     await send(app, msg_update(ADMIN_ID, f"/limit {ANA} default"))
-    assert access.daily_limit(ANA) == (50, True)
+    assert access.limit(ANA, "daily") == (50, True)
 
 
 @pytest.mark.parametrize("args", ["abc", "-5", f"{ANA} lots", "1 2 3", f"{ADMIN_ID} 5", "999999 5"])
 async def test_bad_arguments_change_nothing(app, telegram, args):
     await send(app, msg_update(ADMIN_ID, f"/limit {args}"))
     assert telegram.texts()[-1].startswith(("Usage:", "⚠️"))
-    assert access.global_daily_limit() == 3 and access.daily_limit(ANA) == (3, True)
+    assert access.global_limit("daily") == 3 and access.limit(ANA, "daily") == (3, True)
 
 
 async def test_user_sees_own_status_and_cannot_change_it(app, telegram):
@@ -84,7 +84,7 @@ async def test_user_sees_own_status_and_cannot_change_it(app, telegram):
     await send(app, msg_update(ANA, "/limit"))
     assert telegram.texts()[-1].split("\n")[0] == "📊 Today: 1 of your 3 requests (last 24 h). 2 left."
     await send(app, msg_update(ANA, "/limit 1000"))
-    assert access.global_daily_limit() == 3 and "of your 3 requests" in telegram.texts()[-1]
+    assert access.global_limit("daily") == 3 and "of your 3 requests" in telegram.texts()[-1]
     _use(ANA, 2)
     await send(app, msg_update(ANA, "/limit"))
     assert "You can send more in about" in telegram.texts()[-1]
@@ -92,7 +92,7 @@ async def test_user_sees_own_status_and_cannot_change_it(app, telegram):
 
 async def test_users_list_shows_limits_and_usage(app, telegram):
     _use(ANA, 2)
-    db.set_user_daily_limit(BOB, 200)
+    db.set_user_limit(BOB, "daily", 200)
     await send(app, msg_update(ADMIN_ID, "/users"))
     texts = "\n".join(telegram.texts())
     assert "no limit" in texts and "Allowed (daily limit: 3)" in texts
@@ -101,7 +101,11 @@ async def test_users_list_shows_limits_and_usage(app, telegram):
 
 def test_usage_window_and_reset_time():
     _use(ANA, 2)
-    count, oldest = db.daily_usage(ANA)
+    count, oldest = db.usage(ANA, "daily")
     assert count == 2 and oldest is not None
-    assert db.daily_usage(ANA, window=0)[0] == 0
+    assert db.usage(ANA, "daily", window=0)[0] == 0
     assert bot._fmt_until(30) == "1 min" and bot._fmt_until(3599) == "60 min" and bot._fmt_until(3601) == "2 h"
+
+
+def test_every_limit_has_a_usage_query_and_a_ui():
+    assert set(db.USAGE_FILTERS) == set(access.LIMITS) == set(bot.LIMIT_UI)

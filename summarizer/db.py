@@ -497,28 +497,6 @@ def set_setting(key: str, value: str) -> None:
                   (key, value))
 
 
-def set_user_daily_limit(uid: int, limit: int | None) -> bool:
-    """Sets (or with None removes) one user's daily-limit override. Returns False if the user is unknown."""
-    with _db() as c:
-        return c.execute("UPDATE users SET daily_limit=? WHERE id=?", (limit, uid)).rowcount > 0
-
-
-def daily_usage(uid: int, window: float = 86400) -> tuple[int, float | None]:
-    """How many links a user sent in the last `window` seconds, and when the oldest of them was sent.
-
-    Every request row counts (summaries, /again, /transcript; finished, failed or cancelled): the limit is
-    on links sent. Refused links never get a row.
-
-    Returns:
-        (count, unix time of the oldest counted request or None).
-    """
-    with _db() as c:
-        # Voice messages don't count: listening is free (it has its own limit for new ones, tts_usage).
-        row = c.execute("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM requests WHERE user_id=? "
-                        "AND created_at>? AND kind<>'voice'", (uid, time.time() - window)).fetchone()
-    return row["n"], row["oldest"]
-
-
 def add_upload(user_id: int, file_id: str, file_unique_id: str | None, name: str, size: int | None) -> int:
     """Records an uploaded file, before the user picks how to summarize it. Returns the upload id."""
     with _db() as c:
@@ -612,20 +590,6 @@ def get_request(req_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def set_user_ocr_limit(uid: int, limit: int | None) -> bool:
-    """Sets (or with None removes) one user's OCR-limit override. Returns False if the user is unknown."""
-    with _db() as c:
-        return c.execute("UPDATE users SET ocr_limit=? WHERE id=?", (limit, uid)).rowcount > 0
-
-
-def ocr_usage(uid: int, window: float = 86400) -> tuple[int, float | None]:
-    """How many OCR runs a user started in the last `window` seconds (finished or not), and the oldest's time."""
-    with _db() as c:
-        row = c.execute("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM requests "
-                        "WHERE user_id=? AND ocr=1 AND created_at>?", (uid, time.time() - window)).fetchone()
-    return row["n"], row["oldest"]
-
-
 def save_ocr_hold(request_id: int, upload_id: int, mode: str, chapter: int | None, pages: int, seconds: float,
                   language: str) -> None:
     """Remembers a document request that waits for the user's OCR confirmation (replacing an earlier one)."""
@@ -658,6 +622,37 @@ def get_page_sources(sha256: str) -> dict[int, str]:
             "SELECT page, source FROM document_pages WHERE sha256=?", (sha256,))}
 
 
+# What counts toward each limit (access.LIMITS), as a filter on the user's requests in the window:
+# - daily: every link, file or book request; voice messages don't count (listening is free, TTS has its own).
+# - ocr: requests that started a full OCR run (finished or not; a cached OCR text costs nothing).
+# - voice: newly made voice messages (reused ones are free); queued ones count only once they run.
+USAGE_FILTERS = {
+    "daily": "kind<>'voice'",
+    "ocr": "ocr=1",
+    "voice": "kind='voice' AND cached=0 AND status<>'queued'",
+}
+_USER_LIMIT_COLUMNS = {"daily": "daily_limit", "ocr": "ocr_limit", "voice": "tts_limit"}
+
+
+def usage(uid: int, kind: str, window: float = 86400) -> tuple[int, float | None]:
+    """How much of one limit a user used in the last `window` seconds, and when the oldest counted request was
+    made (to tell when a slot frees up).
+
+    Returns:
+        (count, unix time of the oldest counted request or None).
+    """
+    with _db() as c:
+        row = c.execute(f"SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM requests WHERE user_id=? "
+                        f"AND created_at>? AND {USAGE_FILTERS[kind]}", (uid, time.time() - window)).fetchone()
+    return row["n"], row["oldest"]
+
+
+def set_user_limit(uid: int, kind: str, value: int | None) -> bool:
+    """Sets (or with None removes) one user's override of a limit. Returns False if the user is unknown."""
+    with _db() as c:
+        return c.execute(f"UPDATE users SET {_USER_LIMIT_COLUMNS[kind]}=? WHERE id=?", (value, uid)).rowcount > 0
+
+
 def get_user_units(uid: int) -> tuple[str, str]:
     """A user's units: (metric|imperial, c|f), the configured defaults where unset."""
     with _db() as c:
@@ -674,22 +669,6 @@ def set_user_units(uid: int, system: str | None = None, temperature: str | None 
             c.execute("UPDATE users SET unit_system=? WHERE id=?", (system, uid))
         if temperature:
             c.execute("UPDATE users SET temperature=? WHERE id=?", (temperature, uid))
-
-
-def set_user_tts_limit(uid: int, limit: int | None) -> bool:
-    """Sets (or with None removes) one user's voice-message limit. Returns False if the user is unknown."""
-    with _db() as c:
-        return c.execute("UPDATE users SET tts_limit=? WHERE id=?", (limit, uid)).rowcount > 0
-
-
-def tts_usage(uid: int, window: float = 86400) -> tuple[int, float | None]:
-    """New voice messages a user had made in the last `window` seconds (reused ones don't count), and the
-    oldest's time. Queued ones aren't counted until they run."""
-    with _db() as c:
-        row = c.execute("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM requests WHERE user_id=? "
-                        "AND kind='voice' AND cached=0 AND status<>'queued' AND created_at>?",
-                        (uid, time.time() - window)).fetchone()
-    return row["n"], row["oldest"]
 
 
 def save_spoken(request_id: int, title: str, text: str, lang: str, voice: str) -> None:

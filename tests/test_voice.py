@@ -69,11 +69,11 @@ async def test_listen_makes_a_voice_message_and_reuses_it(app, telegram, voice):
     assert db.get_voice(key, 86400)["file_id"].startswith("VOICE")
     req = db.recent_requests(ANA)[0]
     assert (req["kind"], req["status"], req["cached"]) == ("voice", "done", 0)
-    assert db.daily_usage(ANA)[0] == 1 and db.tts_usage(ANA)[0] == 1  # listening isn't a daily request
+    assert db.usage(ANA, "daily")[0] == 1 and db.usage(ANA, "voice")[0] == 1  # listening isn't a daily request
     await send(app, callback_update(ANA, f"voice:{rid}"))  # again: reused, nothing made
     await _work(app)
     assert len(voice) == 1 and telegram.sent("sendVoice")[-1]["voice"].startswith("VOICE")
-    assert db.tts_usage(ANA)[0] == 1  # a reused one is free
+    assert db.usage(ANA, "voice")[0] == 1  # a reused one is free
 
 
 async def test_another_user_gets_the_made_one_paced(app, telegram, voice):

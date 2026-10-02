@@ -151,10 +151,10 @@ async def test_pick_a_chapter_counts_once(app, telegram, tmp_path):
     await send(app, callback_update(ANA, f"book:{up}:ch:1"))
     await _work(app)
     assert "<b>Dogs</b>\nS1" in telegram.sent("sendMessage")[-1]["text"]
-    assert db.daily_usage(ANA)[0] == 1 and db.recent_requests(ANA)[0]["status"] == "done"
+    assert db.usage(ANA, "daily")[0] == 1 and db.recent_requests(ANA)[0]["status"] == "done"
     await send(app, callback_update(ANA, f"book:{up}:ch:0"))  # another chapter: a new request
     await _work(app)
-    assert db.daily_usage(ANA)[0] == 2
+    assert db.usage(ANA, "daily")[0] == 2
 
 
 async def test_pick_is_immediate_once_the_upload_was_read(app, telegram, tmp_path):

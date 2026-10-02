@@ -276,7 +276,7 @@ async def on_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # "remove" doubles as Unblock: forgetting a blocked user lets them /start a new request.
     actions = {"allowed": [("🗑 Remove", "remove")], "pending": [("✅ Allow", "allow"), ("❌ Deny", "block")],
                "blocked": [("↩️ Unblock", "remove")]}
-    glob = access.global_daily_limit()
+    glob = access.global_limit("daily")
     titles = {"allowed": f"✅ Allowed (daily limit: {glob or 'none'})", "pending": "⏳ Pending",
               "blocked": "⛔ Blocked"}
     for st in access.STATES:
@@ -471,41 +471,38 @@ async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _limit_label(uid: int) -> str:
     """Limit status for the /users list, e.g. "12/100 today (default) · OCR 1/5", or "no limit"."""
-    used, limit, is_default, _ = _daily_status(uid)
+    used, limit, is_default, _ = limit_status(uid, "daily")
     if limit is None:  # admins
         return "no limit"
     daily = f"{used}/{limit} today" + (" (default)" if is_default else "") if limit else "no daily limit"
-    used, limit, _, _ = _ocr_status(uid)
+    used, limit, _, _ = limit_status(uid, "ocr")
     ocr_ = f"OCR {used}/{limit}" if limit else "OCR no limit"
-    used, limit, _, _ = _tts_status(uid)
+    used, limit, _, _ = limit_status(uid, "voice")
     voice = f"🔊 {used}/{limit}" if limit else "🔊 no limit"
     return f"{daily} · {ocr_} · {voice}"
 
 
-def _tts_status(uid: int) -> tuple[int, int | None, bool, float | None]:
-    """A user's new voice messages against their voice-message limit, like _daily_status."""
-    used, oldest = db.tts_usage(uid, DAY)
-    limit, is_default = access.tts_limit(uid)
-    frees_in = (oldest + DAY - time.time()) if limit and used >= limit and oldest else None
-    return used, limit, is_default, frees_in
+@dataclass(frozen=True)
+class LimitUI:
+    """How a limit (access.LIMITS) is shown: its icon, what it counts, and its name."""
+    icon: str
+    what: str
+    title: str
 
 
-# The two limits /limit manages: setting key, per-user setter, global getter, status, what is counted.
-LIMITS = {
-    "daily": ("daily_limit", db.set_user_daily_limit, access.global_daily_limit, lambda uid: _daily_status(uid),
-              "requests", "Daily limit"),
-    "ocr": ("ocr_limit", db.set_user_ocr_limit, access.global_ocr_limit, lambda uid: _ocr_status(uid),
-            "scanned documents (OCR)", "OCR limit"),
-    "voice": ("tts_limit", db.set_user_tts_limit, access.global_tts_limit, lambda uid: _tts_status(uid),
-              "new voice messages", "Voice-message limit"),
+# One entry per access.LIMITS kind, in the order /limit shows them.
+LIMIT_UI = {
+    "daily": LimitUI("📊", "requests", "Daily limit"),
+    "ocr": LimitUI("🔍", "scanned documents (OCR)", "OCR limit"),
+    "voice": LimitUI("🔊", "new voice messages", "Voice-message limit"),
 }
 
 
 def _usage_line(uid: int, kind: str) -> str:
     """A user's own usage of one limit, e.g. "📊 Today: 12 of your 100 requests (last 24 h). 88 left." """
-    _, _, _, status, what, _ = LIMITS[kind]
-    used, limit, _, frees_in = status(uid)
-    icon = {"daily": "📊", "ocr": "🔍", "voice": "🔊"}[kind]
+    ui = LIMIT_UI[kind]
+    used, limit, _, frees_in = limit_status(uid, kind)
+    icon, what = ui.icon, ui.what
     if not limit:
         return f"{icon} Today: {used} {what} (last 24 h). No limit."
     if used >= limit:
@@ -525,18 +522,18 @@ async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     uid = update.effective_user.id
     if not access.is_admin(uid):
-        await update.message.reply_text("\n".join(_usage_line(uid, k) for k in LIMITS))
+        await update.message.reply_text("\n".join(_usage_line(uid, k) for k in LIMIT_UI))
         return
     args = list(ctx.args)
     kind = args[0].lower() if args and args[0].lower() in ("ocr", "voice") else "daily"
     if kind != "daily":
         args = args[1:]
-    key, set_user, glob, _, what, title = LIMITS[kind]
+    title = LIMIT_UI[kind].title
     if not args:
         lines = []
-        for k, (_, _, g, _, w, t) in LIMITS.items():
-            lines.append(f"📊 {t} for everyone: {g() or 'none'} {w} per 24 h.")
-            col = LIMITS[k][0]
+        for k, ui in LIMIT_UI.items():
+            lines.append(f"📊 {ui.title} for everyone: {access.global_limit(k) or 'none'} {ui.what} per 24 h.")
+            col = access.LIMITS[k].user_column
             lines += [f"  • {access.label(u['id'], u)}: {u[col] or 'no limit'}"
                       for u in access.all_users()["allowed"] if u.get(col) is not None]
         lines.append("\nChange it: /limit 50 · one user: /limit <user id> 200 · /limit <user id> default · "
@@ -544,13 +541,13 @@ async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("\n".join(lines))
         return
     if len(args) == 1 and args[0].isdigit():
-        db.set_setting(key, str(int(args[0])))
+        db.set_setting(access.LIMITS[kind].setting, str(int(args[0])))
         await update.message.reply_text(f"✅ {title} for everyone: {int(args[0]) or 'none'}.")
         return
     if len(args) == 2 and args[0].isdigit() and (args[1].isdigit() or args[1] == "default"):
         target = int(args[0])
         value = None if args[1] == "default" else int(args[1])
-        if access.is_admin(target) or not set_user(target, value):
+        if access.is_admin(target) or not db.set_user_limit(target, kind, value):
             await update.message.reply_text("⚠️ No such user (admins have no limit).")
             return
         who = access.label(target, db.get_user(target))
@@ -736,15 +733,15 @@ def _fmt_until(seconds: float) -> str:
     return f"{math.ceil(seconds / 3600)} h"
 
 
-def _daily_status(uid: int) -> tuple[int, int | None, bool, float | None]:
-    """A user's usage against their daily limit.
+def limit_status(uid: int, kind: str) -> tuple[int, int | None, bool, float | None]:
+    """A user's usage of one limit (access.LIMITS) in the rolling 24 hours.
 
     Returns:
-        (used in the last 24 h, limit (None for admins, 0 = no limit), whether the limit is the global
-        default, seconds until a slot frees up when the limit is reached, else None).
+        (used, limit (None for admins, 0 = no limit), whether the limit is the global default, seconds until a
+        slot frees up when the limit is reached, else None).
     """
-    used, oldest = db.daily_usage(uid, DAY)
-    limit, is_default = access.daily_limit(uid)
+    used, oldest = db.usage(uid, kind, DAY)
+    limit, is_default = access.limit(uid, kind)
     frees_in = (oldest + DAY - time.time()) if limit and used >= limit and oldest else None
     return used, limit, is_default, frees_in
 
@@ -777,7 +774,7 @@ def _refusal(uid: int, *, new_request: bool = True) -> str | None:
         return (f"⏳ You already have {_user_jobs[uid]} requests in the queue. Try again when one of them is "
                 "done.")
     if new_request:
-        used, limit, _, frees_in = _daily_status(uid)
+        used, limit, _, frees_in = limit_status(uid, "daily")
         if limit and used >= limit:
             return (f"⏳ You've reached today's limit of {limit} requests. You can send more in about "
                     f"{_fmt_until(frees_in or 0)}.")
@@ -1764,17 +1761,9 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
 _delayed: dict[int, asyncio.Task] = {}  # request id -> replay task of a cached summary (see _deliver_later)
 
 
-def _ocr_status(uid: int) -> tuple[int, int | None, bool, float | None]:
-    """A user's OCR use against their OCR limit, like _daily_status."""
-    used, oldest = db.ocr_usage(uid, DAY)
-    limit, is_default = access.ocr_limit(uid)
-    frees_in = (oldest + DAY - time.time()) if limit and used >= limit and oldest else None
-    return used, limit, is_default, frees_in
-
-
 def _ocr_refusal(uid: int) -> str | None:
     """The refusal when a non-admin has used up today's OCR, else None."""
-    used, limit, _, frees_in = _ocr_status(uid)
+    used, limit, _, frees_in = limit_status(uid, "ocr")
     if limit and used >= limit:
         return (f"⏳ This is a scanned document and needs text recognition (OCR). You've used today's {limit} "
                 f"OCR documents; you can send more in about {_fmt_until(frees_in or 0)}.")
@@ -1850,7 +1839,7 @@ async def on_ocr_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await q.answer("An admin has been asked already.")
             return
         db.update_ocr_hold(req["id"], asked=1)
-        used, limit, _, _ = _ocr_status(req["user_id"])
+        used, limit, _, _ = limit_status(req["user_id"], "ocr")
         size = f" ({_fmt_size(upload['size'])})" if upload and upload["size"] else ""
         details = (f"🙋 {access.label(req['user_id'], db.get_user(req['user_id']))} asks to read a long scan:\n"
                    f"📄 {upload['name'][:100] if upload else '?'}{size}\n"
@@ -2219,7 +2208,7 @@ async def on_voice_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         return
     key = tts.key(spoken["text"], spoken["lang"], spoken["voice"])
     if not access.is_admin(uid) and not db.get_voice(key, config.VOICE_CACHE_DAYS * DAY):
-        used, limit, _, frees_in = _tts_status(uid)
+        used, limit, _, frees_in = limit_status(uid, "voice")
         if limit and used >= limit:
             await q.answer(f"You've made {limit} new voice messages today; more in about "
                            f"{_fmt_until(frees_in or 0)}.", show_alert=True)

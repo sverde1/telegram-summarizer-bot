@@ -63,12 +63,12 @@ async def test_scan_asks_first_then_reads_and_summarizes(app, telegram, tmp_path
     ask = telegram.sent("editMessageText")[-1]
     assert ask["text"].startswith("🔍 This is a scanned document: 2 pages need text recognition (OCR), about")
     assert "Start OCR" in str(ask["reply_markup"]) and BookAI.calls == []
-    assert db.recent_requests(ANA)[0]["status"] == "waiting" and db.ocr_usage(ANA)[0] == 0
+    assert db.recent_requests(ANA)[0]["status"] == "waiting" and db.usage(ANA, "ocr")[0] == 0
     await send(app, callback_update(ANA, f"ocr:{_rid(telegram)}:go"))
     await _work(app)
     text = telegram.sent("sendMessage")[-1]["text"]
     assert "Whole book." in text and "OCR (Tesseract, English)" in text and "OCR " in text
-    assert db.ocr_usage(ANA)[0] == 1 and db.daily_usage(ANA)[0] == 1  # one request, counted once each
+    assert db.usage(ANA, "ocr")[0] == 1 and db.usage(ANA, "daily")[0] == 1  # one request, counted once each
     pages = db.get_pages(db.get_upload(up)["sha256"])
     assert "quick brown fox" in pages[0] and "quick brown fox" in pages[1]
     assert "quick brown fox" in BookAI.calls[0].text
@@ -145,7 +145,7 @@ async def test_cached_ocr_text_needs_no_confirmation_and_costs_nothing(app, tele
     await send(app, callback_update(ANA, f"book:{up2}:short"))
     await _work(app)
     assert "S0" in telegram.sent("sendMessage")[-1]["text"]
-    assert db.ocr_usage(ANA)[0] == 0
+    assert db.usage(ANA, "ocr")[0] == 0
 
 
 async def test_cancel_during_ocr_still_counts(app, telegram, tmp_path, monkeypatch):
@@ -160,7 +160,7 @@ async def test_cancel_during_ocr_still_counts(app, telegram, tmp_path, monkeypat
     monkeypatch.setattr(ocr, "_read_batch", cancelled)
     await send(app, callback_update(ANA, f"ocr:{_rid(telegram)}:go"))
     await _work(app)
-    assert telegram.texts()[-1] == bot.CANCELLED and db.ocr_usage(ANA)[0] == 1
+    assert telegram.texts()[-1] == bot.CANCELLED and db.usage(ANA, "ocr")[0] == 1
 
 
 async def test_no_ocr_engine(app, telegram, tmp_path, monkeypatch):
@@ -226,7 +226,7 @@ async def test_unsupported_language_reaches_the_user(app, telegram, tmp_path, mo
     up = await _upload(app, telegram, ANA, _scan(tmp_path, 1))
     await send(app, callback_update(ANA, f"book:{up}:whole"))
     await _work(app)
-    assert telegram.texts()[-1].startswith("⚠️ This scan looks like Polish") and db.ocr_usage(ANA)[0] == 0
+    assert telegram.texts()[-1].startswith("⚠️ This scan looks like Polish") and db.usage(ANA, "ocr")[0] == 0
 
 
 # ---------- limits ----------
@@ -235,7 +235,7 @@ async def test_limit_commands_for_ocr(app, telegram):
     await send(app, msg_update(ADMIN_ID, "/limit ocr 2"))
     assert telegram.texts()[-1] == "✅ OCR limit for everyone: 2."
     await send(app, msg_update(ADMIN_ID, f"/limit ocr {ANA} 7"))
-    assert access.ocr_limit(ANA) == (7, False) and access.ocr_limit(BOB) == (2, True)
+    assert access.limit(ANA, "ocr") == (7, False) and access.limit(BOB, "ocr") == (2, True)
     await send(app, msg_update(ANA, "/limit"))
     assert telegram.texts()[-1].split("\n")[1] == "🔍 Today: 0 of your 7 scanned documents (OCR) (last 24 h). 7 left."
     await send(app, msg_update(ADMIN_ID, "/users"))
