@@ -61,6 +61,10 @@ AGAIN_COOLDOWN_MIN = int(_env("AGAIN_COOLDOWN_MIN", "10"))
 # Links a non-admin may send per rolling 24 hours (0 = no limit). Only the starting value: once an admin
 # changes it with /limit, the value stored in the database wins.
 DAILY_LIMIT = int(_env("DAILY_LIMIT", "100"))
+# Uploaded documents: limits on what is read (a 2000-page PDF or 3 million characters is already huge; the
+# caps keep a single upload from tying up the bot for hours).
+MAX_DOC_PAGES = int(_env("MAX_DOC_PAGES", "2000"))
+MAX_DOC_CHARS = int(_env("MAX_DOC_CHARS", "3000000"))
 MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
 SHORT_VIDEO_SEC = int(_env("SHORT_VIDEO_SEC", "180"))  # up to this long: denser frame sampling
 # Whisper may use at most this share of the machine's RAM; a video that doesn't fit right now waits (other

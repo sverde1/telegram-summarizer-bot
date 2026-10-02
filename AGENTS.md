@@ -28,6 +28,9 @@ service on a single machine with no GPU.
 | `summarizer/config.py` | Settings from `.env`; puts the venv's `bin` on `PATH`; `clean_env()` for child processes; `umask 077`. |
 | `summarizer/proc.py` | The only way to run external programs: own process group, killed on timeout or cancel (`current_job_cancel`), secrets stripped from the environment. |
 | `summarizer/memory.py` | Whisper memory estimate and the RAM checks behind the memory guard. |
+| `summarizer/sandbox.py` | bwrap command for code that touches untrusted files: no network, no repo, no environment. |
+| `summarizer/docparse.py` | Reads PDF/EPUB/DOCX/TXT into pages + chapters. Runs **inside** the sandbox; imports no bot module. |
+| `summarizer/documents.py` | Bot side of docparse: runs it sandboxed, maps errors to user messages, stores pages by SHA-256. |
 | `tests/` | pytest suite; `conftest.py` isolates tests from the real bot (see above), `helpers.py` has the fake LLM. |
 | `deploy/` | systemd units and the weekly extractor-upgrade script. |
 | `data/` | Runtime state, git-ignored: database, the bot's Codex login, temp job dirs. |
@@ -73,6 +76,10 @@ How the tests are isolated (`tests/conftest.py`):
   process tree on timeout/cancel and strips the bot's secrets from the child's environment.
 - Never swallow `proc.ProcCancelled` (a cancelled job must stop) or `media.Blocked` (a platform ban must
   be reported, not summarized around): code that tolerates failed downloads re-raises both.
+- Uploaded files are parsed only inside `sandbox.command` (via `documents.parse`), never in the bot's
+  process. The sandbox mounts `summarizer/` alone, never the repo (`.env` is there); code running inside
+  (`docparse`) must not import `summarizer.config` or other bot modules. EPUB/DOCX members are read only
+  through `docparse._read` (size and compression-ratio caps).
 - Links are accepted only through `urls.check` / `urls.classify` (host allow-list; TikTok short-link
   redirects validated hop by hop). Never fetch a user-supplied URL any other way.
 - The bot answers only in private chats; every message/command handler is filtered to private chats and

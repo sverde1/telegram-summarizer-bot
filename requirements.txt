@@ -10,6 +10,8 @@ imageio-ffmpeg==0.6.0
 numpy==2.5.3
 openai==3.22.1
 pillow==12.3.0
+pypdf==6.19.0
+py3langid==0.4.0
 python-dotenv==1.2.3
 python-telegram-bot==22.8
 yt-dlp-ejs==0.8.0

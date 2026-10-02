@@ -227,6 +227,8 @@ The database migrates itself on start.
 | `MAX_QUEUED_PER_USER` | `3` | Videos one user may have queued or running at once (admins: no limit). |
 | `MAX_QUEUE` | `20` | Total videos in the queue; new links are refused beyond that (admins excepted). |
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |
+| `MAX_DOC_PAGES` | `2000` | Most pages read from an uploaded document (EPUB/DOCX/TXT count ~2000 characters as a page). |
+| `MAX_DOC_CHARS` | `3000000` | Most characters read from an uploaded document. |
 | `DAILY_LIMIT` | `100` | Links a user may send per rolling 24 h; every accepted link counts (`/again`, `/transcript`, cache hits, failures). `0` = no limit; admins: no limit. Only the starting value: once changed with `/limit`, the stored value wins. |
 | `MAX_FRAMES` / `MAX_SLIDES` | `16` / `35` | Images sent to the LLM. |
 | `SHORT_VIDEO_SEC` | `180` | Up to this length, frames are also sampled every ~2 s. |

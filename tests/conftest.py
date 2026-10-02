@@ -53,6 +53,8 @@ import bot  # noqa: E402
 from summarizer import db, media, stats, summarize  # noqa: E402
 
 ADMIN_ID = 1
+# Programs that work offline. bwrap is only used by summarizer.sandbox, which always unshares the network.
+LOCAL_TOOLS = {"bwrap", "prlimit", "pdftotext", "pdfinfo", "pdftoppm", "tesseract"}
 
 
 # ---------- isolation ----------
@@ -90,8 +92,9 @@ def no_network(request, monkeypatch):
     """Blocks the internet and external programs, unless the test is marked `network`.
 
     Sockets and DNS are blocked so no test can reach YouTube, Telegram or an LLM by accident. Child
-    processes are limited to ffmpeg/ffprobe (local media work) and this Python interpreter, because yt-dlp,
-    gallery-dl, codex, claude or npm would do their own networking, which a socket patch can't see.
+    processes are limited to local tools (ffmpeg, bwrap with its network unshared, poppler, Tesseract) and
+    this Python interpreter, because yt-dlp, gallery-dl, codex, claude or npm would do their own
+    networking, which a socket patch can't see.
     """
     if request.node.get_closest_marker("network"):
         return
@@ -106,10 +109,11 @@ def no_network(request, monkeypatch):
     real_init = subprocess.Popen.__init__
 
     def guarded_init(self, args, *a, **kw):
-        """Starts only ffmpeg/ffprobe or this interpreter; refuses anything else."""
+        """Starts only local tools (ffmpeg, the document sandbox, poppler, Tesseract) or this interpreter."""
         first = args[0] if isinstance(args, (list, tuple)) else str(args).split()[0]
         name = os.path.basename(str(first))
-        if name in ("ffmpeg", "ffprobe") or name.startswith("ffmpeg-") or str(first) == sys.executable:
+        if (name in ("ffmpeg", "ffprobe") or name.startswith("ffmpeg-") or str(first) == sys.executable
+                or name in LOCAL_TOOLS):
             return real_init(self, args, *a, **kw)
         raise RuntimeError(f"running {name!r} is blocked in tests (mark the test `network` to allow it)")
 

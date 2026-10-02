@@ -75,6 +75,38 @@ CREATE TABLE IF NOT EXISTS requests (
     created_at  REAL NOT NULL,
     finished_at REAL
 );
+CREATE TABLE IF NOT EXISTS uploads (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT, -- used in the upload's buttons (book:<id>:...)
+    user_id     INTEGER NOT NULL,
+    file_id     TEXT NOT NULL,                 -- Telegram's id to download the file again
+    file_unique_id TEXT,
+    name        TEXT NOT NULL,                 -- file name as sent (shown to the user and in /history)
+    size        INTEGER,
+    sha256      TEXT,                          -- set once downloaded; the documents row
+    created_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS documents (
+    sha256      TEXT PRIMARY KEY,              -- of the file's bytes: identical uploads share the work
+    name        TEXT,
+    format      TEXT,                          -- pdf | epub | docx | txt
+    pages       INTEGER,                       -- real pages (PDF) or ~2000-character pages
+    title       TEXT,                          -- from the file's metadata, may be empty
+    author      TEXT,
+    language    TEXT,                          -- OCR language, when OCR was used
+    text_source TEXT,                          -- text | ocr-tesseract | ocr-rapidocr
+    chapters    TEXT,                          -- JSON [{title, start, end}], page indices, end exclusive
+    status      TEXT NOT NULL,                 -- processing | done | failed
+    error       TEXT,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS document_pages (
+    sha256  TEXT NOT NULL,
+    page    INTEGER NOT NULL,                  -- 0-based
+    text    TEXT NOT NULL,
+    source  TEXT NOT NULL,                     -- text | ocr-<engine>; OCR pages are saved as they finish
+    PRIMARY KEY (sha256, page)
+);
 CREATE INDEX IF NOT EXISTS requests_user ON requests (user_id, created_at);
 CREATE INDEX IF NOT EXISTS requests_video ON requests (platform, video_id);
 """
@@ -436,6 +468,64 @@ def daily_usage(uid: int, window: float = 86400) -> tuple[int, float | None]:
     return row["n"], row["oldest"]
 
 
+def add_upload(user_id: int, file_id: str, file_unique_id: str | None, name: str, size: int | None) -> int:
+    """Records an uploaded file, before the user picks how to summarize it. Returns the upload id."""
+    with _db() as c:
+        return c.execute("INSERT INTO uploads (user_id, file_id, file_unique_id, name, size, created_at) "
+                         "VALUES (?,?,?,?,?,?)", (user_id, file_id, file_unique_id, name, size, time.time())).lastrowid
+
+
+def get_upload(upload_id: int) -> dict | None:
+    """One upload row, or None."""
+    with _db() as c:
+        row = c.execute("SELECT * FROM uploads WHERE id=?", (upload_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def set_upload_sha(upload_id: int, sha256: str) -> None:
+    """Links an upload to its document once the file has been downloaded and hashed."""
+    with _db() as c:
+        c.execute("UPDATE uploads SET sha256=? WHERE id=?", (sha256, upload_id))
+
+
+def get_document(sha256: str) -> dict | None:
+    """A document's metadata (chapters decoded), or None. The text is in document_pages."""
+    with _db() as c:
+        row = c.execute("SELECT * FROM documents WHERE sha256=?", (sha256,)).fetchone()
+    if not row:
+        return None
+    doc = dict(row)
+    doc["chapters"] = json.loads(doc["chapters"]) if doc["chapters"] else []
+    return doc
+
+
+def save_document(sha256: str, **fields) -> None:
+    """Creates or updates a document's metadata (chapters may be given as a list)."""
+    if "chapters" in fields and not isinstance(fields["chapters"], (str, type(None))):
+        fields["chapters"] = json.dumps(fields["chapters"], ensure_ascii=False)
+    now = time.time()
+    with _db() as c:
+        c.execute("INSERT OR IGNORE INTO documents (sha256, status, created_at, updated_at) VALUES (?,?,?,?)",
+                  (sha256, fields.get("status", "processing"), now, now))
+        if fields:
+            cols = ", ".join(f"{k}=?" for k in fields)
+            c.execute(f"UPDATE documents SET {cols}, updated_at=? WHERE sha256=?", (*fields.values(), now, sha256))
+
+
+def save_pages(sha256: str, pages: dict[int, str], source: str) -> None:
+    """Stores page texts (replacing earlier ones for the same pages)."""
+    with _db() as c:
+        c.executemany("INSERT OR REPLACE INTO document_pages (sha256, page, text, source) VALUES (?,?,?,?)",
+                      [(sha256, n, text, source) for n, text in pages.items()])
+
+
+def get_pages(sha256: str) -> dict[int, str]:
+    """All stored page texts of a document, by page index."""
+    with _db() as c:
+        return {r["page"]: r["text"] for r in c.execute(
+            "SELECT page, text FROM document_pages WHERE sha256=? ORDER BY page", (sha256,))}
+
+
 def fail_stale_requests() -> int:
     """Marks requests left unfinished by a crash or kill as failed ("bot restarted"); call at startup.
 
@@ -448,6 +538,8 @@ def fail_stale_requests() -> int:
     with _db() as c:
         cur = c.execute("""UPDATE requests SET status='failed', error='bot restarted', finished_at=?
                            WHERE status IN ('queued', 'processing')""", (time.time(),))
+        # A document being read when the bot stopped: its saved pages stay, so a new request resumes.
+        c.execute("UPDATE documents SET status='failed', error='bot restarted' WHERE status='processing'")
         return cur.rowcount
 
 
