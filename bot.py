@@ -689,11 +689,58 @@ def details(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) ->
     return "\n".join(filter(None, [timing, used]))
 
 
+# Longest a model-written field may be. The prompt asks for much less; these only stop a broken or
+# prompt-injected answer from turning into a flood of messages.
+FIELD_LIMITS = {"title": 300, "clickbait_answer": 1000, "summary": 4000}
+
+
+def _cap(text: str, limit: int) -> str:
+    """Shortens text to at most `limit` characters, marking the cut with "…"."""
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def _escaped_pieces(raw_line: str) -> list[str]:
+    """HTML-escapes one line of text, cut into pieces that each fit a message.
+
+    The cut is made on the raw text, so it can never land inside an entity like `&amp;` (which Telegram
+    rejects); pieces are sized by their escaped length, which can be up to 6x the raw length.
+    """
+    pieces, current, size = [], [], 0
+    for ch in raw_line:
+        esc = html.escape(ch)
+        if size + len(esc) > TG_LIMIT:
+            pieces.append("".join(current))
+            current, size = [], 0
+        current.append(esc)
+        size += len(esc)
+    pieces.append("".join(current))
+    return pieces
+
+
+def _pack(pieces: list[str]) -> list[str]:
+    """Joins message pieces with newlines into as few messages as possible, each at most TG_LIMIT long.
+
+    Every piece is complete HTML on its own (escaped text or a whole tag pair), so splitting between pieces
+    keeps each message valid.
+    """
+    chunks, current = [], ""
+    for piece in pieces:
+        candidate = f"{current}\n{piece}" if current else piece
+        if len(candidate) > TG_LIMIT and current:
+            chunks.append(current)
+            candidate = piece
+        current = candidate
+    if current.strip():
+        chunks.append(current)
+    return chunks
+
+
 def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> list[str]:
     """Builds the reply in the Title / Clickbait answer / Summary layout, split to fit Telegram.
 
     All model and video text is HTML-escaped: messages are sent with parse_mode=HTML, and titles or
-    summaries containing `<` or `&` would otherwise break parsing (or inject markup).
+    summaries containing `<` or `&` would otherwise break parsing (or inject markup). Model fields are capped
+    (FIELD_LIMITS) and messages are packed by their escaped length, so no message exceeds Telegram's limit.
 
     Args:
         r: The pipeline result (must have a summary).
@@ -704,32 +751,22 @@ def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> 
         One or more HTML messages, each at most TG_LIMIT characters.
     """
     s = r.summary
-    e = html.escape
-    head = f"<b>Title:</b>\n{e(s['title'] or r.meta['title'])}\n\n<b>Clickbait answer:</b>\n"
-    head += e(s["clickbait_answer"]) if s["is_clickbait"] and s["clickbait_answer"] else "✅ Not clickbait - the title matches the content."
-    head += "\n\n<b>Summary:</b>\n"
-    foot = "\n\n<i>" + e(details(r, waited, reveal_cache)) + f"\n{e(r.url)}</i>"
 
-    body = e(s["summary"])
-    if len(head) + len(body) + len(foot) <= TG_LIMIT:
-        return [head + body + foot]
-    # Too long for one message: split the summary on line boundaries.
-    chunks, cur = [], head
-    for line in body.split("\n"):
-        # A single line over the limit is cut hard; the 100-character margin leaves room for the
-        # newline and the chunk's other content.
-        while len(line) > TG_LIMIT - 100:  # pathological single line
-            chunks.append(cur)
-            cur, line = line[:TG_LIMIT - 100], line[TG_LIMIT - 100:]
-        if len(cur) + len(line) + 1 > TG_LIMIT:
-            chunks.append(cur)
-            cur = ""
-        cur += line + "\n"
-    if len(cur) + len(foot) > TG_LIMIT:
-        chunks.append(cur)
-        cur = ""
-    chunks.append(cur.rstrip("\n") + foot)
-    return [c for c in chunks if c.strip()]
+    def text(raw: str) -> list[str]:
+        """Escaped pieces for a block of text, one or more per line."""
+        return [piece for line in raw.split("\n") for piece in _escaped_pieces(line)]
+
+    title = _cap(s.get("title") or r.meta.get("title", ""), FIELD_LIMITS["title"])
+    if s.get("is_clickbait") and s.get("clickbait_answer"):
+        answer = _cap(s["clickbait_answer"], FIELD_LIMITS["clickbait_answer"])
+    else:
+        answer = "✅ Not clickbait - the title matches the content."
+    footer = _cap(details(r, waited, reveal_cache), 1000) + "\n" + r.url
+    pieces = ["<b>Title:</b>", *text(title), "", "<b>Clickbait answer:</b>", *text(answer), "",
+              "<b>Summary:</b>", *text(_cap(s.get("summary", ""), FIELD_LIMITS["summary"])), ""]
+    # The footer is one italic piece: an <i> split across two messages would break both.
+    pieces.append(f"<i>{html.escape(_cap(footer, 1500))}</i>")
+    return _pack(pieces)
 
 
 def _fmt_eta(sec: float) -> str:
