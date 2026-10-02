@@ -173,6 +173,8 @@ def _convert_value(x: float, src: str, dst: str, delta: bool) -> float:
 def _render(values: list[str], unit_key: str, spoken: bool) -> str:
     """Formats one value or a range in a unit."""
     unit = UNITS[unit_key]
+    if spoken:  # "-30" may be read as "dash thirty", or the sign dropped
+        values = [f"minus {v[1:]}" if v.startswith("-") else v for v in values]
     # "16–21 °C", but "-30 to 24 °C": a dash next to a minus sign reads as a negative number.
     joined = " to ".join(values) if spoken or any(v.startswith("-") for v in values) else "–".join(values)
     return f"{joined} {unit.words}" if spoken else f"{joined} {unit.symbol}"

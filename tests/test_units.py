@@ -91,6 +91,8 @@ def test_spoken_form_reads_units_as_words():
     spoken = units.convert("Hot: 95 °F and 20 km.", "metric", "c", spoken=True)
     assert spoken == "Hot: 35 degrees Celsius and 20 kilometres." and "°" not in spoken
     assert units.convert("60-70 °F", "metric", "c", spoken=True) == "16 to 21 degrees Celsius"
+    assert units.convert("at -22 Fahrenheit", "metric", "c", spoken=True) == "at minus 30 degrees Celsius"
+    assert units.convert("at -22 Fahrenheit", "imperial", "f", spoken=True) == "at minus 22 degrees Fahrenheit"
 
 
 def test_mixed_settings():
