@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from . import config, db, frames, media, memory, proc, stats, summarize, transcribe
-from .urls import classify
+from .urls import Video, classify
 
 log = logging.getLogger(__name__)
 
@@ -302,10 +302,57 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         UnsupportedURL: The link isn't a YouTube or TikTok video.
         PipelineError: The video can't be processed (the message is shown to the user).
     """
+    return _run(classify(url), progress, use_cache=use_cache, transcript_only=transcript_only,
+                request_id=request_id, backend=backend, model=model, again_limit_user=again_limit_user,
+                hide_cache_from=hide_cache_from)
+
+
+def file_label_head(video, meta: dict) -> str:
+    """The status line naming a file a user sent: its label and length, e.g. "🎤 Voice message (0:42)"."""
+    return f"{video.url[:80]} ({_fmt_duration(meta.get('duration') or 0)})"
+
+
+def run_file(src: Path, label: str, info: dict, sha256: str, progress: Callable[..., None], *, workdir: Path,
+             use_cache: bool = True, transcript_only: bool = False, request_id: int | None = None,
+             backend: str | None = None, model: str | None = None,
+             hide_cache_from: int | None = None) -> Result:
+    """Summarizes a voice message, audio or video file a user sent, like a video from a link.
+
+    The file is identified by its SHA-256 (a repeat reuses its transcript and summaries). Its own name never
+    goes into the shared cache: a later sender of the same file must not see the first sender's file name, so
+    the stored metadata has a neutral title and the name lives only in this request's label.
+
+    Args:
+        src: The file, already in `workdir` (named vid.* when it has video, audio.* otherwise).
+        label: What this request calls it, e.g. "🎤 Voice message" or "🎬 holiday.mp4".
+        info: media.probe_file's result (duration, has_audio, has_video).
+        sha256: The file's hash.
+        progress: Callback (text, eta) for the status message.
+        workdir: The job's directory, owned by the caller (kept when the job has to wait for memory).
+        use_cache / transcript_only / request_id / backend / model / hide_cache_from: as for run().
+
+    Raises:
+        PipelineError: The file can't be summarized (message for the user).
+        memory.NeedsMemory: Not enough free memory to transcribe it right now.
+    """
+    kind = "video" if info["has_video"] else "audio"
+    video = Video("file", sha256, label, kind)
+    neutral = "Video file" if kind == "video" else "Audio file"
+    meta = {"id": sha256, "title": neutral, "duration": info["duration"], "uploader": "", "upload_date": "",
+            "description": "", "thumbnail": "", "language": "", "subtitles": {}, "auto_captions": [],
+            "music": "", "is_carousel": False, "has_audio": info["has_audio"], "has_video": info["has_video"]}
+    return _run(video, progress, use_cache=use_cache, transcript_only=transcript_only, request_id=request_id,
+                backend=backend, model=model, again_limit_user=None, hide_cache_from=hide_cache_from,
+                workdir=workdir, file_meta=meta)
+
+
+def _run(video, progress: Callable[..., None], *, use_cache: bool, transcript_only: bool,
+         request_id: int | None, backend: str | None, model: str | None, again_limit_user: int | None,
+         hide_cache_from: int | None, workdir: Path | None = None, file_meta: dict | None = None) -> Result:
+    """The shared body of run() and run_file(): cache lookup, pacing, processing, the videos row's status."""
     backend = backend or config.LLM_BACKEND
     model = model or summarize.default_model(backend)  # the cache key; a pinned model id when possible
     t0 = time.time()
-    video = classify(url)
 
     if request_id:
         db.update_request(request_id, platform=video.platform, video_id=video.video_id, status="processing")
@@ -334,9 +381,11 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
 
     # The videos row exists from the start (status "processing") and is filled in as data arrives, so a
     # crash mid-way still leaves a record of what was attempted and how far it got.
-    db.start_video(video.platform, video.video_id, video.url)
+    # A file's name stays out of the shared row (see run_file).
+    db.start_video(video.platform, video.video_id, "" if file_meta else video.url)
     try:
-        return _process(video, progress, cached, transcript_only, t0, backend, model, hide_cache)
+        return _process(video, progress, cached, transcript_only, t0, backend, model, hide_cache,
+                        workdir=workdir, file_meta=file_meta)
     except proc.ProcCancelled:
         # The video itself is fine; only this request was stopped. Don't record it as a failed video.
         db.update_video(video.platform, video.video_id, status="cancelled", error=None)
@@ -355,7 +404,8 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
 
 
 def _process(video, progress, cached: dict | None, transcript_only: bool, t0: float,
-             backend: str, model: str | None, hide_cache: bool = False) -> Result:
+             backend: str, model: str | None, hide_cache: bool = False, workdir: Path | None = None,
+             file_meta: dict | None = None) -> Result:
     """Do the work for a video that isn't (fully) cached: lookup, transcript, frames, LLM.
 
     Args:
@@ -367,6 +417,9 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         backend: LLM backend to use.
         model: Model to use; also the cache key the summary is saved under.
         hide_cache: Don't mention the cache in status lines (see run()).
+        workdir: A directory the caller owns (a file a user sent is already in it); it is neither wiped nor
+            deleted here. None: a fresh one for this video, deleted at the end.
+        file_meta: For a file a user sent: its metadata (no lookup; every ffmpeg run in the sandbox).
 
     Returns:
         The result to render.
@@ -386,15 +439,22 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         """
         timings.append((label, time.monotonic() - since))
 
-    workdir = config.DATA_DIR / "work" / f"{video.platform}_{video.video_id}"
-    shutil.rmtree(workdir, ignore_errors=True)  # leftovers from a crashed earlier run
-    workdir.mkdir(parents=True)
+    is_file = file_meta is not None
+    owns_workdir = workdir is None
+    if owns_workdir:
+        workdir = config.DATA_DIR / "work" / f"{video.platform}_{video.video_id}"
+        shutil.rmtree(workdir, ignore_errors=True)  # leftovers from a crashed earlier run
+        workdir.mkdir(parents=True)
     # A saved transcript makes the lookup unnecessary: its metadata is stored with it, and nothing needs
     # downloading unless the LLM asks for frames (then the video download looks it up itself).
-    reuse_meta = bool(cached and cached.get("meta") and cached["transcript_source"] not in (None, "none"))
+    reuse_meta = bool(not is_file and cached and cached.get("meta")
+                      and cached["transcript_source"] not in (None, "none"))
     owed_lookup = 0.0  # a first-time requester is still shown a lookup step (paced, see Result.hold)
     try:
-        if reuse_meta:
+        if is_file:  # nothing to look up: the caller read the file (sandboxed)
+            meta = file_meta
+            db.update_video(video.platform, video.video_id, meta=meta, title=meta["title"])
+        elif reuse_meta:
             meta = cached["meta"]
             if hide_cache:
                 st.show("🔎 Looking up the video…")
@@ -412,18 +472,23 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             except media.MediaError as e:
                 raise PipelineError(media.describe(e), detail=str(e))
         dur = meta["duration"] or 0
-        if video.kind == "photo" or meta.get("is_carousel"):
+        what = "This recording" if is_file else "Video"
+        if is_file:
+            st.head = file_label_head(video, meta)
+        elif video.kind == "photo" or meta.get("is_carousel"):
             st.head = f"🖼 {meta['title'][:80]} (photo post)"  # "duration" would be the music's
         else:
             st.head = f"🎬 {meta['title'][:80]} ({_fmt_duration(dur)})"
         if dur > config.MAX_DURATION_MIN * 60:
-            raise PipelineError(f"Video is longer than {config.MAX_DURATION_MIN} min; skipping.")
+            raise PipelineError(f"{what} is longer than {config.MAX_DURATION_MIN} min; skipping.")
         if not dur and not (video.kind == "photo" or meta.get("is_carousel")):
             # Without a length there's no limit on the download (and the length check above can't work).
             # Carousels are fine: their "duration" is just the background music's, if any.
-            raise PipelineError("Couldn't determine this video's length, so it can't be processed.")
+            raise PipelineError(f"Couldn't determine this {'recording' if is_file else 'video'}'s length, so it "
+                                "can't be processed.")
     except BaseException:
-        shutil.rmtree(workdir, ignore_errors=True)
+        if owns_workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
         raise
     llm = summarize.llm_label(backend, model or "")  # replaced by the model that actually answers, below
     # The thumbnail (for the clickbait check) downloads while the transcript is made; not for /transcript.
@@ -476,10 +541,12 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
                         language=lang)
         if transcript_only:
             return _finish(video, meta, transcript, source, lang, None, False, notes, t0)
+        if is_file and not meta.get("has_video") and not transcript.strip():
+            raise PipelineError("🔇 No speech found in this recording.")
 
         # No (or hardly any) speech: the picture is the content, so look right away instead of
         # waiting for the LLM to ask. Saves the second LLM turn.
-        if not is_carousel and _speechless(meta, transcript):
+        if not is_carousel and meta.get("has_video", True) and _speechless(meta, transcript):
             t = time.monotonic()
             images = _frames(video, meta, cues, [], workdir, st, notes, why="no speech, looking at the video")
             took(f"{len(images)} frames", t)
@@ -513,7 +580,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
                          (time.monotonic() - t_llm) / _llm_load(len(transcript), len(first_images)))
             summary = {k: answer[k] for k in summarize.SCHEMA["required"]}
             log.info("needs_frames=%s moments=%s", answer.get("needs_frames"), answer.get("frame_moments"))
-            if answer.get("needs_frames") and not images:  # it already has slides/frames otherwise
+            if answer.get("needs_frames") and not images and meta.get("has_video", True):  # it already has slides/frames otherwise
                 st.ok("✅ First summary written")
                 t = time.monotonic()
                 frames_ = _frames(video, meta, cues, answer.get("frame_moments") or [], workdir, st, notes)
@@ -545,14 +612,16 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         result = _finish(video, meta, transcript, source, lang, summary, bool(images), notes, t0)
         if paced:  # the footer shows what this user saw: the lookup, the paced transcript step, the rest
             owed = paced[1] + owed_lookup
-            lookup = [("lookup", owed_lookup)] if reuse_meta else timings[:1]
-            result.replay_steps = lookup + [paced] + (timings if reuse_meta else timings[1:])
+            # Videos show their lookup first (paced when it was skipped); files have no lookup step.
+            lookup = [("lookup", owed_lookup)] if reuse_meta else [] if is_file else timings[:1]
+            result.replay_steps = lookup + [paced] + (timings if reuse_meta or is_file else timings[1:])
             result.replay_total = total + owed
             result.hold = [(st.text(f"🧠 Summarizing with {llm}…"), owed)]
         return result
     finally:
         side.shutdown(wait=True)  # the thumbnail download must be done before its folder goes
-        shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media
+        if owns_workdir:
+            shutil.rmtree(workdir, ignore_errors=True)  # keep no downloaded media
 
 
 def _finish(video, meta, transcript, source, lang, summary, frames_used, notes, t0) -> Result:
@@ -625,7 +694,7 @@ def _frames(video, meta, cues, moments: list[dict], workdir, st: Status, notes, 
         vid = media.download_video(video, workdir)
         # Phrase matches ("this book", "as you can see") back up the LLM's choice of moments.
         moments_ = times[:frames.MAX_MOMENTS_EACH] + frames.regex_moments(cues)[:frames.MAX_MOMENTS_EACH]
-        images = frames.extract(vid, dur, moments_, workdir, sweep=sweep)
+        images = frames.extract(vid, dur, moments_, workdir, sweep=sweep, sandboxed=video.platform == "file")
         vid.unlink(missing_ok=True)
     except media.Blocked:
         raise
@@ -673,12 +742,14 @@ def _whisper(video, meta, workdir, st: Status, notes, why: str, rest: float) -> 
         notes.append(f"audio download failed: {e}")
         return None
     # Some downloads (e.g. gallery-dl's h265 TikTok mp4s) have no audio track; Whisper would just fail.
-    if not media.has_audio_stream(audio):
+    # A file a user sent was probed in the sandbox; PyAV must not open it in the bot's process.
+    has_audio = meta.get("has_audio", True) if video.platform == "file" else media.has_audio_stream(audio)
+    if not has_audio:
         notes.append("downloaded file has no audio track")
         return None
     st.show(f"🗣 {why} → transcribing {_fmt_duration(dur)} of audio with {whisper}…",
             transcribe.estimate(dur) + rest)
-    cues, lang, prob = transcribe.transcribe(str(audio))
+    cues, lang, prob = transcribe.transcribe(str(audio), workdir if video.platform == "file" else None)
     if not audio.name.startswith("vid."):  # a TikTok video file stays for frames (deleted with the workdir)
         audio.unlink(missing_ok=True)
     log.info("whisper: %d segments, lang=%s p=%.2f", len(cues), lang, prob)
@@ -711,6 +782,11 @@ def _transcript(video, meta, workdir, st: Status, notes, transcript_only: bool) 
         if got := _whisper(video, meta, workdir, st, notes, "No captions", rest):
             return got
         st.ok("⚠️ No transcript available")
+        return [], "none", ""
+    if video.platform == "file":  # a recording someone sent: Whisper is the only source
+        if got := _whisper(video, meta, workdir, st, notes, "Transcribing", rest):
+            return got
+        st.ok("⚠️ No speech found")
         return [], "none", ""
 
     # TikTok: no transcript API. Audio + whisper first, then TikTok's own auto-captions.

@@ -352,6 +352,8 @@ def download_audio(video: Video, workdir: Path) -> Path:
     Raises:
         MediaError: yt-dlp failed or produced no file.
     """
+    if video.platform == "file":  # a file a user sent is already in the job's directory
+        return _sent_file(workdir, ("audio.*", "vid.*"))
     if video.platform == "tiktok":
         # TikTok has no separate audio stream: "bestaudio" was the whole video anyway, and frames downloaded
         # it a second time. One download, of the format frames want, serves both.
@@ -380,7 +382,9 @@ def download_video(video: Video, workdir: Path) -> Path:
         MediaError: yt-dlp failed or produced no file.
     """
     if existing := [f for f in workdir.glob("vid.*") if f.suffix != ".part"]:
-        return existing[0]  # TikTok: already downloaded for Whisper
+        return existing[0]  # TikTok: already downloaded for Whisper; a video file a user sent
+    if video.platform == "file":
+        raise MediaError("the file has no video")
     if video.platform == "tiktok":
         # An h264 stream (decodes everywhere; some TikTok formats are h265), else whatever exists. Not
         # "download": in yt-dlp's TikTok extractor that is the watermarked web file.
@@ -395,6 +399,18 @@ def download_video(video: Video, workdir: Path) -> Path:
     if not files:
         raise MediaError("video download produced no file")
     return files[0]
+
+
+def _sent_file(workdir: Path, patterns: tuple[str, ...]) -> Path:
+    """The file a user sent, in the job's directory (named audio.* or vid.* by the bot).
+
+    Raises:
+        MediaError: It isn't there.
+    """
+    for pattern in patterns:
+        if found := [f for f in workdir.glob(pattern) if f.suffix != ".part"]:
+            return found[0]
+    raise MediaError("the file is missing")
 
 
 COVER_CODECS = {"mjpeg", "png", "bmp", "gif", "webp"}  # a still image in an audio file is cover art

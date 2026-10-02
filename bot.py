@@ -1170,7 +1170,9 @@ def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True,
     else:
         answer = "✅ Not clickbait - the title matches the content."
     footer = _cap(details(r, waited, reveal_cache), 1000) + "\n" + r.url
-    pieces = ["<b>Title:</b>", *text(title), "", "<b>Clickbait answer:</b>", *text(answer), "",
+    # A recording someone sent has no published title or thumbnail: nothing to call clickbait.
+    clickbait = [] if r.platform == "file" else ["<b>Clickbait answer:</b>", *text(answer), ""]
+    pieces = ["<b>Title:</b>", *text(title), "", *clickbait,
               "<b>Summary:</b>", *text(_cap(units.convert(s.get("summary", ""), *units_), FIELD_LIMITS["summary"])), ""]
     # The footer is one italic piece: an <i> split across two messages would break both.
     pieces.append(f"<i>{html.escape(_cap(footer, 1500))}</i>")
@@ -1847,6 +1849,8 @@ async def _deliver_later(app: Application, job: Job, result: pipeline.Result, wa
         meta = getattr(result, "meta", None) or {}
         if isinstance(result, documents.DocResult):
             head = result.head
+        elif getattr(result, "platform", "") == "file":
+            head = pipeline.file_label_head(result, meta)
         elif meta.get("is_carousel"):
             head = f"🖼 {meta.get('title', '')[:80]} (photo post)"
         else:
@@ -1921,7 +1925,7 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
             data = result.transcript.encode()
             # A long transcript is a sizeable upload; PTB's default 5 s write timeout is too short for it.
             await _send_with_retry(lambda: bot_.send_document(
-                job.chat_id, io.BytesIO(data), filename=f"{result.video_id}.txt",
+                job.chat_id, io.BytesIO(data), filename=_transcript_name(result),
                 caption=f"Transcript ({result.transcript_source})", write_timeout=60), job)
         return
     # Only admins, or the user who asked for this video before, may learn it was cached: otherwise it
@@ -1936,6 +1940,14 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
         await _send_with_retry(lambda chunk=chunk, k=k: bot_.send_message(
             job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
             reply_markup=listen if k == len(chunks) else None), job)
+
+
+def _transcript_name(result: pipeline.Result) -> str:
+    """The transcript file's name: the video id, or for a file someone sent, its (sanitised) label."""
+    if result.platform != "file":
+        return f"{result.video_id}.txt"
+    name = re.sub(r"[^\w .-]+", "", result.url).strip(" .") or "recording"
+    return f"{name[:80]} transcript.txt"
 
 
 def _spoken_summary(summary: dict, units_: tuple[str, str]) -> dict:

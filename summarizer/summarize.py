@@ -206,6 +206,14 @@ def _material(meta: dict, platform: str, transcript: str, source: str, language:
         The text block that follows the system prompt.
     """
     # The transcript sits inside tags so the model can tell where untrusted video text starts and ends.
+    if platform == "file":  # a recording a user sent: no published title, thumbnail or description
+        kind = "a video file" if meta.get("has_video") else "an audio recording (a voice message or audio file)"
+        note = ("This is " + kind + " the user sent: it has no published title or thumbnail. Write a short "
+                "descriptive title of what it's about in title, set is_clickbait false and clickbait_answer "
+                "empty." + ("" if meta.get("has_video") else " It has no picture: needs_frames must be false."))
+        return (f"{note}\nDuration: {meta['duration']} s\n\n"
+                f"Transcript source: {source} (language: {language or 'unknown'})\n"
+                f"<transcript>\n{transcript or '(no speech found)'}\n</transcript>")
     return (f"Platform: {platform}\nTitle: {meta['title']}\nUploader: {meta['uploader']}\n"
             f"Uploaded: {meta['upload_date']}\nDuration: {meta['duration']} s\n"
             f"Description:\n{meta['description'] or '(none)'}\n\n"

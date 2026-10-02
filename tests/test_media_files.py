@@ -93,3 +93,111 @@ def test_frames_from_a_users_file_in_the_sandbox(job, argv):
 def test_platform_downloads_keep_running_ffmpeg_directly(job, argv):
     frames._grab(job("video"), 1, job.dir / "f.jpg")
     assert argv[0][0] == config.FFMPEG
+
+
+# ---------- through the pipeline ----------
+
+import shutil  # noqa: E402
+
+from summarizer import db, memory, pipeline, summarize  # noqa: E402
+
+from helpers import SUMMARY, FakeConversation  # noqa: E402
+
+SHA = "a" * 64
+
+
+@pytest.fixture
+def ai(monkeypatch):
+    """A fake LLM answering with a plain summary (no frames requested); returns the conversations."""
+    convs = []
+
+    def factory(backend=None, model=None):
+        """One fake conversation."""
+        c = FakeConversation([{**SUMMARY, "title": "Battery talk", "needs_frames": False, "frame_moments": []}])
+        convs.append(c)
+        return c
+
+    monkeypatch.setattr(summarize, "conversation", factory)
+    return convs
+
+
+@pytest.fixture
+def whisper(monkeypatch):
+    """A fake Whisper: returns `whisper.cues` and records where it was asked to decode."""
+    calls = []
+
+    def fake(path, sandbox_dir=None):
+        """Records the call; returns the prepared cues."""
+        calls.append((path, sandbox_dir))
+        return list(fake.cues), "en", 0.9
+
+    fake.cues = [(0.0, "hello there"), (1.0, "this is a test recording about batteries " * 5)]
+    fake.calls = calls
+    monkeypatch.setattr(pipeline.transcribe, "transcribe", fake)
+    monkeypatch.setattr(memory, "fits_now", lambda needed: True)
+    return fake
+
+
+def _run_file(job, name, label="🎬 holiday.mp4", **kw):
+    """Puts a test file in the job directory as the bot would (vid.* / audio.*) and runs it."""
+    src = job(name)
+    info = media.probe_file(src, job.dir)
+    dst = job.dir / (("vid" if info["has_video"] else "audio") + src.suffix)
+    src.rename(dst)
+    return pipeline.run_file(dst, label, info, kw.pop("sha", SHA), lambda *a: None, workdir=job.dir, **kw)
+
+
+def test_a_video_file_is_summarized_with_frames_from_the_file(job, ai, whisper):
+    whisper.cues = []  # no speech: the picture is the content
+    r = _run_file(job, "video")
+    assert r.summary["title"] == "Battery talk" and r.frames_used and r.platform == "file"
+    assert ai[0].sent[0][0]  # frames were attached on the first turn
+    assert whisper.calls and whisper.calls[0][1] == job.dir  # decoded in the sandbox
+    row = db.get_video("file", SHA)
+    assert row["url"] == "" and row["meta"]["title"] == "Video file"  # no file name in the shared cache
+    assert job.dir.exists()  # the bot owns the directory
+
+
+def test_an_audio_file_gets_no_frames(job, ai, whisper):
+    r = _run_file(job, "mp3", "🎵 song.mp3")
+    assert r.summary and not r.frames_used and not ai[0].sent[0][0]
+
+
+def test_cover_art_is_not_a_picture_to_look_at(job, ai, whisper):
+    r = _run_file(job, "cover_mp3", "🎵 cover.mp3")
+    assert not r.frames_used
+
+
+def test_audio_without_speech(job, ai, whisper):
+    whisper.cues = []
+    with pytest.raises(pipeline.PipelineError, match="No speech found"):
+        _run_file(job, "voice", "🎤 Voice message")
+    assert ai == []
+
+
+def test_a_repeat_by_someone_else_reuses_it_without_the_first_name(job, ai, whisper, tmp_path_factory, files):
+    _run_file(job, "voice", "🎤 Voice message")
+    other = tmp_path_factory.mktemp("other")
+    shutil.copy(files["voice"], other / "audio.ogg")
+    info = media.probe_file(other / "audio.ogg", other)
+    rid = db.add_request(61, "x", "summary")
+    r = pipeline.run_file(other / "audio.ogg", "🎵 my-secret-name.ogg", info, SHA, lambda *a: None,
+                          workdir=other, request_id=rid, hide_cache_from=61)
+    assert r.cached and r.replay_steps and len(ai) == 1  # paced like other cached answers
+    assert r.url == "🎵 my-secret-name.ogg" and "my-secret" not in str(db.get_video("file", SHA))
+
+
+def test_waiting_for_memory_keeps_the_file(job, ai, whisper, monkeypatch):
+    monkeypatch.setattr(memory, "fits_now", lambda needed: False)
+    with pytest.raises(memory.NeedsMemory):
+        _run_file(job, "voice", "🎤 Voice message")
+    assert list(job.dir.glob("audio.*"))  # still there for the retry: nothing to download again
+
+
+def test_a_file_summary_has_no_clickbait_section_and_names_the_file():
+    import bot
+    r = pipeline.Result("file", SHA, "🎤 Voice message", {"title": "Audio file", "duration": 42}, "t", "whisper-small",
+                        "en", {**SUMMARY, "title": "Battery talk", "_stats": {}})
+    text = bot.render(r)[0]
+    assert "Clickbait" not in text and "🎤 Voice message" in text and "Battery talk" in text
+    assert bot._transcript_name(r) == "Voice message transcript.txt"
