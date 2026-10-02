@@ -37,6 +37,7 @@ service on a single machine with no GPU.
 | `summarizer/fetch.py` | The only way to download a file by URL: HTTPS, allowed hosts checked on every redirect, size cap, optional SHA-256. |
 | `summarizer/tts.py` | Voice messages: text preparation, Kokoro run in the sandbox, Opus encoding for Telegram. |
 | `summarizer/tts_run.py` | Kokoro entry point **inside** the sandbox (system espeak-ng passed explicitly; imports no bot module). |
+| `summarizer/units.py` | Measurements shown in each reader's units (rules, display-only; the cached text is never changed). |
 | `summarizer/documents.py` | Bot side of docparse: runs it sandboxed, maps errors to user messages, stores pages by SHA-256. |
 | `tests/` | pytest suite; `conftest.py` isolates tests from the real bot (see above), `helpers.py` has the fake LLM. |
 | `deploy/` | systemd units and the weekly extractor-upgrade script. |
@@ -96,6 +97,9 @@ How the tests are isolated (`tests/conftest.py`):
   never the user's URL) and `fetch.download` with the service's host allow-list.
 - Text-to-speech runs only inside the sandbox (`tts.synthesize` → `tts_run`): the text is LLM output and
   espeak-ng parses it.
+- Unit conversion is display-only (`units.convert` in `render` / `render_document` / the 🔊 text); never store
+  converted text. Only the converted value is shown, so add a guard and a test for every new unit or
+  phrasing that could be read wrongly.
 - Links are accepted only through `urls.check` / `urls.classify` (host allow-list; TikTok short-link
   redirects validated hop by hop). Never fetch a user-supplied URL any other way.
 - The bot answers only in private chats; every message/command handler is filtered to private chats and

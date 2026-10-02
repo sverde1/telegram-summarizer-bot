@@ -259,6 +259,7 @@ The database migrates itself on start.
 | `VOICE_CACHE_DAYS` | `7` | Days a made voice message is reused (only Telegram's id for it is stored); then it's made again. |
 | `TTS_DAILY_LIMIT` | `20` | New voice messages a user may have made per 24 h (admins: no limit; `0` = no limit). Reused ones are free, and listening doesn't count toward `DAILY_LIMIT`. `/limit voice` changes it. |
 | `ESPEAK_LIB` / `ESPEAK_DATA` | Debian/Ubuntu paths | The system's espeak-ng, which Kokoro needs. |
+| `UNIT_SYSTEM` / `TEMPERATURE` | `metric` / `c` | Default units for measurements in summaries; each user can change theirs with `/units`. |
 | `OCR_ENGINE` | `auto` | Text recognition for scanned PDFs. `auto`: RapidOCR when `OCR_DEVICE=cuda` works, else Tesseract (measured on a 475-page scanned book, 4 cores, 3 workers: Tesseract 1.2 s/page, RapidOCR 6.4 s/page, same text). Or force `tesseract` / `rapidocr`. Switching engines needs the OCR languages added again (`/ocrlang`); the bot logs which at startup. |
 | `OCR_DEVICE` | `cpu` | `cuda` runs OCR with RapidOCR on an NVIDIA GPU (see GPU below); falls back to Tesseract on the CPU when CUDA isn't available. |
 | `OCR_DAILY_LIMIT` | `5` | Scanned documents a user may have read per rolling 24 h (admins: no limit; `0` = no limit). Once changed with `/limit ocr`, the stored value wins. |
@@ -302,6 +303,7 @@ sandbox. Without a working CUDA runtime it logs a warning and stays on the CPU.
 | `/limit` | users | Your limits: requests, scanned documents (OCR) and new voice messages in the last 24 h, and how many are left. |
 | `/limit` | admins | Show the daily and OCR limits and per-user overrides. `/limit 50` sets the daily limit for everyone, `/limit <user id> 200` for one user, `/limit <user id> default` removes the override; `0` = no limit. The same with `ocr` first (`/limit ocr 5`) for the OCR limit. |
 | `/ocrlang` | admins | Languages for scanned documents: `/ocrlang` lists them, `/ocrlang add slv` downloads and installs one (Tesseract: from tesseract-ocr's `tessdata_fast` on GitHub, checked with a test run; RapidOCR: the script's model, checked against RapidOCR's pinned SHA-256), `/ocrlang remove slv`. |
+| `/units` | users | Units for measurements in summaries: Metric / Imperial and °C / °F (default: metric, °C). |
 | `/users` | admins | Users with Allow / Deny / Remove / Unblock buttons, their AI choice and daily limit with today's usage. |
 | `/start` | strangers | Request access. |
 

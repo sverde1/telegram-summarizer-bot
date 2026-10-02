@@ -43,7 +43,8 @@ HELP = (
     "/transcript <url> - send the raw transcript as a file\n"
     "/history - your recent requests\n"
     "/models - show or choose the AI (Codex or Claude) and model\n"
-    "/limit - how many requests you can still send today\n\n"
+    "/limit - how many requests you can still send today\n"
+    "/units - measurements in metric or imperial, temperatures in °C or °F\n\n"
     "📄 You can also send a book or document (PDF, EPUB, DOCX or TXT, up to 20 MB), or a Google Drive or "
     "Dropbox link to one (shared as \"Anyone with the link\"): I'll summarize the whole thing or chapter by "
     "chapter."
@@ -585,6 +586,53 @@ async def on_ocrlang(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"🔍 OCR engine: {engine}{status}\nInstalled: " + ", ".join(f"{ocr.LANGUAGES[c][0]} ({c})" for c in have)
         + f"\n\nAdd: /ocrlang add <code> · remove: /ocrlang remove <code>\nAvailable: {others}")
+
+
+UNIT_CHOICES = {"sys": {"metric": "Metric", "imperial": "Imperial"}, "temp": {"c": "°C", "f": "°F"}}
+
+
+def _units_menu(uid: int) -> tuple[str, InlineKeyboardMarkup]:
+    """The /units message: the current choice and two rows of buttons (✓ on the current ones)."""
+    system, temperature = db.get_user_units(uid)
+    current = {"sys": system, "temp": temperature}
+    rows = [[InlineKeyboardButton(("✓ " if current[group] == value else "") + label,
+                                  callback_data=f"units:{group}:{value}")
+             for value, label in choices.items()] for group, choices in UNIT_CHOICES.items()]
+    text = (f"📏 Units in summaries: {UNIT_CHOICES['sys'][system]}, temperatures in "
+            f"{UNIT_CHOICES['temp'][temperature]}.\nChoose below; it applies to new replies.")
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def on_units(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /units: shows the user's units with buttons to change them."""
+    if not await guard(update, ctx):
+        return
+    text, markup = _units_menu(update.effective_user.id)
+    await update.message.reply_text(text, reply_markup=markup)
+
+
+async def on_units_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /units buttons (`units:sys:<metric|imperial>`, `units:temp:<c|f>`).
+
+    Callback data can be forged: the chat, the user's access and the value (from the fixed set) are checked.
+    """
+    q = update.callback_query
+    parts = (q.data or "").split(":")
+    uid = q.from_user.id
+    if (not _private(update) or access.state(uid) not in ("admin", "allowed") or len(parts) != 3
+            or parts[2] not in UNIT_CHOICES.get(parts[1], {})):
+        await q.answer("This isn't available.")
+        return
+    if parts[1] == "sys":
+        db.set_user_units(uid, system=parts[2])
+    else:
+        db.set_user_units(uid, temperature=parts[2])
+    text, markup = _units_menu(uid)
+    await q.answer("Saved. Applies to new replies.")
+    try:
+        await q.edit_message_text(text, reply_markup=markup)
+    except BadRequest:
+        pass  # tapped the choice that was already set: the message is unchanged
 
 
 async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2115,6 +2163,7 @@ USER_COMMANDS = [
     BotCommand("history", "Your recent requests"),
     BotCommand("models", "Show or choose the AI: Codex or Claude, then the model"),
     BotCommand("limit", "Your daily limit"),
+    BotCommand("units", "Units: metric/imperial, °C/°F"),
 ]
 # Admin-specific commands first; /history is re-described ("all users"), so the user version is dropped.
 ADMIN_COMMANDS = [BotCommand("users", "Manage users: allow, remove, unblock"),
@@ -2277,7 +2326,7 @@ def add_handlers(app: Application) -> None:
     for name, handler in [("start", on_start), ("help", on_help), ("again", command(use_cache=False)),
                           ("transcript", command(transcript_only=True)), ("users", on_users),
                           ("history", on_history), ("models", on_models), ("limit", on_limit),
-                          ("ocrlang", on_ocrlang)]:
+                          ("ocrlang", on_ocrlang), ("units", on_units)]:
         app.add_handler(CommandHandler(name, handler, filters=new))
     # Order matters: the first matching handler wins, so the picker's `llm:` buttons must be registered
     # before the catch-all admin-button handler.
@@ -2285,6 +2334,7 @@ def add_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(on_cancel_button, pattern=r"^cancel:"))
     app.add_handler(CallbackQueryHandler(on_book_button, pattern=r"^book:"))
     app.add_handler(CallbackQueryHandler(on_voice_button, pattern=r"^voice:"))
+    app.add_handler(CallbackQueryHandler(on_units_button, pattern=r"^units:"))
     app.add_handler(CallbackQueryHandler(on_ocr_button, pattern=r"^ocr:"))
     app.add_handler(CallbackQueryHandler(on_ocr_admin_button, pattern=r"^ocradm:"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(allow|block|remove):"))

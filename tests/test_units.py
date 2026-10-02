@@ -163,3 +163,22 @@ def test_bare_f_only_where_the_text_already_uses_fahrenheit():
     assert metric("survives -76° F, but freezes at 32F.") == "survives -60 °C, but freezes at 0 °C."
     assert metric("It got an F and a 5F rating.") == "It got an F and a 5F rating."  # no °F context
     assert metric("At 75 °F the F-150 starts.") == "At 24 °C the F-150 starts."
+
+
+async def test_units_command_and_buttons(app, telegram):
+    import access
+    from summarizer import db
+    from conftest import callback_update, msg_update, send
+    access.set_state(60, "allowed")
+    await send(app, msg_update(60, "/units"))
+    first = telegram.sent("sendMessage")[-1]
+    assert "Metric, temperatures in °C" in first["text"] and "✓ Metric" in str(first["reply_markup"])
+    await send(app, callback_update(60, "units:sys:imperial"))
+    await send(app, callback_update(60, "units:temp:f"))
+    assert db.get_user_units(60) == ("imperial", "f")
+    assert telegram.sent("answerCallbackQuery")[-1]["text"] == "Saved. Applies to new replies."
+    assert "Imperial, temperatures in °F" in telegram.sent("editMessageText")[-1]["text"]
+    await send(app, callback_update(60, "units:sys:kelvin"))  # forged
+    await send(app, callback_update(99, "units:temp:c"))      # a stranger
+    assert db.get_user_units(60) == ("imperial", "f")
+    assert telegram.sent("answerCallbackQuery")[-1]["text"] == "This isn't available."
