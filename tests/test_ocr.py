@@ -193,14 +193,21 @@ def test_unsupported_script_is_refused(monkeypatch, tmp_path):
         ocr.choose_languages(tmp_path / "s.pdf", [0], tmp_path)
 
 
-def test_close_language_with_good_confidence_is_not_refused(monkeypatch, tmp_path):
+def _install_slovenian():
+    """Marks Slovenian installed, with a model file (a copy of English's) as /ocrlang would leave it."""
+    import shutil
+    shutil.copy(ocr.tessdata() / "eng.traineddata", ocr.tessdata() / "slv.traineddata")
     db.set_setting("ocr_languages", "eng,slv")
+
+
+def test_close_language_with_good_confidence_is_not_refused(monkeypatch, tmp_path):
+    _install_slovenian()
     _fake_sample(monkeypatch, tmp_path, iso="hr", confidence=88)  # Slovenian text that looks Croatian
     assert ocr.choose_languages(tmp_path / "s.pdf", [0], tmp_path) == "eng+slv"
 
 
 def test_detected_installed_language_is_used_alone(monkeypatch, tmp_path):
-    db.set_setting("ocr_languages", "eng,slv")
+    _install_slovenian()
     _fake_sample(monkeypatch, tmp_path, iso="sl")
     assert ocr.choose_languages(tmp_path / "s.pdf", [0], tmp_path) == "slv"
 
