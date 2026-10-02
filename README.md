@@ -56,6 +56,13 @@ Dropbox link): the whole book, or chapter by chapter. Scanned PDFs are read with
   - [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) and a ChatGPT plan, or
   - [Claude Code](https://code.claude.com) logged in with a Claude plan, or
   - an Anthropic or OpenAI API key (billed per token).
+- Text-to-speech for the upcoming 🔊 voice messages: [Kokoro](https://github.com/thewh1teagle/kokoro-onnx)
+  (`kokoro-onnx`, its v1.0 model and voices, and the system's espeak-ng: `sudo apt install espeak-ng-data`).
+  **Why Kokoro:** compared with Piper on a real English summary (2¼ min of audio), Kokoro sounded much more
+  natural, which matters for listening to whole summaries, e.g. in the car. It is slower on the CPU (61 s for
+  that summary, 2.4× faster than real time, vs Piper's 7 s), so the voice message is made only when someone
+  asks for it; with a GPU (`onnxruntime-gpu`) it takes seconds. Its int8 model was even slower here (0.6×
+  real time) and isn't used.
 - ffmpeg: optional. The bot ships one inside the venv (`imageio-ffmpeg`, a self-contained ffmpeg 7 build)
   and prefers a system ffmpeg (`sudo apt install ffmpeg`) when one is installed. Get the system one if you
   add a GPU: the bundled build can't use it. yt-dlp's YouTube JavaScript runtime (deno) also comes from pip.
