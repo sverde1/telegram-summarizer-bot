@@ -91,7 +91,7 @@ class Books:
                                             f"{system_extra}\n\n{text}", schema)
         proc.check_cancelled()  # an API call can't be interrupted; at least don't go on after it
         took = time.monotonic() - t
-        stats.record(f"llm:{self.backend}", took / pipeline._llm_load(len(text), 0))
+        stats.record(f"llm:{self.backend}", took / pipeline.llm_load(len(text), 0))
         with self._lock:
             if answered_by:
                 self.llm = summarize.llm_label(self.backend, answered_by)
@@ -100,7 +100,7 @@ class Books:
 
     def _eta(self, chars: int, calls: int = 1) -> float:
         """Estimated seconds for `calls` AI calls over `chars` characters in total."""
-        return calls * pipeline._eta_llm(chars / max(calls, 1), 0, self.backend)
+        return calls * pipeline.eta_llm(chars / max(calls, 1), 0, self.backend)
 
     def chapters_summaries(self, indices: list[int], style: str) -> dict[int, str]:
         """Summaries of the given chapters in one style ("short" or "full"), from the cache where possible.

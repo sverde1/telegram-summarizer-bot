@@ -338,10 +338,10 @@ def _plan_replay(result: DocResult, backend: str) -> None:
     calls = 1 if result.kind in ("book", "chapter") else max(1, -(-len(result.chapters) // books.PER_CALL[
         "short" if result.kind == "short" else "full"]))
     steps = [("reading the file", read_seconds(pages)),
-             ("summary", calls * pipeline._eta_llm(min(chars, config.BOOK_CHUNK_CHARS) / calls, 0, backend))]
+             ("summary", calls * pipeline.eta_llm(min(chars, config.BOOK_CHUNK_CHARS) / calls, 0, backend))]
     if result.kind == "chapter":
         ch = result.doc["chapters"][result.chapters[0][0]]
-        steps[1] = ("summary", pipeline._eta_llm(sum(len(text.get(i, "")) for i in range(ch["start"], ch["end"])),
+        steps[1] = ("summary", pipeline.eta_llm(sum(len(text.get(i, "")) for i in range(ch["start"], ch["end"])),
                                                  0, backend))
     total = sum(sec for _, sec in steps)
     delay = min(total * pipeline.REPLAY_SHARE, pipeline.REPLAY_MAX)

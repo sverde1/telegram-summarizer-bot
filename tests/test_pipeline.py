@@ -60,10 +60,10 @@ def test_speechless(words, duration, speechless):
 
 
 def test_duration_format_and_etas():
-    assert pipeline._fmt_duration(75) == "1:15"
-    assert pipeline._fmt_duration(3725) == "1:02:05"
+    assert pipeline.fmt_duration(75) == "1:15"
+    assert pipeline.fmt_duration(3725) == "1:02:05"
     assert pipeline._eta_audio(200) == 4
-    assert pipeline._eta_llm(0, 0) == 25  # starting guess before anything was measured
+    assert pipeline.eta_llm(0, 0) == 25  # starting guess before anything was measured
 
 
 def test_reused_transcript_is_paced_off_the_worker(fake_media, llm):

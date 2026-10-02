@@ -1011,7 +1011,7 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text(refusal)
         return
     if seconds:
-        label = f"{label} ({pipeline._fmt_duration(seconds)})" if msg.voice or msg.video_note else label
+        label = f"{label} ({pipeline.fmt_duration(seconds)})" if msg.voice or msg.video_note else label
     upload_id = db.add_upload(uid, f.file_id, f.file_unique_id, label, f.file_size)
     transcript = (msg.caption or "").strip().lower().startswith("/transcript")
     status = await msg.reply_text(_queued_message())
