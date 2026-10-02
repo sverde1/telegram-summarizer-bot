@@ -90,3 +90,26 @@ async def test_deleted_status_message_is_not_an_error(app, telegram, fake_pipeli
     await _run(app, [_job(4)], None)
     assert db.recent_requests(USER)[0]["status"] == "done"
     assert not any("Unexpected error" in t for t in telegram.texts())
+
+
+def test_every_job_kind_has_a_runner():
+    assert set(bot.RUNNERS) == set(bot.JobKind)
+
+
+@pytest.mark.parametrize("fields", [
+    {"upload_id": 3},  # a video job naming an upload
+    {"voice_of": 4},  # a video job naming a summary to read
+    {"job_kind": bot.JobKind.DOCUMENT},  # a document job without its upload
+    {"job_kind": bot.JobKind.MEDIA, "upload_id": 3, "voice_of": 4},
+    {"job_kind": bot.JobKind.VOICE},
+])
+def test_a_job_must_have_the_fields_of_its_kind(fields):
+    with pytest.raises(ValueError):
+        bot.Job("u", chat_id=1, status_id=1, **fields)
+
+
+def test_jobs_of_each_kind_with_their_fields():
+    assert bot.Job("u", 1, 1).job_kind is bot.JobKind.VIDEO
+    for kind in (bot.JobKind.MEDIA, bot.JobKind.DOCUMENT):
+        assert bot.Job("u", 1, 1, upload_id=3, job_kind=kind).job_kind is kind
+    assert bot.Job("u", 1, 1, voice_of=4, job_kind=bot.JobKind.VOICE).job_kind is bot.JobKind.VOICE

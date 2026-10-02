@@ -2,6 +2,7 @@
 import asyncio
 import collections
 import dataclasses
+import enum
 import math
 import datetime as dt
 import html
@@ -59,12 +60,21 @@ ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n
               "/ocrlang - OCR languages: /ocrlang add slv, /ocrlang remove slv")
 
 
+class JobKind(enum.Enum):
+    """What a job works on; each kind has its runner (RUNNERS) and the Job fields it needs."""
+    VIDEO = "video"  # a YouTube/TikTok link (url)
+    MEDIA = "media"  # a sent recording: voice message, audio or video file, or a shared one (upload_id)
+    DOCUMENT = "document"  # a book or document (upload_id, book_mode, chapter)
+    VOICE = "voice"  # 🔊: reading a summary aloud (voice_of)
+
+
 @dataclass
 class Job:
     """One queued request: what to process, where to reply, and on whose behalf.
 
     Attributes:
-        url: The link the user sent.
+        url: The link the user sent (a file's label for recordings and documents).
+        job_kind: What it is (see JobKind); checked against the fields it needs.
         chat_id: Chat to reply in.
         status_id: Message id of the status message that gets edited while the job runs.
         use_cache: False for /again (re-summarize, ignoring the cached summary).
@@ -95,8 +105,20 @@ class Job:
     chapter: int | None = None  # for "pick": the chosen chapter (None: show the chapter list)
     ocr_ok: bool = False  # the user confirmed OCR of this scanned document
     voice_of: int = 0  # 🔊: the request whose summary to read aloud; 0 for everything else
-    media: bool = False  # upload_id is a voice message, audio or video file (else a document)
     started_at: float = 0.0  # when the worker started it (monotonic); the status's elapsed time counts from it
+    job_kind: JobKind = JobKind.VIDEO
+
+    def __post_init__(self) -> None:
+        """Rejects a kind without the fields it needs (or with another kind's), so no job is run as the wrong
+        kind.
+
+        Raises:
+            ValueError: The fields don't fit the kind.
+        """
+        uploads = self.job_kind in (JobKind.MEDIA, JobKind.DOCUMENT)
+        if bool(self.upload_id) != uploads or bool(self.voice_of) != (self.job_kind is JobKind.VOICE):
+            raise ValueError(f"a {self.job_kind.value} job with upload_id={self.upload_id}, "
+                             f"voice_of={self.voice_of}")
 
 
 # A single queue drained by a single worker: jobs run one at a time, so Whisper (CPU-heavy) never runs
@@ -807,8 +829,8 @@ def _refusal(uid: int, *, new_request: bool = True) -> str | None:
     return None
 
 
-async def _start_job(uid: int, chat_id: int, status_id: int, url: str, kind: str, request_id: int | None = None,
-                     **opts) -> Job:
+async def _start_job(uid: int, chat_id: int, status_id: int, url: str, request_kind: str,
+                     request_id: int | None = None, **opts) -> Job:
     """Logs the request (unless it continues one) and queues the job; the caller sent the status message.
 
     Args:
@@ -816,11 +838,11 @@ async def _start_job(uid: int, chat_id: int, status_id: int, url: str, kind: str
         chat_id: Their chat.
         status_id: The status message the worker edits as the job progresses.
         url: The link, or the file name for documents.
-        kind: The request kind (summary, again, transcript, book, ...).
+        request_kind: The request's kind for /history and the limits (summary, again, transcript, book, ...).
         request_id: An existing request to continue, or None for a new one.
-        **opts: Job fields (use_cache, transcript_only, upload_id, book_mode, chapter).
+        **opts: Job fields (job_kind, use_cache, transcript_only, upload_id, book_mode, chapter, ...).
     """
-    req = request_id or db.add_request(uid, url, kind)  # logged the moment it arrives
+    req = request_id or db.add_request(uid, url, request_kind)  # logged the moment it arrives
     b, m, is_default = _current_llm(uid)
     # Users on the defaults pass None, so their jobs follow the default (and its later changes)
     # instead of pinning whatever the default resolves to right now.
@@ -994,7 +1016,7 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     transcript = (msg.caption or "").strip().lower().startswith("/transcript")
     status = await msg.reply_text(_queued_message())
     await _start_job(uid, update.effective_chat.id, status.message_id, label,
-                     _request_kind(transcript, True), upload_id=upload_id, media=True,
+                     _request_kind(transcript, True), upload_id=upload_id, job_kind=JobKind.MEDIA,
                      transcript_only=transcript)
 
 
@@ -1087,7 +1109,8 @@ async def _handle_link(update: Update, url: str, link: links.FileLink, transcrip
     upload_id = db.add_link_upload(uid, url, label)
     status = await update.message.reply_text(_queued_message())
     await _start_job(uid, update.effective_chat.id, status.message_id, label,
-                     _request_kind(transcript_only, use_cache), upload_id=upload_id, media=True, transcript_only=transcript_only, use_cache=use_cache)
+                     _request_kind(transcript_only, use_cache), upload_id=upload_id, job_kind=JobKind.MEDIA,
+                     transcript_only=transcript_only, use_cache=use_cache)
 
 
 async def _offer_link(update: Update, url: str, link: links.FileLink) -> None:
@@ -1162,7 +1185,8 @@ async def on_book_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if request_id:
         db.update_request(request_id, status="queued", kind=kind)
     await _start_job(uid, q.message.chat.id, status.message_id, f"📄 {upload['name']}", kind,
-                     request_id=request_id, upload_id=upload["id"], book_mode=mode, chapter=arg)
+                     request_id=request_id, upload_id=upload["id"], book_mode=mode, chapter=arg,
+                     job_kind=JobKind.DOCUMENT)
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1593,7 +1617,7 @@ async def _set_aside(app: Application, job: "Job", needed: int, duration: float 
     job.memory_needed, job.audio_seconds = needed, duration
     _waiting_for_memory.append(job)
     db.update_request(job.request_id, status="queued")
-    what = "recording" if job.media else "video"
+    what = "recording" if job.job_kind is JobKind.MEDIA else "video"
     text = (f"🧠 Not enough free memory to transcribe this {what} right now (needs about "
             f"{needed / memory.GB:.1f} GB). Waiting up to {config.WHISPER_RAM_WAIT_MIN} min; other requests go "
             "first meanwhile.")
@@ -1703,19 +1727,7 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
     try:
         progress = Progress(app, loop, job)
         try:
-            if job.voice_of:
-                result = await _run_voice(app, job, progress)
-            elif job.media:
-                result = await _run_media(app, job, progress)
-            elif job.upload_id:
-                result = await _run_document(app, job, progress)
-            else:
-                # The pipeline blocks (downloads, Whisper, LLM subprocesses): run it off the event loop.
-                result = await asyncio.to_thread(
-                    pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
-                    backend=job.backend, model=job.model, transcript_only=job.transcript_only,
-                    again_limit_user=None if access.is_admin(job.user_id) else job.user_id,
-                    hide_cache_from=None if access.is_admin(job.user_id) else job.user_id)
+            result = await RUNNERS[job.job_kind](app, job, progress)
         finally:
             # Before replying or deleting the status message: a late status edit must not land
             # after the final result.
@@ -1876,7 +1888,7 @@ async def on_ocr_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     db.update_request(req["id"], status="queued")
     await _start_job(req["user_id"], q.message.chat.id, q.message.message_id, req["url"], req["kind"],
                      request_id=req["id"], upload_id=hold["upload_id"], book_mode=hold["mode"],
-                     chapter=hold["chapter"], ocr_ok=True)
+                     chapter=hold["chapter"], ocr_ok=True, job_kind=JobKind.DOCUMENT)
 
 
 async def on_ocr_admin_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1952,6 +1964,20 @@ async def _fetch_telegram_file(app: Application, file_id: str, path: Path, too_b
         raise error(too_big if "too big" in str(e).lower() else DOWNLOAD_FAILED, str(e))
     except TelegramError as e:
         raise error(DOWNLOAD_FAILED, str(e))
+
+
+async def _run_video(app: Application, job: Job, progress: "Progress") -> pipeline.Result:
+    """Runs a YouTube/TikTok link job (in a thread: downloads, Whisper and LLM programs block).
+
+    Raises:
+        pipeline.PipelineError, UnsupportedURL: The link can't be summarized (message for the user).
+        memory.NeedsMemory: Not enough free memory right now (the job is set aside).
+    """
+    return await asyncio.to_thread(
+        pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
+        backend=job.backend, model=job.model, transcript_only=job.transcript_only,
+        again_limit_user=None if access.is_admin(job.user_id) else job.user_id,
+        hide_cache_from=None if access.is_admin(job.user_id) else job.user_id)
 
 
 async def _run_media(app: Application, job: Job, progress: "Progress") -> pipeline.Result:
@@ -2234,7 +2260,8 @@ async def on_voice_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         return
     await q.answer()
     status = await ctx.bot.send_message(q.message.chat.id, _queued_message())
-    job = await _start_job(uid, q.message.chat.id, status.message_id, req["url"], "voice", voice_of=req["id"])
+    job = await _start_job(uid, q.message.chat.id, status.message_id, req["url"], "voice", voice_of=req["id"],
+                           job_kind=JobKind.VOICE)
     db.update_request(job.request_id, platform="voice", video_id=key)  # what db.user_saw_video looks for
 
 
@@ -2263,6 +2290,11 @@ async def _run_voice(app: Application, job: Job, progress: "Progress") -> tts.Vo
     progress(status, estimate)
     result.ogg = await _make_voice(job, result)
     return result
+
+
+# Each job kind's runner: (app, job, progress) -> its result. Every JobKind must have one (tested).
+RUNNERS = {JobKind.VIDEO: _run_video, JobKind.MEDIA: _run_media, JobKind.DOCUMENT: _run_document,
+           JobKind.VOICE: _run_voice}
 
 
 async def _make_voice(job: Job, result: tts.VoiceResult) -> Path:

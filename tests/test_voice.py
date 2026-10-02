@@ -151,7 +151,8 @@ async def test_cancel_while_speaking(app, telegram, voice, monkeypatch):
 
 async def test_whole_book_gets_listen_next_to_the_chapter_options(app, telegram, voice, monkeypatch):
     from summarizer import documents
-    job = bot.Job("📄 b.pdf", ANA, 5, user_id=ANA, request_id=db.add_request(ANA, "📄 b.pdf", "book"), upload_id=9)
+    job = bot.Job("📄 b.pdf", ANA, 5, user_id=ANA, request_id=db.add_request(ANA, "📄 b.pdf", "book"), upload_id=9,
+                  job_kind=bot.JobKind.DOCUMENT)
     result = documents.DocResult("book", "b.pdf", {"chapters": [{}, {}]}, book={"title": "Pets", "summary": "Cats."})
     await bot._deliver(app, job, result, 0)
     rows = telegram.sent("sendMessage")[-1]["reply_markup"]
