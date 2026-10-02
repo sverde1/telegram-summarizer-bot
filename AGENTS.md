@@ -14,7 +14,7 @@ service on a single machine with no GPU.
 
 | Path | Role |
 |---|---|
-| `bot.py` | Telegram handlers, job queue/worker, status message + ETA, rendering, `/models`, `/users`, `/history`, update notifications. |
+| `bot.py` | Telegram handlers, job queue/worker, status message + ETA, rendering, `/models`, `/users`, `/history`, update notifications, uploads and their buttons (`on_document`, `on_book_button`). |
 | `access.py` | Who may use the bot (admins from `.env`, others from the `users` table). |
 | `summarizer/pipeline.py` | URL in, `Result` out: cache lookup, transcript, frames, LLM turns, timings. Blocking; runs in a worker thread. |
 | `summarizer/summarize.py` | Prompts, JSON schemas, the three LLM backends as `Conversation` classes, model lists. |

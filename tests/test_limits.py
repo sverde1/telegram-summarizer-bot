@@ -18,7 +18,7 @@ async def test_a_user_may_queue_three_videos(app, telegram):
     for _ in range(config.MAX_QUEUED_PER_USER + 1):
         await send(app, msg_update(FRIEND, LINK))
     assert bot.queue.qsize() == config.MAX_QUEUED_PER_USER
-    assert telegram.texts()[-1].startswith("⏳ You already have 3 videos in the queue")
+    assert telegram.texts()[-1].startswith("⏳ You already have 3 requests in the queue")
 
 
 async def test_admins_are_not_limited(app, telegram):

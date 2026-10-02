@@ -551,6 +551,14 @@ def save_doc_summary(sha256: str, part: str, style: str, backend: str, model: st
                   (sha256, part, style, backend, model, json.dumps(result, ensure_ascii=False), time.time()))
 
 
+def waiting_request(user_id: int, sha256: str) -> int | None:
+    """The user's latest request on this document that is waiting for a chapter to be picked, if any."""
+    with _db() as c:
+        row = c.execute("SELECT id FROM requests WHERE user_id=? AND platform='document' AND video_id=? "
+                        "AND status='waiting' ORDER BY id DESC LIMIT 1", (user_id, sha256)).fetchone()
+    return row["id"] if row else None
+
+
 def fail_stale_requests() -> int:
     """Marks requests left unfinished by a crash or kill as failed ("bot restarted"); call at startup.
 

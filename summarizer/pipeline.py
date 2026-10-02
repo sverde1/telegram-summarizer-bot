@@ -173,6 +173,8 @@ def replay_stage(name: str, llm: str) -> str:
     """The status line a real run shows for a step (see the took() labels in _process)."""
     if name == "lookup":
         return "🔎 Looking up the video…"
+    if name == "reading the file":
+        return "📄 Reading the file…"
     if name == "captions":
         return "📝 Checking for YouTube captions…"
     if name.startswith("Whisper"):

@@ -30,7 +30,7 @@ def _use(uid, n):
 async def test_global_limit_refuses_without_creating_a_request(app, telegram):
     _use(ANA, 3)
     await send(app, msg_update(ANA, LINK))
-    assert telegram.texts()[-1].startswith("⏳ You've reached today's limit of 3 videos. You can send more in about")
+    assert telegram.texts()[-1].startswith("⏳ You've reached today's limit of 3 requests. You can send more in about")
     assert db.daily_usage(ANA)[0] == 3 and bot.queue.qsize() == 0
 
 
@@ -47,7 +47,7 @@ async def test_override_takes_precedence_both_ways(app, telegram):
     db.set_user_daily_limit(BOB, 1)
     await send(app, msg_update(ANA, LINK))
     await send(app, msg_update(BOB, LINK))
-    assert bot.queue.qsize() == 1 and "limit of 1 videos" in telegram.texts()[-1]
+    assert bot.queue.qsize() == 1 and "limit of 1 requests" in telegram.texts()[-1]
 
 
 async def test_zero_means_no_limit_and_admins_are_exempt(app, telegram):
@@ -82,9 +82,9 @@ async def test_bad_arguments_change_nothing(app, telegram, args):
 async def test_user_sees_own_status_and_cannot_change_it(app, telegram):
     _use(ANA, 1)
     await send(app, msg_update(ANA, "/limit"))
-    assert telegram.texts()[-1] == "📊 Today: 1 of your 3 videos (last 24 h). 2 left."
+    assert telegram.texts()[-1] == "📊 Today: 1 of your 3 requests (last 24 h). 2 left."
     await send(app, msg_update(ANA, "/limit 1000"))
-    assert access.global_daily_limit() == 3 and "of your 3 videos" in telegram.texts()[-1]
+    assert access.global_daily_limit() == 3 and "of your 3 requests" in telegram.texts()[-1]
     _use(ANA, 2)
     await send(app, msg_update(ANA, "/limit"))
     assert "You can send more in about" in telegram.texts()[-1]

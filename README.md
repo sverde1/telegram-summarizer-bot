@@ -263,6 +263,26 @@ The bot test-runs the model when it loads and falls back to the CPU if CUDA isn'
 
 The command menu adapts per user: strangers only see `/start`.
 
+### Books and documents
+
+Send a **PDF, EPUB, DOCX or TXT** file (up to 20 MB, the most Telegram lets bots download) and pick:
+
+- **📖 Whole book**: title, author and a summary of the whole thing.
+- **📑 By chapter**, then one of:
+  - **All chapters, short**: 1–2 paragraphs per chapter, in 1–3 messages.
+  - **All chapters, one per message**: a full summary of every chapter.
+  - **Pick a chapter**: the chapter list as buttons; a full summary of the chosen one.
+
+Chapters come from the file's table of contents (PDF bookmarks, EPUB contents, DOCX heading styles) or,
+failing that, from headings like "Chapter 3" / "Poglavje 3"; very many short chapters are grouped, and text
+without any structure is split into parts. Old Word `.doc` and Kindle files must be converted to PDF or
+EPUB first; password-protected PDFs and copy-protected (DRM) e-books can't be read.
+
+Each request counts toward the daily limit (picking a chapter from a list you just requested doesn't count
+again). Files are parsed in a sandbox without network access. Only the extracted text is kept (by the file's
+SHA-256, like video transcripts), so the same file is read once; summaries are cached per model. Admins see
+file names in `/history`.
+
 ## How it works
 
 1. **Link check** as soon as the link arrives: only YouTube/TikTok hosts, no network needed; then the

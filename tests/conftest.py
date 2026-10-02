@@ -51,6 +51,7 @@ import access  # noqa: E402
 from helpers import SUMMARY, FakeConversation, meta  # noqa: E402
 import bot  # noqa: E402
 from summarizer import db, media, stats, summarize  # noqa: E402
+from telegram import File as telegram_File  # noqa: E402  (after PTB_TIMEDELTA is set)
 
 ADMIN_ID = 1
 # Programs that work offline. bwrap is only used by summarizer.sandbox, which always unshares the network.
@@ -131,12 +132,14 @@ class TelegramRecorder:
     Attributes:
         calls: (method, data) for every call, in order.
         fail: method name -> exception to raise once (e.g. {"sendMessage": Forbidden("blocked")}).
+        files: file_id -> local file that "Telegram" serves for it (getFile + download).
     """
 
     def __init__(self):
         """Starts with no calls and no planned failures."""
         self.calls: list[tuple[str, dict]] = []
         self.fail: dict[str, Exception] = {}
+        self.files: dict[str, Path] = {}
         self._ids = itertools.count(1000)
 
     def sent(self, method: str) -> list[dict]:
@@ -158,6 +161,10 @@ class TelegramRecorder:
             raise self.fail.pop(endpoint)
         if endpoint == "getMe":
             return {"id": 999, "is_bot": True, "first_name": "Test bot", "username": "test_bot"}
+        if endpoint == "getFile":
+            fid = data["file_id"]
+            return {"file_id": fid, "file_unique_id": f"u-{fid}", "file_size": self.files[fid].stat().st_size,
+                    "file_path": f"documents/{fid}"}
         if endpoint in ("sendMessage", "editMessageText", "sendDocument"):
             chat_id = data.get("chat_id", 0)
             return {"message_id": data.get("message_id") or next(self._ids), "date": 0,
@@ -173,6 +180,14 @@ def telegram(monkeypatch) -> TelegramRecorder:
     async def do_post(self, endpoint, data, **kwargs):
         """Routes the bot's API call to the recorder."""
         return await rec.post(endpoint, data, **kwargs)
+
+    async def download_to_drive(self, custom_path=None, **kwargs):
+        """Serves the file registered for this file_id instead of downloading it."""
+        target = Path(custom_path)
+        shutil.copy(rec.files[self.file_id], target)
+        return target
+
+    monkeypatch.setattr(telegram_File, "download_to_drive", download_to_drive)
 
     from telegram.ext import ExtBot
     monkeypatch.setattr(ExtBot, "_do_post", do_post)
@@ -204,6 +219,17 @@ def msg_update(uid: int, text: str, *, chat_type: str = "private", edited: bool 
     if text.startswith("/"):
         message["entities"] = [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
     return {"update_id": next(_update_ids), "edited_message" if edited else "message": message}
+
+
+def doc_update(uid: int, name: str, size: int, *, file_id: str = "F1", caption: str | None = None) -> dict:
+    """Builds the JSON of an incoming message with an uploaded file (Telegram "document")."""
+    message = {"message_id": next(_update_ids), "date": 0, "from": _user(uid),
+               "chat": {"id": uid, "type": "private"},
+               "document": {"file_id": file_id, "file_unique_id": f"u-{file_id}", "file_name": name,
+                            "file_size": size}}
+    if caption:
+        message["caption"] = caption
+    return {"update_id": next(_update_ids), "message": message}
 
 
 def callback_update(uid: int, data: str, *, chat_type: str = "private") -> dict:

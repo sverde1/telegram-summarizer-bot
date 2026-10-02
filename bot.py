@@ -7,8 +7,11 @@ import html
 import io
 import logging
 import os
+import re
+import shutil
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 # Opt in to PTB's coming behavior: RetryAfter.retry_after as a timedelta (an int with a deprecation warning
 # until then). Must be set before telegram is imported; _retry_seconds handles both forms.
@@ -22,7 +25,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
                           MessageHandler, filters)
 
 import access
-from summarizer import config, db, memory, pipeline, proc, stats, summarize, transcribe, updates
+from summarizer import config, db, documents, memory, pipeline, proc, stats, summarize, transcribe, updates
 from summarizer.urls import UnsupportedURL, check as check_url, find_url
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -38,7 +41,9 @@ HELP = (
     "/transcript <url> - send the raw transcript as a file\n"
     "/history - your recent requests\n"
     "/models - show or choose the AI (Codex or Claude) and model\n"
-    "/limit - how many videos you can still send today"
+    "/limit - how many requests you can still send today\n\n"
+    "📄 You can also send a book or document (PDF, EPUB, DOCX or TXT, up to 20 MB): I'll summarize the whole "
+    "thing or chapter by chapter."
 )
 ADMIN_HELP = ("\n\nAdmin:\n/users - list users; allow, remove, or unblock them\n"
               "/history - recent requests from all users (who sent what, cache hits)\n"
@@ -77,6 +82,9 @@ class Job:
     waiting_since: float | None = None  # when it was first set aside for lack of memory (monotonic)
     memory_needed: int = 0  # bytes its transcription needs (shown while it waits)
     audio_seconds: float = 0  # its audio length, to re-estimate the memory need on each re-check
+    upload_id: int = 0  # an uploaded document (url is then its file name); 0 for links
+    book_mode: str = ""  # whole | short | each | pick
+    chapter: int | None = None  # for "pick": the chosen chapter (None: show the chapter list)
 
 
 # A single queue drained by a single worker: jobs run one at a time, so Whisper (CPU-heavy) never runs
@@ -470,19 +478,19 @@ async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not access.is_admin(uid):
         used, limit, _, frees_in = _daily_status(uid)
         if not limit:
-            await update.message.reply_text(f"📊 Today: {used} videos (last 24 h). You have no daily limit.")
+            await update.message.reply_text(f"📊 Today: {used} requests (last 24 h). You have no daily limit.")
         elif used >= limit:
-            await update.message.reply_text(f"📊 Today: {used} of your {limit} videos (last 24 h). You can send "
+            await update.message.reply_text(f"📊 Today: {used} of your {limit} requests (last 24 h). You can send "
                                             f"more in about {_fmt_until(frees_in or 0)}.")
         else:
-            await update.message.reply_text(f"📊 Today: {used} of your {limit} videos (last 24 h). "
+            await update.message.reply_text(f"📊 Today: {used} of your {limit} requests (last 24 h). "
                                             f"{limit - used} left.")
         return
     args = ctx.args
     if not args:
         glob = access.global_daily_limit()
         overrides = [u for u in access.all_users()["allowed"] if u.get("daily_limit") is not None]
-        lines = [f"📊 Daily limit for everyone: {glob or 'none'} videos per 24 h."]
+        lines = [f"📊 Daily limit for everyone: {glob or 'none'} requests per 24 h."]
         lines += [f"• {access.label(u['id'], u)}: {u['daily_limit'] or 'no limit'}" for u in overrides]
         lines.append("\nChange it: /limit 50 · one user: /limit <user id> 200 · /limit <user id> default · "
                      "0 = no limit")
@@ -518,7 +526,7 @@ async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not rows:
         await update.message.reply_text("No requests yet.")
         return
-    icons = {"done": "✅", "failed": "⚠️", "queued": "⏳", "processing": "⏳", "cancelled": "✖️"}
+    icons = {"done": "✅", "failed": "⚠️", "queued": "⏳", "processing": "⏳", "cancelled": "✖️", "waiting": "⏸"}
     lines = []
     for r in rows:
         when = time.strftime("%d.%m. %H:%M", time.localtime(r["created_at"]))
@@ -630,6 +638,57 @@ def _queued_message() -> str:
     return f"⏳ Got it, you're in the queue. Estimated wait: about {_fmt_eta(wait)}."
 
 
+def _refusal(uid: int, *, new_request: bool = True) -> str | None:
+    """Why a user may not start another job right now, or None if they may (admins always may).
+
+    Args:
+        uid: The user.
+        new_request: Whether the job creates a request row (counts toward the daily limit); False when it
+            continues one (a chapter picked from a list).
+    """
+    if access.is_admin(uid):
+        return None
+    if _user_jobs[uid] >= config.MAX_QUEUED_PER_USER:
+        return (f"⏳ You already have {_user_jobs[uid]} requests in the queue. Try again when one of them is "
+                "done.")
+    if new_request:
+        used, limit, _, frees_in = _daily_status(uid)
+        if limit and used >= limit:
+            return (f"⏳ You've reached today's limit of {limit} requests. You can send more in about "
+                    f"{_fmt_until(frees_in or 0)}.")
+    # Every unfinished job counts (queued, running, waiting for memory, replaying), not just the queue.
+    # The count isn't shown: it would tell users how busy the others are.
+    if len(_jobs) >= config.MAX_QUEUE:
+        return "⏳ The bot is busy right now. Please try again in a few minutes."
+    return None
+
+
+async def _start_job(uid: int, chat_id: int, status_id: int, url: str, kind: str, request_id: int | None = None,
+                     **opts) -> Job:
+    """Logs the request (unless it continues one) and queues the job; the caller sent the status message.
+
+    Args:
+        uid: The requesting user.
+        chat_id: Their chat.
+        status_id: The status message the worker edits as the job progresses.
+        url: The link, or the file name for documents.
+        kind: The request kind (summary, again, transcript, book, ...).
+        request_id: An existing request to continue, or None for a new one.
+        **opts: Job fields (use_cache, transcript_only, upload_id, book_mode, chapter).
+    """
+    req = request_id or db.add_request(uid, url, kind)  # logged the moment it arrives
+    b, m, is_default = _current_llm(uid)
+    # Users on the defaults pass None, so their jobs follow the default (and its later changes)
+    # instead of pinning whatever the default resolves to right now.
+    b, m = (None, None) if is_default else (b, m)
+    _user_jobs[uid] += 1
+    job = Job(url, chat_id, status_id, queued_at=time.monotonic(), user_id=uid, request_id=req, backend=b,
+              model=m, **opts)
+    _jobs[req] = job
+    await queue.put(job)
+    return job
+
+
 async def enqueue(update: Update, url: str | None, **opts) -> None:
     """Acknowledges a link right away, logs the request, and queues the job.
 
@@ -642,7 +701,7 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
         **opts: Job options: `use_cache=False` for /again, `transcript_only=True` for /transcript.
     """
     if not url:
-        await update.message.reply_text("Send me a YouTube or TikTok link.")
+        await update.message.reply_text("Send me a YouTube or TikTok link, or a book or document.")
         return
     try:
         check_url(url)  # no network: a bad link is refused before it gets a queue slot or a request row
@@ -650,35 +709,131 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
         await update.message.reply_text(f"⚠️ {e}")
         return
     uid = update.effective_user.id
-    if not access.is_admin(uid):
-        if _user_jobs[uid] >= config.MAX_QUEUED_PER_USER:
-            await update.message.reply_text(
-                f"⏳ You already have {_user_jobs[uid]} videos in the queue. Send this one again when one of "
-                "them is done.")
-            return
-        # Every unfinished job counts (queued, running, waiting for memory, replaying), not just the queue.
-        # The count isn't shown: it would tell users how busy the others are.
-        used, limit, _, frees_in = _daily_status(uid)
-        if limit and used >= limit:
-            await update.message.reply_text(
-                f"⏳ You've reached today's limit of {limit} videos. You can send more in about "
-                f"{_fmt_until(frees_in or 0)}.")
-            return
-        if len(_jobs) >= config.MAX_QUEUE:
-            await update.message.reply_text("⏳ The bot is busy right now. Please try again in a few minutes.")
-            return
+    if refusal := _refusal(uid):
+        await update.message.reply_text(refusal)
+        return
     status = await update.message.reply_text(_queued_message())
     kind = "transcript" if opts.get("transcript_only") else "again" if opts.get("use_cache") is False else "summary"
-    req = db.add_request(uid, url, kind)  # logged the moment the link arrives
-    b, m, is_default = _current_llm(uid)
-    # Users on the defaults pass None, so their jobs follow the default (and its later changes)
-    # instead of pinning whatever the default resolves to right now.
-    b, m = (None, None) if is_default else (b, m)
-    _user_jobs[uid] += 1
-    job = Job(url, update.effective_chat.id, status.message_id, queued_at=time.monotonic(),
-              user_id=uid, request_id=req, backend=b, model=m, **opts)
-    _jobs[req] = job
-    await queue.put(job)
+    await _start_job(uid, update.effective_chat.id, status.message_id, url, kind, **opts)
+
+
+# ---------- uploaded documents ----------
+
+TG_DOWNLOAD_LIMIT = 20 * 1024 ** 2  # the most a bot may download from Telegram (Bot API getFile)
+DOC_EXTENSIONS = {".pdf", ".epub", ".docx", ".txt"}
+CONVERT_EXTENSIONS = {".doc", ".mobi", ".azw", ".azw3", ".rtf", ".odt", ".fb2", ".djvu"}
+DOC_FORMATS = "PDF, EPUB, DOCX or TXT"
+TOO_BIG = ("⚠️ This file is larger than 20 MB, the most Telegram lets bots download. Send a smaller version "
+           "(e.g. a PDF without images, or an EPUB).")
+DOWNLOAD_FAILED = "⚠️ Couldn't download the file from Telegram. Please send it again."
+BOOK_MODES = {"whole": ("book", "📖 Whole book"), "short": ("chapters-short", "All chapters, short"),
+              "each": ("chapters", "All chapters, one per message"), "pick": ("chapter-list", "Pick a chapter")}
+CHAPTERS_PER_PAGE = 8
+
+
+def _fmt_size(n: int) -> str:
+    """File size as "850 KB" or "2.3 MB"."""
+    return f"{n / 1024 ** 2:.1f} MB" if n >= 1024 ** 2 else f"{max(1, round(n / 1024))} KB"
+
+
+def _book_menu(upload_id: int, chapters: bool = False) -> InlineKeyboardMarkup:
+    """The choice buttons under an upload: whole / by chapter, or the three chapter options."""
+    if not chapters:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("📖 Whole book", callback_data=f"book:{upload_id}:whole"),
+                                      InlineKeyboardButton("📑 By chapter", callback_data=f"book:{upload_id}:chapters")]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("All chapters, short", callback_data=f"book:{upload_id}:short")],
+        [InlineKeyboardButton("All chapters, one per message", callback_data=f"book:{upload_id}:each")],
+        [InlineKeyboardButton("Pick a chapter", callback_data=f"book:{upload_id}:pick")],
+        [InlineKeyboardButton("◀ Back", callback_data=f"book:{upload_id}:back")],
+    ])
+
+
+def _chapter_list(upload_id: int, name: str, chapters: list[dict], page: int) -> tuple[str, InlineKeyboardMarkup]:
+    """One page of the chapter list: the text and the buttons (chapters plus ◀ ▶)."""
+    pages = max(1, -(-len(chapters) // CHAPTERS_PER_PAGE))
+    page = min(max(page, 0), pages - 1)
+    first = page * CHAPTERS_PER_PAGE
+    rows = [[InlineKeyboardButton(f"{i + 1}. {re.sub(r'\s+', ' ', ch['title'])}"[:60],  # titles come from the file
+                                  callback_data=f"book:{upload_id}:ch:{i}")]
+            for i, ch in enumerate(chapters[first:first + CHAPTERS_PER_PAGE], first)]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀", callback_data=f"book:{upload_id}:pg:{page - 1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶", callback_data=f"book:{upload_id}:pg:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    text = f"📑 {name[:80]}: pick a chapter" + (f" (page {page + 1} of {pages})" if pages > 1 else "")
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles an uploaded file: checks its type and size, then asks how to summarize it."""
+    if not await guard(update, ctx):
+        return
+    d = update.message.document
+    name = d.file_name or "document"
+    ext = Path(name).suffix.lower()
+    if ext in CONVERT_EXTENSIONS:
+        await update.message.reply_text(f"⚠️ I can't read {ext} files. Convert it to PDF or EPUB and send it again.")
+        return
+    if ext not in DOC_EXTENSIONS:
+        await update.message.reply_text(f"⚠️ I can summarize {DOC_FORMATS} files, and YouTube or TikTok links.")
+        return
+    if not d.file_size or d.file_size > TG_DOWNLOAD_LIMIT:
+        await update.message.reply_text(TOO_BIG)
+        return
+    upload_id = db.add_upload(update.effective_user.id, d.file_id, d.file_unique_id, name, d.file_size)
+    await update.message.reply_text(f"📄 {name} ({_fmt_size(d.file_size)})\nHow should I summarize it?",
+                                    reply_markup=_book_menu(upload_id))
+
+
+async def on_book_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the buttons under an upload and in its chapter list (`book:<upload id>:<action>[:<n>]`).
+
+    Actions: whole / short / each / pick start a job; chapters / back switch the menu; pg:<n> pages the
+    chapter list; ch:<n> summarizes one chapter. Callback data can be forged, so everything is re-checked:
+    private chat, access, and that the upload is the user's own (or the user is an admin).
+    """
+    q = update.callback_query
+    parts = (q.data or "").split(":")
+    uid = q.from_user.id
+    upload = db.get_upload(int(parts[1])) if len(parts) >= 3 and parts[1].isdigit() else None
+    if (not _private(update) or access.state(uid) not in ("admin", "allowed") or upload is None
+            or (upload["user_id"] != uid and not access.is_admin(uid))):
+        await q.answer("This isn't available.")
+        return
+    action, arg = parts[2], (int(parts[3]) if len(parts) == 4 and parts[3].isdigit() else None)
+    if action in ("chapters", "back"):
+        await q.answer()
+        await q.edit_message_reply_markup(_book_menu(upload["id"], chapters=action == "chapters"))
+        return
+    if action == "pg" and arg is not None:
+        doc = db.get_document(upload["sha256"]) if upload["sha256"] else None
+        if not doc or not doc["chapters"]:
+            await q.answer("Please pick \"By chapter\" again.")
+            return
+        text, markup = _chapter_list(upload["id"], upload["name"], doc["chapters"], arg)
+        await q.answer()
+        await q.edit_message_text(text, reply_markup=markup)
+        return
+    if action not in (*BOOK_MODES, "ch") or (action == "ch" and arg is None):
+        await q.answer("This isn't available.")
+        return
+    request_id = None
+    if action == "ch":  # the first chapter picked from a list continues the list's request
+        request_id = db.waiting_request(uid, upload["sha256"]) if upload["sha256"] else None
+    if refusal := _refusal(uid, new_request=request_id is None):
+        await q.answer(refusal[:200], show_alert=True)
+        return
+    await q.answer()
+    status = await ctx.bot.send_message(q.message.chat.id, _queued_message())
+    mode, kind = ("pick", "chapter") if action == "ch" else (action, BOOK_MODES[action][0])
+    if request_id:
+        db.update_request(request_id, status="queued", kind=kind)
+    await _start_job(uid, q.message.chat.id, status.message_id, f"📄 {upload['name']}", kind,
+                     request_id=request_id, upload_id=upload["id"], book_mode=mode, chapter=arg)
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -858,6 +1013,61 @@ def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) -> 
     # The footer is one italic piece: an <i> split across two messages would break both.
     pieces.append(f"<i>{html.escape(_cap(footer, 1500))}</i>")
     return _pack(pieces)
+
+
+def _text(raw: str) -> list[str]:
+    """Escaped message pieces for a block of text, one or more per line."""
+    return [piece for line in raw.split("\n") for piece in _escaped_pieces(line)]
+
+
+def _doc_details(r: documents.DocResult, waited: float, reveal_cache: bool) -> str:
+    """The footer of a document summary: timings (like a fresh run for first-time requesters), the source."""
+    if r.replay_steps:
+        timing = f"⏱ {_secs(r.replay_total)} total: " + " · ".join(f"{n} {_secs(s)}" for n, s in r.replay_steps)
+    elif r.cached:
+        timing = "⚡ from cache" if reveal_cache else ""
+    elif r.steps:
+        timing = f"⏱ {_secs(r.total)} total: " + " · ".join(f"{n} {_secs(s)}" for n, s in r.steps)
+    else:
+        timing = ""
+    if timing and waited >= 5:
+        timing += f" (+ {_secs(waited)} waiting in queue)"
+    fmt = (r.doc.get("format") or "").upper()
+    pages = f"{r.doc.get('pages')} pages" if fmt == "PDF" else f"~{r.doc.get('pages')} pages"
+    used = f"📄 {r.name[:80]} · {fmt} · {pages} · 🧠 {r.llm}"
+    return "\n".join(filter(None, [timing, used]))
+
+
+def render_document(r: documents.DocResult, waited: float = 0, reveal_cache: bool = True) -> list[str]:
+    """Builds the messages for a document summary, each at most TG_LIMIT characters.
+
+    Whole book: Title / Author / Summary. All chapters short: one block per chapter, packed into as few
+    messages as fit. One per message: a message per chapter. One chapter: its title and summary. The footer
+    goes on the last message. Everything from the file or the model is escaped and capped.
+    """
+    footer = f"<i>{html.escape(_cap(_doc_details(r, waited, reveal_cache), 1500))}</i>"
+    if r.kind == "book":
+        b = r.book or {}
+        pieces = ["<b>Title:</b>", *_text(_cap(b.get("title") or r.name, FIELD_LIMITS["title"]))]
+        if b.get("author"):
+            pieces += ["", "<b>Author:</b>", *_text(_cap(b["author"], FIELD_LIMITS["title"]))]
+        pieces += ["", "<b>Summary:</b>", *_text(_cap(b.get("summary", ""), FIELD_LIMITS["summary"])), "", footer]
+        return _pack(pieces)
+    blocks = [[f"<b>{html.escape(_cap(title, 200))}</b>", *_text(_cap(summary, FIELD_LIMITS["summary"]))]
+              for _, title, summary in r.chapters]
+    if r.kind == "short":
+        pieces = [f"<b>📑 {html.escape(r.name[:80])}</b>", ""]
+        for block in blocks:
+            pieces += [*block, ""]
+        return _pack(pieces + [footer])
+    if r.kind == "each" and len(blocks) > 1:
+        n = len(blocks)
+        out = []
+        for k, block in enumerate(blocks, 1):
+            head = [f"<b>{k}/{n}</b> " + block[0], *block[1:]]
+            out += _pack(head + (["", footer] if k == n else []))
+        return out
+    return _pack([piece for block in blocks for piece in block] + ["", footer])
 
 
 def _fmt_eta(sec: float) -> str:
@@ -1156,18 +1366,28 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
     try:
         progress = Progress(app, loop, job)
         try:
-            # The pipeline blocks (downloads, Whisper, LLM subprocesses): run it off the event loop.
-            result = await asyncio.to_thread(
-                pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
-                backend=job.backend, model=job.model, transcript_only=job.transcript_only,
-                again_limit_user=None if access.is_admin(job.user_id) else job.user_id,
-                hide_cache_from=None if access.is_admin(job.user_id) else job.user_id)
+            if job.upload_id:
+                result = await _run_document(app, job, progress)
+            else:
+                # The pipeline blocks (downloads, Whisper, LLM subprocesses): run it off the event loop.
+                result = await asyncio.to_thread(
+                    pipeline.run, job.url, progress, use_cache=job.use_cache, request_id=job.request_id,
+                    backend=job.backend, model=job.model, transcript_only=job.transcript_only,
+                    again_limit_user=None if access.is_admin(job.user_id) else job.user_id,
+                    hide_cache_from=None if access.is_admin(job.user_id) else job.user_id)
         finally:
             # Before replying or deleting the status message: a late status edit must not land
             # after the final result.
             await progress.close()
         if job.cancel_reason:  # cancelled while the pipeline ran but finished before noticing (e.g. cached)
             raise proc.ProcCancelled("cancelled")
+        if isinstance(result, documents.DocResult) and result.kind == "pick":
+            # The status message becomes the chapter list (kept, not deleted); the first chapter picked from
+            # it continues this request.
+            text, markup = _chapter_list(job.upload_id, result.name, result.doc["chapters"], 0)
+            await app.bot.edit_message_text(text, chat_id=job.chat_id, message_id=job.status_id, reply_markup=markup)
+            db.update_request(job.request_id, status="waiting")
+            return False
         if result.cached and result.replay_steps:  # a first-time requester (see pipeline.plan_replay)
             # Replayed in a separate task so the queue keeps moving meanwhile; the task ends the job.
             _delayed[job.request_id] = asyncio.create_task(_deliver_later(app, job, result, waited))
@@ -1219,6 +1439,41 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: Job) 
 _delayed: dict[int, asyncio.Task] = {}  # request id -> replay task of a cached summary (see _deliver_later)
 
 
+async def _run_document(app: Application, job: Job, progress: "Progress") -> documents.DocResult:
+    """Runs a document job: downloads the file from Telegram unless its text is stored, then documents.run.
+
+    Raises:
+        documents.DocumentError: The file can't be downloaded, read or summarized.
+    """
+    upload = db.get_upload(job.upload_id)
+    if upload is None:
+        raise documents.DocumentError("⚠️ Please send the file again.", f"upload {job.upload_id} missing")
+    workdir = config.DATA_DIR / "work" / f"doc_{job.request_id}"
+    shutil.rmtree(workdir, ignore_errors=True)
+    workdir.mkdir(parents=True)
+    try:
+        path = None
+        doc = db.get_document(upload["sha256"]) if upload["sha256"] else None
+        if not doc or doc["status"] != "done":
+            progress(f"📄 {upload['name'][:80]}\n📥 Downloading the file…", None)
+            path = workdir / "upload"  # no extension: the format is told from the bytes
+            try:
+                tg_file = await app.bot.get_file(upload["file_id"])
+                await tg_file.download_to_drive(path)
+            except BadRequest as e:
+                raise documents.DocumentError(TOO_BIG if "too big" in str(e).lower() else DOWNLOAD_FAILED, str(e))
+            except TelegramError as e:
+                raise documents.DocumentError(DOWNLOAD_FAILED, str(e))
+            if job.cancel_reason:
+                raise proc.ProcCancelled("cancelled")
+        return await asyncio.to_thread(
+            documents.run, upload, job.book_mode, job.chapter, path, workdir, progress, backend=job.backend,
+            model=job.model, request_id=job.request_id,
+            hide_cache_from=None if access.is_admin(job.user_id) else job.user_id)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)  # only the extracted text is kept
+
+
 async def _deliver_later(app: Application, job: Job, result: pipeline.Result, waited: float) -> None:
     """Replays a cached answer (summary or transcript) like a fresh run, for a user who mustn't learn it was
     cached.
@@ -1229,10 +1484,14 @@ async def _deliver_later(app: Application, job: Job, result: pipeline.Result, wa
     try:
         stats = (result.summary or {}).get("_stats") or {}
         progress = Progress(app, asyncio.get_running_loop(), job)
-        meta = result.meta or {}
-        head = (f"🖼 {meta.get('title', '')[:80]} (photo post)" if meta.get("is_carousel")
-                else f"🎬 {meta.get('title', '')[:80]} ({pipeline._fmt_duration(meta.get('duration') or 0)})")
-        llm = stats.get("llm") or summarize.llm_label(job.backend, job.model or "")
+        meta = getattr(result, "meta", None) or {}
+        if isinstance(result, documents.DocResult):
+            head = result.head
+        elif meta.get("is_carousel"):
+            head = f"🖼 {meta.get('title', '')[:80]} (photo post)"
+        else:
+            head = f"🎬 {meta.get('title', '')[:80]} ({pipeline._fmt_duration(meta.get('duration') or 0)})"
+        llm = getattr(result, "llm", "") or stats.get("llm") or summarize.llm_label(job.backend, job.model or "")
         remaining = result.replay_total
         try:
             for name, sec in result.replay_steps:
@@ -1270,6 +1529,13 @@ async def _deliver(app: Application, job: Job, result: pipeline.Result, waited: 
         TelegramError: Telegram refused the message.
     """
     bot_ = app.bot
+    if isinstance(result, documents.DocResult):
+        reveal = access.is_admin(job.user_id) or db.user_saw_video(job.user_id, "document", result.video_id,
+                                                                    job.request_id)
+        for chunk in render_document(result, waited, reveal):
+            await _send_with_retry(lambda chunk=chunk: bot_.send_message(
+                job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True), job)
+        return
     if job.transcript_only:
         if not result.transcript:
             await _send_with_retry(lambda: bot_.send_message(job.chat_id, "No transcript available for this video."),
@@ -1517,8 +1783,12 @@ def add_handlers(app: Application) -> None:
     # before the catch-all admin-button handler.
     app.add_handler(CallbackQueryHandler(on_llm_button, pattern=r"^llm:"))
     app.add_handler(CallbackQueryHandler(on_cancel_button, pattern=r"^cancel:"))
+    app.add_handler(CallbackQueryHandler(on_book_button, pattern=r"^book:"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(allow|block|remove):"))
-    app.add_handler(MessageHandler(new & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
+    # Before on_message: a file sent with a caption is a document, not a message with a link.
+    app.add_handler(MessageHandler(new & filters.Document.ALL, on_document))
+    app.add_handler(MessageHandler(new & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND
+                                   & ~filters.Document.ALL, on_message))
 
 
 def main() -> None:
