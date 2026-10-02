@@ -127,11 +127,12 @@ Step by step on Ubuntu/Debian; other Linux distributions work the same with thei
 ### 1. System packages
 
 ```bash
-sudo apt install git python3 python3-venv bubblewrap nodejs npm poppler-utils tesseract-ocr
+sudo apt install git python3 python3-venv bubblewrap nodejs npm poppler-utils tesseract-ocr espeak-ng-data
 ```
 
 `bubblewrap` (`bwrap`) sandboxes the Codex CLI and the reading of uploaded files; `nodejs`/`npm` are only
-needed to install Codex. `poppler-utils` reads PDFs; `tesseract-ocr` reads scanned ones.
+needed to install Codex. `poppler-utils` reads PDFs; `tesseract-ocr` reads scanned ones; `espeak-ng-data`
+(with its library) lets Kokoro read summaries aloud.
 Further OCR languages are added from Telegram with `/ocrlang`, no system packages needed.
 
 ### 2. Get the code and install the Python dependencies

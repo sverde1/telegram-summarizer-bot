@@ -9,6 +9,7 @@ ImageHash==4.3.2
 imageio-ffmpeg==0.6.0
 numpy==2.5.3
 openai==3.22.1
+kokoro-onnx==0.4.7
 pillow==12.3.0
 pypdf==6.19.0
 py3langid==0.4.0

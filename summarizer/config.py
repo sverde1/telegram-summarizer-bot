@@ -83,6 +83,10 @@ OCR_MAX_PAGES = int(_env("OCR_MAX_PAGES", "400"))
 OCR_WORKERS = int(_env("OCR_WORKERS", "3"))
 # Largest document downloaded from a Google Drive / Dropbox link (Telegram itself stops bots at 20 MB).
 MAX_LINK_DOWNLOAD_MB = int(_env("MAX_LINK_DOWNLOAD_MB", "100"))
+# The system's espeak-ng (Kokoro's text-to-speech needs it to turn text into phonemes):
+# sudo apt install espeak-ng-data. Paths as on Debian/Ubuntu x86-64.
+ESPEAK_LIB = _env("ESPEAK_LIB", "/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1")
+ESPEAK_DATA = _env("ESPEAK_DATA", "/usr/lib/x86_64-linux-gnu/espeak-ng-data")
 MAX_FRAMES = int(_env("MAX_FRAMES", "16"))
 SHORT_VIDEO_SEC = int(_env("SHORT_VIDEO_SEC", "180"))  # up to this long: denser frame sampling
 # Whisper may use at most this share of the machine's RAM; a video that doesn't fit right now waits (other
