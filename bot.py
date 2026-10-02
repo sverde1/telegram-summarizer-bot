@@ -864,11 +864,24 @@ _waiting_for_memory: list["Job"] = []
 
 
 def _end_job(job: "Job") -> None:
-    """Forgets a job that's completely done (finished, failed, cancelled or expired): frees its user's slot."""
-    _jobs.pop(job.request_id, None)
+    """Forgets a job that's completely done (finished, failed, cancelled or expired): frees its user's slot.
+
+    Idempotent: several paths can end the same job (e.g. a cancel while the worker is reporting it), and only
+    the first one may free the slot, or the user's counter would go wrong.
+    """
+    if _jobs.pop(job.request_id, None) is None:
+        return
     _user_jobs[job.user_id] -= 1
     if _user_jobs[job.user_id] <= 0:
         del _user_jobs[job.user_id]
+
+
+def _unpark(job: "Job") -> bool:
+    """Takes a job off the memory-wait list; False if something else (a cancel) already did."""
+    if job in _waiting_for_memory:
+        _waiting_for_memory.remove(job)
+        return True
+    return False
 
 
 async def _set_aside(app: Application, job: "Job", needed: int) -> None:
@@ -899,18 +912,21 @@ async def _next_job(app: Application) -> tuple["Job | None", bool]:
         (job or None if nothing to do yet, whether it came from the queue).
     """
     now = time.monotonic()
+    # Iterate over a snapshot, and re-check membership: the awaits below let a cancel take jobs off the list.
     for job in list(_waiting_for_memory):
+        if job not in _waiting_for_memory:
+            continue
         if job.cancel_reason:  # cancelled while parked: already reported
-            _waiting_for_memory.remove(job)
+            _unpark(job)
             _end_job(job)
         elif now - job.waiting_since > config.WHISPER_RAM_WAIT_MIN * 60:
-            _waiting_for_memory.remove(job)
+            _unpark(job)
+            _end_job(job)  # bookkeeping before the await, so a concurrent cancel finds nothing to undo
             db.update_request(job.request_id, status="failed", error="waited too long for memory")
             await _fail(app, job, f"🧠 Still not enough free memory after {config.WHISPER_RAM_WAIT_MIN} min. "
                                   "Please try again later.")
-            _end_job(job)
         elif memory.fits_now(job.memory_needed):
-            _waiting_for_memory.remove(job)
+            _unpark(job)
             return job, False
     try:
         timeout = MEMORY_RECHECK if _waiting_for_memory else None
@@ -932,11 +948,13 @@ async def worker(app: Application) -> None:
     global _running
     loop = asyncio.get_running_loop()
     while True:
-        job, from_queue = await _next_job(app)
-        if job is None:
-            continue
-        parked = False
+        job, from_queue, parked = None, False, False
+        # Everything, job selection included, is inside the safety net: a database hiccup or an unexpected
+        # state while picking a job must not end the loop. Only Exception: shutdown's CancelledError must pass.
         try:
+            job, from_queue = await _next_job(app)
+            if job is None:
+                continue
             if access.state(job.user_id) not in ("admin", "allowed") and not job.cancel_reason:
                 # Access removed while queued (e.g. a path that didn't go through cancel_user_jobs).
                 job.cancel_reason = ACCESS_REMOVED
@@ -945,10 +963,11 @@ async def worker(app: Application) -> None:
             if not job.cancel_reason:  # cancelled while queued: already reported, just skip it
                 parked = await _run_job(app, loop, job)
         except Exception:
-            log.exception("worker: job %s failed while reporting its result", job.request_id)
+            log.exception("worker: job %s failed", job.request_id if job else "(selecting the next job)")
+            await asyncio.sleep(1)  # don't spin if the failure repeats (e.g. the database is locked)
         finally:
             _running = None
-            if not parked:
+            if job is not None and not parked:
                 _end_job(job)
             if from_queue:
                 queue.task_done()
