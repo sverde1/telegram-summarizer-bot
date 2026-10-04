@@ -240,7 +240,11 @@ def ocr_names(langs: str | None) -> str:
     return ocr.names((langs or "").split("+")) or "unknown"
 
 
-def answer(text: str, units_: tuple[str, str]) -> list[str]:
+def answer(text: str, units_: tuple[str, str], footer: str = "") -> list[str]:
     """A follow-up answer as Telegram messages: capped (a broken or prompt-injected answer can't become a flood
-    of messages), in the reader's units, escaped and packed into at most a few messages."""
-    return _pack(["💬", *_text(_cap(units.convert(text, *units_), FIELD_LIMITS["answer"]))])
+    of messages), in the reader's units, escaped and packed into at most a few messages; an optional footer in
+    italics at the end."""
+    pieces = ["💬", *_text(_cap(units.convert(text, *units_), FIELD_LIMITS["answer"]))]
+    if footer:
+        pieces += ["", f"<i>{html.escape(footer)}</i>"]
+    return _pack(pieces)

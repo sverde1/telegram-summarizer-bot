@@ -407,7 +407,8 @@ Every summary (videos, recordings, books, chapters) also has these buttons:
   - It answers only from that material and declines unrelated requests (it isn't a general chatbot).
     Questions are capped at `ASK_MAX_QUESTION` characters, answers at 8000.
   - Questions have their own daily limit (`ASK_DAILY_LIMIT`, 20 per 24 h, `/limit ask`) and don't count
-    toward the daily request limit. One open question per summary at a time.
+    toward the daily request limit; each answer says how many are left today. One open question per summary at
+  a time.
   - Only the person who got the summary (or an admin) can ask about it; answers are never shared between
     users. Admins see questions in `/history`, as they see links.
 - **📄 Download**: a Markdown file to take to ChatGPT or any other chat. For videos and recordings: the

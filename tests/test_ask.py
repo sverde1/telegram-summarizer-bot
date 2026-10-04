@@ -74,7 +74,8 @@ async def test_tap_reply_and_get_the_answer_as_a_reply(app, telegram, ai):
     await send(app, question)
     await _work(app)
     answer = telegram.sent("sendMessage")[-1]
-    assert answer["text"] == "💬\nLonger: it is 21 °C all day."  # in the reader's units
+    # In the reader's units, with the questions left (this one counted).
+    assert answer["text"] == "💬\nLonger: it is 21 °C all day.\n\n<i>19 of 20 questions left today</i>"
     assert answer["reply_parameters"].message_id == question["message"]["message_id"]
     assert f"ask:{rid}" in str(answer["reply_markup"])  # asking on is about the same summary
     req = db.recent_requests(ANA)[0]
@@ -223,3 +224,16 @@ def test_off_topic_reply_names_what_was_sent():
     assert "the recording you sent" in followup.off_topic_rule("file")
     assert followup.off_topic_rule("document").endswith(
         '"I can only answer questions about topics related to the book or document you sent."')
+
+
+async def test_footer_says_when_none_are_left_and_admins_get_none(app, telegram, ai, monkeypatch):
+    monkeypatch.setattr(config, "ASK_DAILY_LIMIT", 1)
+    _, last = await _summary(app, telegram)
+    await send(app, msg_update(ANA, "Why?", reply_to=last))
+    await _work(app)
+    assert "<i>No questions left today; more in about" in telegram.sent("sendMessage")[-1]["text"]
+    rid, _ = await _summary(app, telegram, ADMIN_ID)
+    db.save_messages(ADMIN_ID, [6000], rid)
+    await send(app, msg_update(ADMIN_ID, "Why?", reply_to=6000))
+    await _work(app)
+    assert telegram.sent("sendMessage")[-1]["text"] == "💬\nLonger: it is 21 °C all day."

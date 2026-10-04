@@ -14,7 +14,7 @@ from telegram.ext import Application
 import access
 from summarizer import db, documents, followup, pipeline, tts, units
 from summarizer.results import JobResult
-from tgbot import menus, render, runners, sending, state
+from tgbot import limits, menus, render, runners, sending, state
 
 log = logging.getLogger("bot")  # one logger name for the whole bot, as in the journal
 
@@ -105,9 +105,19 @@ async def _send_answer(app: Application, job: state.Job, result: followup.AskRes
     The answer is stored before it's sent (like a summary), so a quick follow-up already sees it.
     """
     db.save_delivered(job.request_id, "ask", result.question, result.answer, parent_id=result.parent_id)
-    chunks = render.answer(result.answer, db.get_user_units(job.user_id))
+    chunks = render.answer(result.answer, db.get_user_units(job.user_id), _questions_left(job.user_id))
     await _send_chunks(app, job, chunks, InlineKeyboardMarkup([[ask_button(result.parent_id)]]),
                        parent_id=result.parent_id, reply_to=job.reply_to)
+
+
+def _questions_left(uid: int) -> str:
+    """The answer's footer: questions left today, e.g. "17 of 20 questions left today" ("" without a limit)."""
+    used, limit, _, frees_in = limits.limit_status(uid, "ask")
+    if not limit:  # admins, or no limit set
+        return ""
+    if used >= limit:
+        return f"No questions left today; more in about {render.fmt_until(frees_in or 0)}."
+    return f"{limit - used} of {limit} questions left today"
 
 
 def transcript_name(result: pipeline.Result) -> str:
