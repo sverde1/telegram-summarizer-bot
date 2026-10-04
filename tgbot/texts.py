@@ -45,7 +45,7 @@ MEDIA_TOO_BIG = ("⚠️ This file is larger than 20 MB, the most Telegram lets 
 UNREADABLE_MEDIA = "⚠️ I couldn't read this file as audio or video."
 
 
-CANCELLED = "✖️ Cancelled. You can send the link again any time."
+CANCELLED = "✖️ Cancelled."
 
 
 TOO_OLD = "This summary is too old for that; ask for it again."
@@ -58,4 +58,4 @@ INTERNAL_ERROR = "⚠️ Something went wrong on the bot's side."
 INTERNAL_ERROR_NOTIFIED = INTERNAL_ERROR + " The admin has been notified."
 
 
-STOPPED = "⏹ The bot was stopped before your summary was ready. Please send the link again later."
+STOPPED = "⏹ The bot was restarted before your summary was ready."

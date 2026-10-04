@@ -3,6 +3,7 @@ cancel, OCR approval and 🔊.
 """
 import asyncio
 import io
+import json
 import logging
 import time
 
@@ -729,3 +730,32 @@ async def on_ask_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                                         reply_markup=ForceReply(input_field_placeholder="Your question"))
     db.save_messages(q.message.chat.id, [prompt.message_id], req["id"])
     state.asking[uid] = (req["id"], time.monotonic())
+
+
+async def on_retry_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles 🔁 Try again (`retry:<request id>`): queues a cancelled or stopped job again, as it was.
+
+    The job comes from the request row (requests.job), so this works after a restart too. It continues the
+    same request, which already counted toward the user's limits; only the queue limits apply.
+    """
+    if not (checked := await button(update)):
+        return
+    q, uid, parts = checked
+    req = db.get_request(int(parts[1])) if len(parts) == 2 and parts[1].isdigit() else None
+    if req is None or not owns(uid, req["user_id"]) or not req.get("job"):
+        await q.answer("This isn't available.")
+        return
+    if req["status"] != "cancelled" or req["id"] in state.jobs:
+        await q.answer("Already on its way.")
+        return
+    if refusal := limits.refusal(req["user_id"], new_request=False):
+        await q.answer(refusal[:200], show_alert=True)
+        return
+    spec = json.loads(req["job"])
+    opts = dict(spec["opts"])
+    opts["job_kind"] = state.JobKind(opts.get("job_kind", state.JobKind.VIDEO.value))
+    db.update_request(req["id"], status="queued", error=None)
+    await q.answer()
+    await q.edit_message_text(limits.queued_message())
+    await jobs.start_job(req["user_id"], q.message.chat.id, q.message.message_id, spec["url"],
+                         spec["request_kind"], request_id=req["id"], **opts)

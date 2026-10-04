@@ -128,3 +128,33 @@ async def test_short_steps_get_no_cancel_button(app, telegram, pipe):
         release[LONG2].set()
         for w in workers:
             w.cancel()
+
+
+async def test_try_again_after_a_cancel_or_a_restart(app, telegram, pipe):
+    release, started = pipe
+    workers = [asyncio.create_task(jobs.worker(app))]
+    try:
+        await send(app, msg_update(ANA, LONG))
+        await _until(lambda: started == [LONG])
+        rid = db.recent_requests(ANA)[0]["id"]
+        await send(app, callback_update(ANA, f"cancel:{rid}"))
+        await _until(lambda: db.recent_requests(ANA)[0]["status"] == "cancelled")
+        assert f"retry:{rid}" in _markup(telegram, ANA)
+        await send(app, callback_update(BOB, f"retry:{rid}"))
+        assert telegram.sent("answerCallbackQuery")[-1]["text"] == "This isn't available."
+        release[LONG].set()
+        await send(app, callback_update(ANA, f"retry:{rid}"))
+        await send(app, callback_update(ANA, f"retry:{rid}"))  # a double tap
+        assert telegram.sent("answerCallbackQuery")[-1]["text"] == "Already on its way."
+        await _until(lambda: db.get_request(rid)["status"] == "done")
+        assert len(db.recent_requests(ANA)) == 1 and db.usage(ANA, "daily")[0] == 1  # the same request
+    finally:
+        for w in workers:
+            w.cancel()
+    # After a restart the queue is gone; the job comes back from the database.
+    rid2 = db.add_request(ANA, CAPTIONED, "summary")
+    db.update_request(rid2, status="cancelled",
+                      job='{"url": "%s", "request_kind": "summary", "opts": {"job_kind": "video"}}' % CAPTIONED)
+    state.reset()
+    await send(app, callback_update(ANA, f"retry:{rid2}"))
+    assert state.queue.qsize() == 1 and state.jobs[rid2].url == CAPTIONED

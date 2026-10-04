@@ -1,5 +1,7 @@
 """The job queue's life cycle: queueing, the worker, cancelling, finishing, failing, admin notices."""
 import asyncio
+import enum
+import json
 import logging
 import time
 
@@ -20,7 +22,14 @@ async def report_cancel(app: Application, job: state.Job) -> None:
     """Records a job as cancelled and shows the reason on its status message."""
     reason = job.cancel_reason or texts.CANCELLED
     db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
-    await fail(app, job, reason)
+    # A cancelled or stopped job can be queued again as it was (not one whose user lost access).
+    again = retry_button(job.request_id) if reason in (texts.CANCELLED, texts.STOPPED) else None
+    await fail(app, job, reason, markup=again)
+
+
+def retry_button(request_id: int) -> InlineKeyboardMarkup:
+    """The 🔁 Try again button under a cancelled or stopped job (handlers.on_retry_button)."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔁 Try again", callback_data=f"retry:{request_id}")]])
 
 
 async def cancel_job(app: Application, job: state.Job, reason: str) -> bool:
@@ -90,6 +99,10 @@ async def start_job(uid: int, chat_id: int, status_id: int, url: str, request_ki
         **opts: Job fields (job_kind, use_cache, transcript_only, upload_id, book_mode, chapter, ...).
     """
     req = request_id or db.add_request(uid, url, request_kind)  # logged the moment it arrives
+    # What it takes to queue this job again (🔁 Try again after a cancel or a restart).
+    spec = {"url": url, "request_kind": request_kind,
+            "opts": {k: v.value if isinstance(v, enum.Enum) else v for k, v in opts.items()}}
+    db.update_request(req, job=json.dumps(spec, ensure_ascii=False))
     b, m, is_default = prefs.current_llm(uid)
     # Users on the defaults pass None, so their jobs follow the default (and its later changes)
     # instead of pinning whatever the default resolves to right now.
@@ -421,7 +434,8 @@ async def _notify_admins_of_block(app: Application, e: "pipeline.Blocked") -> No
             log.warning("couldn't notify admin %s: %s", admin, err)
 
 
-async def fail(app: Application, job: state.Job, msg: str, detail: str | None = None) -> None:
+async def fail(app: Application, job: state.Job, msg: str, detail: str | None = None,
+               markup: InlineKeyboardMarkup | None = None) -> None:
     """Shows an error in place of the job's status message. Never raises.
 
     Falls back to a new message if the status message can't be edited (e.g. it was deleted). If the user
@@ -432,14 +446,15 @@ async def fail(app: Application, job: state.Job, msg: str, detail: str | None = 
         job: The failed job.
         msg: The message for the user (one of the expected texts, never a raw error).
         detail: Technical detail, only passed when the requester is an admin (they maintain the bot).
+        markup: Buttons to show with it (e.g. 🔁 Try again).
     """
     text = f"⚠️ {msg}" if msg[:1].isalnum() else msg  # messages with their own emoji keep it
     if detail:
         text += f"\n\nDetails: {detail[:800]}"
     try:
         try:
-            await app.bot.edit_message_text(text, job.chat_id, job.status_id)
+            await app.bot.edit_message_text(text, job.chat_id, job.status_id, reply_markup=markup)
         except BadRequest:
-            await app.bot.send_message(job.chat_id, text)
+            await app.bot.send_message(job.chat_id, text, reply_markup=markup)
     except TelegramError as e:
         log.warning("couldn't report the failure of job %s: %s", job.request_id, e)

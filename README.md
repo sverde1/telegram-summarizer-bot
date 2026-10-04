@@ -457,7 +457,9 @@ A job reaching one while another runs shows "⏳ Waiting for a turn on the trans
 rough wait; time spent waiting isn't counted as work in footers or speed estimates. While transcribing,
 the status shows Whisper's progress in % and an ETA from this run's own speed. A job with a step of a minute or
 more (a long transcription, OCR, a big book, waiting for a turn) gets a ✖️ Cancel button on its status
-message; it stops the job's programs at once. Two jobs for the same video
+message; it stops the job's programs at once. A cancelled job, or one stopped by a restart, gets a
+🔁 Try again button that queues it again as it was (the same request, so limits aren't charged twice;
+it works after a restart because each request stores its job). Two jobs for the same video
 or document never run at once: the second waits and then reuses the first one's work. A transcription that
 doesn't fit in memory yet waits aside and retries; it may alternate between waiting for memory and waiting
 for its turn.

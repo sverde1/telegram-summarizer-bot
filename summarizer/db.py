@@ -220,6 +220,10 @@ def init() -> None:
                 c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
         if "ocr" not in {r["name"] for r in c.execute("PRAGMA table_info(requests)")}:
             c.execute("ALTER TABLE requests ADD COLUMN ocr INTEGER DEFAULT 0")  # 1: this request ran OCR
+        if "job" not in {r["name"] for r in c.execute("PRAGMA table_info(requests)")}:
+            # The queued job as JSON (url, kind, options), so a stopped or cancelled one can be tried again,
+            # also after a restart (the queue itself lives in memory).
+            c.execute("ALTER TABLE requests ADD COLUMN job TEXT")
         if "source_url" not in {r["name"] for r in c.execute("PRAGMA table_info(uploads)")}:
             c.execute("ALTER TABLE uploads ADD COLUMN source_url TEXT")  # a Drive/Dropbox link instead of a file
         if "toc" not in {r["name"] for r in c.execute("PRAGMA table_info(documents)")}:
