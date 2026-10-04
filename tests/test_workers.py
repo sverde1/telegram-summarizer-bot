@@ -27,6 +27,7 @@ def pipe(monkeypatch, request):
     def run(url, progress, **kw):
         """Long videos hold the CPU slot until their event is set; captioned ones return at once."""
         if url in release:
+            progress("🗣 Transcribing…", 3600 if url == LONG else 20)
             with cpu.slot(progress, "transcription", 60):
                 started.append(url)
                 while not release[url].wait(0.05):
@@ -87,5 +88,43 @@ async def test_two_transcriptions_take_turns_and_a_cancel_stops_only_the_waiting
         await _until(lambda: db.recent_requests(ANA)[0]["status"] == "done")
         assert started == [LONG]
     finally:
+        for w in workers:
+            w.cancel()
+
+
+def _markup(telegram, uid):
+    """The buttons of the last status edit shown to uid."""
+    return str([d for m, d in telegram.calls if m == "editMessageText" and d.get("chat_id") == uid][-1]
+               .get("reply_markup"))
+
+
+async def test_a_long_job_can_be_cancelled_from_its_status(app, telegram, pipe):
+    release, started = pipe
+    workers = [asyncio.create_task(jobs.worker(app))]
+    try:
+        await send(app, msg_update(ANA, LONG))
+        await _until(lambda: started == [LONG])
+        await _until(lambda: "cancel:" in _markup(telegram, ANA))  # an hour to go: the button is there
+        rid = db.recent_requests(ANA)[0]["id"]
+        await send(app, callback_update(BOB, f"cancel:{rid}"))  # not Bob's
+        assert telegram.sent("answerCallbackQuery")[-1]["text"] == "Only the person who sent this link can cancel it."
+        await send(app, callback_update(ANA, f"cancel:{rid}"))
+        await _until(lambda: db.recent_requests(ANA)[0]["status"] == "cancelled")
+        assert _status(telegram, ANA).startswith("✖️ Cancelled.") and "cancel:" not in _markup(telegram, ANA)
+    finally:
+        for w in workers:
+            w.cancel()
+
+
+async def test_short_steps_get_no_cancel_button(app, telegram, pipe):
+    release, started = pipe
+    workers = [asyncio.create_task(jobs.worker(app))]
+    try:
+        await send(app, msg_update(BOB, LONG2))  # a 20 s step
+        await _until(lambda: started == [LONG2])
+        await _until(lambda: "Transcribing" in _status(telegram, BOB))
+        assert "cancel:" not in _markup(telegram, BOB)
+    finally:
+        release[LONG2].set()
         for w in workers:
             w.cancel()

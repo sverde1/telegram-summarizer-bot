@@ -461,7 +461,9 @@ async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_cancel_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles "✖️ Don't wait, cancel" on a job waiting for memory (`cancel:<request id>`).
+    """Handles ✖️ Cancel (`cancel:<request id>`): on a long-running job's status, or one waiting for memory.
+
+    A running job's programs are stopped at once (its own cancel event); its worker reports the cancel.
 
     Only the job's owner or an admin may cancel it; the data is checked, since callback data can be forged.
     """

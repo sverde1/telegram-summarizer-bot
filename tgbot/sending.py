@@ -4,6 +4,7 @@ import datetime as dt
 import logging
 import time
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Forbidden, RetryAfter, TelegramError
 from telegram.ext import Application
 
@@ -23,6 +24,9 @@ class Progress:
     # Seconds between countdown refreshes. Edits count against Telegram's per-chat rate limit
     # (about one message per second), so the countdown stays well below it.
     TICK = 15
+    # A step expected to take at least this long gets a cancel button (and keeps it until the job ends): the
+    # user may decide a long transcription or OCR isn't worth the wait. Quick jobs don't flash one.
+    CANCEL_FROM = 60
 
     def __init__(self, app: Application, loop: asyncio.AbstractEventLoop, job: state.Job):
         """Starts the countdown ticker for one job's status message.
@@ -37,6 +41,7 @@ class Progress:
         self.lock = asyncio.Lock()
         self.text, self.eta, self.eta_at, self.shown, self.last_edit = "", None, 0.0, "", 0.0
         self.started, self.closed = job.started_at or time.monotonic(), False
+        self.cancellable = False  # set once a long step showed the cancel button
         self.ticker = asyncio.run_coroutine_threadsafe(self._tick(), loop)
 
     def __call__(self, text: str, eta: float | None = None) -> None:
@@ -99,7 +104,12 @@ class Progress:
             if text == self.shown:
                 return
             try:
-                await self.app.bot.edit_message_text(text, self.job.chat_id, self.job.status_id)
+                eta = (stage or (self.text, self.eta))[1]
+                self.cancellable = self.cancellable or (eta is not None and eta >= self.CANCEL_FROM)
+                # Every edit must carry the button again: an edit without reply_markup removes it.
+                markup = cancel_button(self.job.request_id) if self.cancellable else None
+                await self.app.bot.edit_message_text(text, self.job.chat_id, self.job.status_id,
+                                                     reply_markup=markup)
                 self.shown, self.last_edit = text, time.monotonic()
             except RetryAfter as e:  # flood control: skip this edit, the next tick catches up
                 log.warning("progress edit rate-limited for %ss", _retry_seconds(e))
@@ -148,3 +158,8 @@ async def send_with_retry(make_call, job: state.Job | None = None):
         return await make_call()
     except Forbidden as e:
         raise UserBlockedBot(str(e))
+
+
+def cancel_button(request_id: int) -> InlineKeyboardMarkup:
+    """The ✖️ Cancel button for a job's status message (handled by handlers.on_cancel_button)."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Cancel", callback_data=f"cancel:{request_id}")]])
