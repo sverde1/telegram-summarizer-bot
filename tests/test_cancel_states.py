@@ -32,7 +32,7 @@ async def test_cancelling_a_queued_job_frees_the_slot_at_once(app, telegram):
     await state.queue.put(job)
     assert await jobs.cancel_job(app, job, texts.CANCELLED)
     assert state.user_jobs.get(USER, 0) == 0 and job.request_id not in state.jobs
-    assert telegram.sent("editMessageText")[-1]["text"] == texts.CANCELLED
+    assert telegram.sent("editMessageText")[-1]["text"].startswith(texts.CANCELLED + "\n")
     assert db.recent_requests(USER)[0]["status"] == "cancelled"
     assert not await jobs.cancel_job(app, job, texts.CANCELLED)  # second cancel: nothing to do
 
@@ -54,7 +54,7 @@ async def test_a_replay_cancelled_before_it_starts_is_cleaned_up(app, telegram):
 async def test_cancel_button_on_a_queued_job_is_reported(app, telegram):
     job = _job()
     await send(app, callback_update(USER, f"cancel:{job.request_id}"))
-    assert telegram.sent("editMessageText")[-1]["text"] == texts.CANCELLED
+    assert telegram.sent("editMessageText")[-1]["text"].startswith(texts.CANCELLED + "\n")
 
 
 async def _run_once(app, job, run):
@@ -97,3 +97,18 @@ async def test_a_download_killed_by_the_cancel_reports_the_cancel(app, telegram)
     await _run_once(app, job, killed)
     assert telegram.sent("editMessageText")[-1]["text"] == texts.ACCESS_REMOVED
     assert db.recent_requests(USER)[0]["status"] == "cancelled"
+
+
+async def test_the_cancel_message_says_what_was_cancelled(app, telegram):
+    job = _job()
+    await jobs.cancel_job(app, job, texts.CANCELLED)  # still queued: only the link is known
+    assert telegram.sent("editMessageText")[-1]["text"] == f"{texts.CANCELLED}\n{job.url}"
+    looked_up = _job(2)
+    db.update_request(looked_up.request_id, platform="youtube", video_id="v2")
+    db.start_video("youtube", "v2", looked_up.url)
+    db.update_video("youtube", "v2", title="Cats at night")
+    await jobs.cancel_job(app, looked_up, texts.CANCELLED)
+    assert telegram.sent("editMessageText")[-1]["text"] == f"{texts.CANCELLED}\n🎬 Cats at night"
+    question = state.Job("Why?", USER, 3, user_id=USER, request_id=db.add_request(USER, "Why?", "ask"),
+                         ask_of=1, question="Why?", job_kind=state.JobKind.ASK)
+    assert jobs.describe(question) == "💬 Why?"

@@ -112,7 +112,7 @@ async def test_cancel_button_only_for_the_owner(app, telegram, two_jobs):
     task.cancel()
     assert not state.waiting_for_memory and ran == []
     assert db.recent_requests(60)[0]["status"] == "cancelled"
-    assert telegram.sent("editMessageText")[-1]["text"] == texts.CANCELLED
+    assert telegram.sent("editMessageText")[-1]["text"].startswith(texts.CANCELLED + "\n")
 
 
 async def test_waiting_gives_up_after_the_limit(app, telegram, two_jobs, monkeypatch):

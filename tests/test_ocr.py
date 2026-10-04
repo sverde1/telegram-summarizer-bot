@@ -160,7 +160,7 @@ async def test_cancel_during_ocr_still_counts(app, telegram, tmp_path, monkeypat
     monkeypatch.setattr(ocr, "_read_batch", cancelled)
     await send(app, callback_update(ANA, f"ocr:{_rid(telegram)}:go"))
     await _work(app)
-    assert telegram.texts()[-1] == texts.CANCELLED and db.usage(ANA, "ocr")[0] == 1
+    assert telegram.texts()[-1].startswith(texts.CANCELLED + "\n") and db.usage(ANA, "ocr")[0] == 1
 
 
 async def test_no_ocr_engine(app, telegram, tmp_path, monkeypatch):

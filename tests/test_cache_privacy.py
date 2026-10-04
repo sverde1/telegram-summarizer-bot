@@ -230,4 +230,4 @@ async def test_shutdown_during_a_hold_tells_the_user(app, telegram, monkeypatch)
             break
         await asyncio.sleep(0.01)
     await lifecycle.post_stop(app)
-    assert telegram.sent("editMessageText")[-1]["text"] == texts.STOPPED and state.jobs == {}
+    assert telegram.sent("editMessageText")[-1]["text"].startswith(texts.STOPPED + "\n") and state.jobs == {}

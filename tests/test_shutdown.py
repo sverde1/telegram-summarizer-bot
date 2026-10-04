@@ -49,7 +49,7 @@ async def test_every_waiting_user_is_told_and_nothing_is_left(app, telegram, mon
 
     await asyncio.wait_for(lifecycle.post_stop(app), 10)
 
-    told = {d["chat_id"] for d in telegram.sent("editMessageText") if d["text"] == texts.STOPPED}
+    told = {d["chat_id"] for d in telegram.sent("editMessageText") if d["text"].startswith(texts.STOPPED + "\n")}
     assert told == set(USERS)
     assert {r["status"] for uid in USERS for r in db.recent_requests(uid)} == {"cancelled"}
     assert state.jobs == {} and state.user_jobs == {} and state.delayed == {} and state.waiting_for_memory == []
@@ -62,5 +62,5 @@ async def test_a_job_that_cannot_stop_in_time_is_reported_anyway(app, telegram, 
     job = _job(60, 1)
     monkeypatch.setattr(state, "running", {job})  # e.g. stuck in an API call that can't be interrupted
     await lifecycle.post_stop(app)
-    assert telegram.sent("editMessageText")[-1]["text"] == texts.STOPPED
+    assert telegram.sent("editMessageText")[-1]["text"].startswith(texts.STOPPED + "\n")
     assert db.recent_requests(60)[0]["status"] == "cancelled" and state.jobs == {}

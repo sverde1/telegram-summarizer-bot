@@ -146,7 +146,7 @@ async def test_cancel_while_speaking(app, telegram, voice, monkeypatch):
     monkeypatch.setattr(tts, "synthesize", cancelled)
     await send(app, callback_update(ANA, f"voice:{rid}"))
     await _work(app)
-    assert telegram.texts()[-1] == texts.CANCELLED and not telegram.sent("sendVoice")
+    assert telegram.texts()[-1].startswith(texts.CANCELLED + "\n") and not telegram.sent("sendVoice")
 
 
 async def test_whole_book_gets_listen_next_to_the_chapter_options(app, telegram, voice, monkeypatch):

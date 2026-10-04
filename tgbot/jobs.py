@@ -23,8 +23,24 @@ async def report_cancel(app: Application, job: state.Job) -> None:
     reason = job.cancel_reason or texts.CANCELLED
     db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
     # A cancelled or stopped job can be queued again as it was (not one whose user lost access).
-    again = retry_button(job.request_id) if reason in (texts.CANCELLED, texts.STOPPED) else None
-    await fail(app, job, reason, markup=again)
+    if reason in (texts.CANCELLED, texts.STOPPED):  # what it was, for the user deciding to try again
+        await fail(app, job, f"{reason}\n{describe(job)}", markup=retry_button(job.request_id))
+    else:
+        await fail(app, job, reason)
+
+
+def describe(job: state.Job) -> str:
+    """What a job was about, for its cancel message: a video's title (or link), a file's label, a question."""
+    if job.job_kind is state.JobKind.ASK:
+        return f"💬 {job.question[:200]}"
+    if job.job_kind is state.JobKind.VOICE:
+        return f"🔊 {job.url[:200]}"  # the summary's link or label
+    if job.job_kind is state.JobKind.VIDEO:
+        req = db.get_request(job.request_id) or {}
+        video = db.get_video(req.get("platform") or "", req.get("video_id") or "") if req.get("video_id") else None
+        if video and video.get("title"):
+            return f"🎬 {video['title'][:200]}"
+    return job.url[:300]  # a link before its lookup, or a file's label ("🎤 Voice message", "📄 book.pdf")
 
 
 def retry_button(request_id: int) -> InlineKeyboardMarkup:
