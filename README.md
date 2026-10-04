@@ -250,6 +250,7 @@ The database migrates itself on start.
 | `WHISPER_RAM_WAIT_MIN` | `60` | How long such a video waits for memory (the user can stop waiting with a button). |
 | `MAX_QUEUED_PER_USER` | `3` | Videos one user may have queued or running at once (admins: no limit). |
 | `MAX_QUEUE` | `20` | Total videos in the queue; new links are refused beyond that (admins excepted). |
+| `YOUTUBE_PARALLEL` | `2` | YouTube lookups (video info, captions) at the same time. A burst of them gets the server's IP flagged ("Sign in to confirm you're not a bot"); downloads from a looked-up video don't count. |
 | `WORKERS` | `8` | Jobs worked on at the same time. Lookups, downloads and AI calls run side by side; Whisper, OCR, frame sweeps and voice messages take turns on the CPU. |
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |
 | `MAX_DOC_PAGES` | `2000` | Most pages read from an uploaded document (EPUB/DOCX/TXT count ~2000 characters as a page). |

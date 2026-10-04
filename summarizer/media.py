@@ -3,12 +3,15 @@ import json
 import logging
 import re
 import subprocess
+import threading
+import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 from PIL import Image
 
-from . import config, proc, sandbox
+from . import config, cpu, proc, sandbox
 from .urls import Video
 
 log = logging.getLogger(__name__)
@@ -123,6 +126,39 @@ def _ytdlp(*args: str, timeout: int = 900) -> subprocess.CompletedProcess:
                 timeout=timeout)
 
 
+_youtube = threading.BoundedSemaphore(config.YOUTUBE_PARALLEL)  # see _youtube_turn
+_turn_held = threading.local()  # whether this thread holds a turn already
+
+
+@contextmanager
+def _youtube_turn(video: Video):
+    """Waits for one of the YOUTUBE_PARALLEL turns before a request to youtube.com itself (cancellably).
+
+    Lookups and caption requests are what YouTube's bot check counts; a burst of them from parallel jobs gets
+    the IP flagged. Downloads from a looked-up video (googlevideo) don't take a turn: a long one mustn't hold
+    up everyone's lookups. The wait is left out of the job's step times (cpu.record_wait). Other platforms
+    pass straight through.
+
+    Raises:
+        proc.ProcCancelled: The job was cancelled while waiting.
+    """
+    # Re-entrant per thread: captions take a turn and their fallback lookup takes it again; with one turn,
+    # waiting for itself would hang the job.
+    if video.platform != "youtube" or getattr(_turn_held, "on", False):
+        yield
+        return
+    start = time.monotonic()
+    while not _youtube.acquire(timeout=1):
+        proc.check_cancelled()
+    cpu.record_wait(start, time.monotonic())
+    _turn_held.on = True
+    try:
+        yield
+    finally:
+        _turn_held.on = False
+        _youtube.release()
+
+
 INFO_JSON = "info.json"  # yt-dlp's full answer from the probe, in the job's workdir (see _from_info)
 # yt-dlp errors that mean the stored info's media URLs have expired (YouTube signs them for a few hours).
 _EXPIRED = re.compile(r"\b(403|410)\b|forbidden|expired", re.I)
@@ -150,7 +186,8 @@ def _from_info(video: Video, workdir: Path, args: list[str], timeout: int) -> su
                 raise
             log.info("stored video info expired (%s); looking the video up again", e)
             info.unlink(missing_ok=True)
-    return _ytdlp(*args, video.url, timeout=timeout)
+    with _youtube_turn(video):  # without stored info, this looks the video up
+        return _ytdlp(*args, video.url, timeout=timeout)
 
 
 # ---------- metadata ----------
@@ -174,7 +211,8 @@ def probe(video: Video, info_path: Path | None = None) -> dict:
     # A TikTok carousel without music has no formats at all; still return its metadata.
     extra = ["--ignore-no-formats-error"] if video.platform == "tiktok" else []
     try:
-        raw = _ytdlp("--skip-download", "-J", *extra, video.url, timeout=120).stdout
+        with _youtube_turn(video):
+            raw = _ytdlp("--skip-download", "-J", *extra, video.url, timeout=120).stdout
         d = json.loads(raw)
     except MediaError as e:
         # yt-dlp often refuses live streams itself ("This live stream recording is not available.", "This
@@ -322,8 +360,9 @@ def fetch_captions(video: Video, meta: dict, workdir: Path) -> tuple[list[tuple[
     lang, is_auto = choice
     flag = "--write-auto-subs" if is_auto else "--write-subs"
     try:
-        _from_info(video, workdir, ["--skip-download", flag, "--sub-langs", lang, "--sub-format", "vtt/best",
-                                    "-o", str(workdir / "cap.%(ext)s")], timeout=120)
+        with _youtube_turn(video):  # timedtext is on youtube.com, and it's rate limited
+            _from_info(video, workdir, ["--skip-download", flag, "--sub-langs", lang, "--sub-format", "vtt/best",
+                                        "-o", str(workdir / "cap.%(ext)s")], timeout=120)
     except Blocked:
         raise  # a ban affects every download: report it instead of carrying on without captions
     except MediaError as e:

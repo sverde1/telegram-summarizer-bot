@@ -58,3 +58,10 @@ async def test_admins_hear_about_a_block_once(app, telegram, monkeypatch):
     assert len(to_user) == 2 and all(t.startswith("🚫 YouTube is currently blocking") for t in to_user)
     to_admin = [d["text"] for d in telegram.sent("sendMessage") if d["chat_id"] == ADMIN_ID]
     assert len(to_admin) == 1 and "HTTP Error 429" in to_admin[0]
+
+
+async def test_the_admin_notice_names_the_platform_properly(app, telegram):
+    from summarizer import pipeline
+    from tgbot import jobs as jobs_
+    await jobs_._notify_admins_of_block(app, pipeline.Blocked("🚫", detail="Sign in", platform="youtube"))
+    assert telegram.sent("sendMessage")[-1]["text"].startswith("🚫 YouTube is blocking downloads")

@@ -84,3 +84,56 @@ def test_tiktok_downloads_once_for_whisper_and_frames(ytdlp, tmp_path):
     assert audio == video and len(ytdlp.calls) == 1
     fmt = ytdlp.calls[0][ytdlp.calls[0].index("-f") + 1]
     assert fmt == "best[vcodec^=h264]/best"  # not "download": that is TikTok's watermarked file
+
+
+def test_youtube_lookups_take_turns_but_downloads_dont(monkeypatch, tmp_path):
+    import threading
+    import time
+    from summarizer import proc
+    monkeypatch.setattr(media, "_youtube", threading.BoundedSemaphore(2))
+    inside, peak, release = [0], [0], threading.Event()
+
+    def run(cmd, timeout=900):
+        """A lookup that blocks until released, counting how many run at once."""
+        inside[0] += 1
+        peak[0] = max(peak[0], inside[0])
+        release.wait(5)
+        inside[0] -= 1
+        if "-o" in cmd:  # a download: the file it would write
+            open(cmd[cmd.index("-o") + 1].replace("%(ext)s", "m4a"), "wb").write(b"audio")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(INFO), "")
+
+    monkeypatch.setattr(media, "_run", run)
+    threads = [threading.Thread(target=media.probe, args=(YT,)) for _ in range(4)]
+    for t in threads:
+        t.start()
+    time.sleep(0.3)
+    assert inside[0] == 2  # two lookups at once, the others wait their turn
+    tiktok = threading.Thread(target=media.probe, args=(TT,))
+    tiktok.start()
+    time.sleep(0.2)
+    assert inside[0] == 3  # other platforms don't take a turn
+    (tmp_path / media.INFO_JSON).write_text(json.dumps(INFO))
+    download = threading.Thread(target=media.download_audio, args=(YT, tmp_path))
+    download.start()
+    time.sleep(0.2)
+    assert inside[0] == 4  # a download from the stored info doesn't either
+    release.set()
+    for t in [*threads, tiktok, download]:
+        t.join(5)
+    assert peak[0] == 4
+
+
+def test_a_cancel_stops_the_wait_for_a_turn_and_turns_nest(monkeypatch, ytdlp, tmp_path):
+    import threading
+    from summarizer import proc
+    monkeypatch.setattr(media, "_youtube", threading.BoundedSemaphore(1))
+    media.fetch_captions(YT, {**INFO, "subtitles": {"en": [{}]}, "auto_captions": []}, tmp_path)  # nested: no hang
+    media._youtube.acquire()  # someone else holds the only turn
+    try:
+        proc.cancel_event().set()
+        with pytest.raises(proc.ProcCancelled):
+            media.probe(YT)
+    finally:
+        proc.cancel_event().clear()
+        media._youtube.release()

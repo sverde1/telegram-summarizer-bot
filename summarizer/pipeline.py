@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from . import config, cpu, db, frames, media, memory, proc, stats, summarize, transcribe
 from .results import JobResult
-from .urls import Video, classify
+from .urls import PLATFORM_NAMES, Video, classify
 
 log = logging.getLogger(__name__)
 
@@ -453,7 +453,7 @@ def _run(video, progress: Callable[..., None], *, use_cache: bool, transcript_on
             raise
         except media.Blocked as e:
             db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
-            name = {"youtube": "YouTube", "tiktok": "TikTok"}.get(video.platform, video.platform)
+            name = PLATFORM_NAMES.get(video.platform, video.platform)
             raise Blocked(f"🚫 {name} is currently blocking downloads from this bot's server (too many requests). "
                           "Please try again later.", detail=str(e), platform=video.platform)
         except Exception as e:

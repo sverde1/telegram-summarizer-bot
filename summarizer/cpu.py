@@ -33,6 +33,12 @@ def waited(since: float = 0.0) -> float:
     return sum(end - max(start, since) for start, end in _waits.get() or [] if end > since)
 
 
+def record_wait(start: float, end: float) -> None:
+    """Records a wait of this job's (for the CPU slot or another turn, e.g. media's YouTube lookups)."""
+    if end - start > 0.01 and (waits := _waits.get()) is not None:
+        waits.append((start, end))
+
+
 def _wait_text(what: str) -> str:
     """The status line while waiting. Neutral: it mustn't tell users how busy others are."""
     return f"⏳ Waiting for a turn on the {what} engine…"
@@ -69,9 +75,7 @@ def slot(status: Callable[[str, float | None], None] | None, what: str, eta: flo
             raise
         _line.popleft()
         _holder["until"] = time.monotonic() + (eta or 0)
-    end = time.monotonic()
-    if end - start > 0.01 and (waits := _waits.get()) is not None:
-        waits.append((start, end))
+    record_wait(start, time.monotonic())
     try:
         yield
     finally:

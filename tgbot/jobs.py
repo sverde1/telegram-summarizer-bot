@@ -10,7 +10,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application
 
 import access
-from summarizer import config, db, documents, memory, pipeline, proc, stats, summarize, transcribe
+from summarizer import config, db, documents, memory, pipeline, proc, stats, summarize, transcribe, urls
 from summarizer.results import JobResult
 from summarizer.urls import UnsupportedURL
 from tgbot import delivery, limits, menus, prefs, render, runners, sending, state, texts
@@ -441,7 +441,8 @@ async def _notify_admins_of_block(app: Application, e: "pipeline.Blocked") -> No
     if now - state.block_noticed.get(e.platform, -BLOCK_NOTICE_EVERY) < BLOCK_NOTICE_EVERY:
         return
     state.block_noticed[e.platform] = now
-    text = (f"🚫 {e.platform} is blocking downloads from this server. Users are being told to try later.\n"
+    name = urls.PLATFORM_NAMES.get(e.platform, e.platform)
+    text = (f"🚫 {name} is blocking downloads from this server. Users are being told to try later.\n"
             f"Raw error: {(e.detail or '')[:500]}\nOptions: wait, update yt-dlp, or add cookies/a proxy.")
     for admin in access.ADMINS:
         try:

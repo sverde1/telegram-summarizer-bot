@@ -209,3 +209,6 @@ def classify(url: str) -> Video:
         vid = _youtube_id(p)
         return Video("youtube", vid, f"https://www.youtube.com/watch?v={vid}")
     return _tiktok_video(p) or _resolve_short_link(p)
+
+
+PLATFORM_NAMES = {"youtube": "YouTube", "tiktok": "TikTok"}  # how messages name a platform
