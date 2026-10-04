@@ -64,6 +64,8 @@ async def sync_commands(bot, uid: int) -> None:
 async def _check_netjail(app: Application) -> None:
     """Checks once that the network jail works (sandboxes that need the network use it); tells the admins
     once per problem, remembered across restarts."""
+    if not config.NETJAIL:
+        log.warning("network jail: NETJAIL=off, so Codex shares this machine's network (PO tokens stay off)")
     why = await asyncio.to_thread(netjail.self_check)
     if not why:
         log.info("network jail: on (internet only, no access to this machine or the LAN)")

@@ -91,7 +91,8 @@ def fresh_state(tmp_path, monkeypatch, request):
     monkeypatch.setattr(media, "_pot", {})
     monkeypatch.setattr(media, "check_pot", lambda: "not installed (tests)")
     from summarizer import netjail
-    monkeypatch.setattr(netjail, "_state", {})  # the jail is off unless a test turns it on
+    # The jail counts as working (Codex tests fake proc.run, so the real launcher never runs).
+    monkeypatch.setattr(netjail, "_state", {"ready": True})
     monkeypatch.setattr(netjail, "self_check", lambda: "not checked (tests)")
     monkeypatch.setattr(ocr, "_cuda_ok", None)
     monkeypatch.setattr(tts, "_ready", False)  # voice messages off unless a test turns them on

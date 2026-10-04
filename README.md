@@ -50,7 +50,9 @@ Dropbox link): the whole book, or chapter by chapter. Scanned PDFs are read with
 
 ### Software
 
-- Linux with Python 3.11+ and `bwrap` (bubblewrap) for the Codex and document sandboxes.
+- Linux with Python 3.11+ and `bwrap` (bubblewrap) for the Codex and document sandboxes, plus `slirp4netns`,
+  nftables and util-linux 2.38+ for the network jail (`sudo apt install slirp4netns nftables`). No root setup
+  is needed beyond installing them.
 - poppler-utils (`pdftotext`, `pdftoppm`) for PDFs, and Tesseract for scanned documents: on the CPU it read
   a test book 5× faster than RapidOCR with the same text, and it checks a scan's script (Latin, Cyrillic, …)
   before OCR. With an NVIDIA GPU, RapidOCR (installed with the Python dependencies) is used instead.
@@ -267,6 +269,7 @@ The database migrates itself on start.
 | `MAX_QUEUED_PER_USER` | `3` | Videos one user may have queued or running at once (admins: no limit). |
 | `MAX_QUEUE` | `20` | Total videos in the queue; new links are refused beyond that (admins excepted). |
 | `POT_HOME` | `data/bgutil/server` | Where `deploy/install-pot.sh` builds the PO-token script; without it, no PO tokens. |
+| `NETJAIL` | `on` | `off` lets Codex share this machine's network when the network jail can't work here (logged at every start; PO tokens stay off). |
 | `YOUTUBE_PARALLEL` | `2` | YouTube lookups (video info, captions) at the same time. A burst of them gets the server's IP flagged ("Sign in to confirm you're not a bot"); downloads from a looked-up video don't count. |
 | `WORKERS` | `8` | Jobs worked on at the same time. Lookups, downloads and AI calls run side by side; Whisper, OCR, frame sweeps and voice messages take turns on the CPU. |
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |
@@ -500,7 +503,7 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 
 | Provider | Isolation |
 |---|---|
-| Codex | `codex exec` inside `bwrap`: read-only `/usr` and certificates, the bot's own `CODEX_HOME`, and this job's images. No `/home`, `.env` or repo. Every tool feature switched off (shell, JavaScript runtime, image viewing and generation, sub-agents, browser, computer use, apps, plugins…), web search off, Codex's own sandbox read-only. |
+| Codex | `codex exec` inside `bwrap` in the network jail (below): read-only `/usr` and certificates, the bot's own `CODEX_HOME`, and this job's images. No `/home`, `.env` or repo. Every tool feature switched off (shell, JavaScript runtime, image viewing and generation, sub-agents, browser, computer use, apps, plugins…), web search off, Codex's own sandbox read-only. |
 | Claude Code | `claude -p --tools ""`: no tools, no MCP servers; images are sent inline. |
 | Claude API | A plain Messages call with no tools. |
 | OpenAI API | A plain Responses call with no tools. Turn 2 continues server-side via `previous_response_id`; the stored responses are deleted after each job. |
@@ -525,6 +528,17 @@ injection. The model therefore gets no capability beyond returning its JSON answ
   10 minutes, blocked users are ignored silently, and at most 10 access requests can be pending at once
   (further `/start`s are declined without notifying the admins).
 
+
+**Network jail.** The sandboxes that need the network (Codex, and the PO-token script that runs YouTube's
+JavaScript) don't share this machine's. Each gets its own network namespace, connected to the internet by
+`slirp4netns`, and a fixed nftables rule set inside that namespace rejects private, link-local and loopback
+destinations and this machine's own addresses: they reach the internet and nothing else, not this machine's
+services (SSH, anything on its LAN address) or the LAN, while DNS goes through slirp. The rules are loaded before
+the program starts, and it has no capabilities to change them. If the jail can't be set up the program
+doesn't run at all. The startup log says "network jail: on" after a check from inside (internet reachable,
+this machine and the router not); if it fails, the admins are told, PO tokens stay off and Codex refuses to
+run, unless `NETJAIL=off` (Codex then shares the network, logged at every start). Known limit: a connection
+to the router's *public* address can loop back into the LAN (NAT hairpin).
 ## Data (`data/`, not in git)
 
 `bot.sqlite3` holds these tables:

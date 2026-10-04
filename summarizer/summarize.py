@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import config, proc
+from . import config, netjail, proc
 
 log = logging.getLogger(__name__)
 
@@ -603,21 +603,22 @@ def _bwrap(job: Path) -> list[str]:
         job: Temp dir with "in" (prompt files, images; read-only) and "out" (answer; writable).
 
     Returns:
-        The bwrap arguments; append the codex command.
+        The command prefix (the network jail, or bwrap on the shared network with NETJAIL=off); append the
+        codex command.
+
+    Raises:
+        SummaryError: The network jail doesn't work here (and NETJAIL isn't off).
     """
-    return [
-        # Own namespaces for everything except the network, which Codex needs to reach OpenAI; die with
-        # the bot so a killed job leaves no orphan.
-        "bwrap", "--unshare-all", "--share-net", "--die-with-parent", "--new-session",
+    args = [
+        # A new session, so Codex can't signal the bot's terminal/process group.
+        "--new-session",
         # System binaries and libraries (node and the codex package live under /usr), read-only.
         "--ro-bind", "/usr", "/usr",
         "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
-        # TLS certificates and name resolution: the minimum to call the API. On Ubuntu /etc/resolv.conf is
-        # a symlink into /run/systemd/resolve, so that is mounted too. -try: not every distro has each.
+        # TLS certificates and name resolution: the minimum to call the API (the jail brings its own
+        # resolv.conf, pointing at slirp's DNS). -try: not every distro has each.
         "--ro-bind", "/etc/ssl", "/etc/ssl",
         "--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates",
-        "--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
-        "--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve",
         "--ro-bind-try", "/etc/hosts", "/etc/hosts",
         "--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
         "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
@@ -631,6 +632,15 @@ def _bwrap(job: Path) -> list[str]:
         "--clearenv", "--setenv", "PATH", "/usr/local/bin:/usr/bin", "--setenv", "HOME", "/tmp",
         "--setenv", "CODEX_HOME", "/codex-home", "--setenv", "LANG", "C.UTF-8",
     ]
+    if not config.NETJAIL:  # the owner's knowing choice: Codex shares this machine's network
+        resolver = ["--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
+                    "--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve"]
+        return ["bwrap", "--unshare-all", "--share-net", "--die-with-parent", *resolver, *args]
+    # Codex reaches OpenAI through the network jail: the internet only, not this machine or the LAN.
+    if not netjail.ready():
+        raise SummaryError(AI_FAILED, detail="the network jail doesn't work (see its startup line); "
+                                             "set NETJAIL=off to run Codex on the shared network")
+    return netjail.run_args(args, [])
 
 
 class CodexConversation(Conversation):

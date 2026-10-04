@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from summarizer import config, summarize
+from summarizer import config, netjail, summarize
 
 from helpers import SUMMARY
 
@@ -68,8 +68,22 @@ def test_codex_runs_sandboxed_and_resumes_by_session_id(codex_home, monkeypatch)
                "youtube", "text", "captions", "en", [])
     conv.add_frames([])
     first, second = calls
-    assert first[0] == "bwrap" and "--clearenv" in first and "--unshare-all" in first
-    assert not any("/home" in a for a in first[first.index("bwrap"):first.index("codex")])
+    assert first[1:3] == ["-I", netjail.__file__] and "--clearenv" in first and "--share-net" not in first
+    jail_args = first[3:first.index("--", 3)]
+    assert not any("/home" in a for a in jail_args) and "/etc/resolv.conf" not in jail_args
     assert first[first.index("codex"):][:2] == ["codex", "exec"] and "-m" in first and "gpt-test" in first
     assert second[second.index("codex"):][:3] == ["codex", "exec", "resume"] and "S-1" in second
     assert "--last" not in second
+
+
+def test_codex_runs_in_the_network_jail_or_not_at_all(monkeypatch, tmp_path):
+    jailed = summarize._bwrap(tmp_path)
+    assert jailed[1:3] == ["-I", netjail.__file__] and jailed[-1] == "--" and "--share-net" not in jailed
+    monkeypatch.setattr(netjail, "_state", {"ready": False})
+    with pytest.raises(summarize.SummaryError) as e:
+        summarize._bwrap(tmp_path)
+    assert "network jail" in e.value.detail
+    monkeypatch.setattr(config, "NETJAIL", False)  # the owner's opt-out: the shared network
+    shared = summarize._bwrap(tmp_path)
+    assert shared[:4] == ["bwrap", "--unshare-all", "--share-net", "--die-with-parent"]
+    assert "/etc/resolv.conf" in shared

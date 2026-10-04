@@ -60,6 +60,9 @@ MAX_QUEUE = int(_env("MAX_QUEUE", "20"))
 # Jobs worked on at the same time. Lookups, downloads and AI calls wait on the network and run fine side by
 # side; the heavy CPU steps (Whisper, OCR, frame sweeps, voice) take turns anyway (summarizer/cpu.py).
 WORKERS = max(1, int(_env("WORKERS", "8")))
+# Sandboxes that need the network (Codex, the PO-token script) run in the network jail (summarizer/netjail.py):
+# the internet only. "off" lets Codex share this machine's network when the jail can't work here (logged).
+NETJAIL = _env("NETJAIL", "on").strip().lower() != "off"
 # YouTube lookups (probe, captions) at the same time: a burst of them gets the server's IP flagged as a bot
 # ("Sign in to confirm you're not a bot"). Downloads from a looked-up video aren't counted.
 YOUTUBE_PARALLEL = max(1, int(_env("YOUTUBE_PARALLEL", "2")))
