@@ -10,7 +10,7 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import Application, ContextTypes
 
 import access
-from summarizer import config, db, media, ocr, pipeline, stats, tts, updates
+from summarizer import config, db, media, netjail, ocr, pipeline, stats, tts, updates
 from tgbot import jobs, state, texts
 
 log = logging.getLogger("bot")  # one logger name for the whole bot, as in the journal
@@ -59,6 +59,24 @@ async def sync_commands(bot, uid: int) -> None:
             await bot.delete_my_commands(scope=scope)  # back to the default (stranger) menu
     except (BadRequest, Forbidden) as e:  # user hasn't opened a chat with the bot
         log.warning("couldn't set commands for %s: %s", uid, e)
+
+
+async def _check_netjail(app: Application) -> None:
+    """Checks once that the network jail works (sandboxes that need the network use it); tells the admins
+    once per problem, remembered across restarts."""
+    why = await asyncio.to_thread(netjail.self_check)
+    if not why:
+        log.info("network jail: on (internet only, no access to this machine or the LAN)")
+        return
+    log.warning("network jail: off (%s)", why)
+    if stats.recall("netjail_problem") == why:
+        return
+    stats.remember("netjail_problem", why)
+    for admin in access.ADMINS:
+        try:
+            await app.bot.send_message(admin, f"⚠️ The network jail for the sandboxes doesn't work: {why}")
+        except TelegramError:
+            pass
 
 
 async def _check_pot(app: Application) -> None:
@@ -118,6 +136,7 @@ async def post_init(app: Application) -> None:
     await asyncio.to_thread(pipeline.cleanup_leftovers)
     if stale := db.fail_stale_requests():
         log.info("marked %d request(s) from before the restart as failed", stale)
+    await _check_netjail(app)
     await _check_pot(app)
     app.bot_data["workers"] = [asyncio.create_task(jobs.worker(app)) for _ in range(config.WORKERS)]
     app.bot_data["update_checker"] = asyncio.create_task(update_checker(app))

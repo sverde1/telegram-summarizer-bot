@@ -90,6 +90,9 @@ def fresh_state(tmp_path, monkeypatch, request):
     # PO tokens off unless a test turns them on (the startup check would run the sandboxed Node).
     monkeypatch.setattr(media, "_pot", {})
     monkeypatch.setattr(media, "check_pot", lambda: "not installed (tests)")
+    from summarizer import netjail
+    monkeypatch.setattr(netjail, "_state", {})  # the jail is off unless a test turns it on
+    monkeypatch.setattr(netjail, "self_check", lambda: "not checked (tests)")
     monkeypatch.setattr(ocr, "_cuda_ok", None)
     monkeypatch.setattr(tts, "_ready", False)  # voice messages off unless a test turns them on
     monkeypatch.setattr(tts, "_cuda_ok", None)
