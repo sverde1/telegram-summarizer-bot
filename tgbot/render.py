@@ -78,7 +78,7 @@ def details(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True) ->
 
 # Longest a model-written field may be. The prompt asks for much less; these only stop a broken or
 # prompt-injected answer from turning into a flood of messages.
-FIELD_LIMITS = {"title": 300, "clickbait_answer": 1000, "summary": 4000}
+FIELD_LIMITS = {"title": 300, "clickbait_answer": 1000, "summary": 4000, "answer": 8000}
 
 
 def _cap(text: str, limit: int) -> str:
@@ -238,3 +238,9 @@ def fmt_eta(sec: float) -> str:
 def ocr_names(langs: str | None) -> str:
     """Names of a Tesseract language string, e.g. "slv+eng" -> "Slovenian, English"."""
     return ocr.names((langs or "").split("+")) or "unknown"
+
+
+def answer(text: str, units_: tuple[str, str]) -> list[str]:
+    """A follow-up answer as Telegram messages: capped (a broken or prompt-injected answer can't become a flood
+    of messages), in the reader's units, escaped and packed into at most a few messages."""
+    return _pack(["💬", *_text(_cap(units.convert(text, *units_), FIELD_LIMITS["answer"]))])

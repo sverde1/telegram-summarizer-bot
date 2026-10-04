@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import shutil
+import time
 from pathlib import Path
 
 from telegram import Update
@@ -312,12 +313,76 @@ async def on_book_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                      job_kind=state.JobKind.DOCUMENT)
 
 
+ASK_WINDOW = 300  # seconds after a 💬 tap in which a plain text (without a link) is the question
+
+
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles plain messages: summarizes the first link in the text or media caption."""
+    """Handles plain messages: a follow-up question (see _question_for), else the first link in the text or
+    media caption is summarized."""
     if not await handlers.guard(update, ctx):
+        return
+    if parent := _question_for(update, ctx):
+        await ask(update, parent, update.message.text.strip())
         return
     text = update.message.text or update.message.caption or ""
     await enqueue(update, find_url(text))
+
+
+def _question_for(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """The summary request a message asks about, if it is a question, else None.
+
+    A question is a text (never a caption or file) that replies to one of the bot's summary, answer or 💬 prompt
+    messages (db.messages: any part of a long summary works, and it survives restarts), or a text without a
+    link sent within ASK_WINDOW of tapping 💬 without replying. Checked here rather than in a handler of its
+    own: Telegram updates go to the first matching handler only, so a separate reply handler would swallow
+    every other reply (a link sent as a reply, say).
+    """
+    msg = update.message
+    if not msg.text:
+        return None
+    if (r := msg.reply_to_message) is not None:
+        if r.from_user is None or r.from_user.id != ctx.bot.id:
+            return None
+        return db.message_request(msg.chat_id, r.message_id)
+    pending = state.asking.get(update.effective_user.id)
+    if pending and time.monotonic() - pending[1] < ASK_WINDOW and not find_url(msg.text):
+        return pending[0]
+    return None
+
+
+async def ask(update: Update, parent_id: int, question: str) -> None:
+    """Queues a follow-up question about a summary, after the checks a question needs.
+
+    Only the summary's owner (or an admin) may ask; the question is capped; one open question per summary;
+    the question limit (admins exempt) and the queue limits apply. Questions don't count toward the daily
+    request limit.
+    """
+    msg, uid = update.message, update.effective_user.id
+    req = db.get_request(parent_id)
+    if req is None or not handlers.owns(uid, req["user_id"]):
+        await msg.reply_text("This isn't available.")
+        return
+    if not db.get_delivered(parent_id):
+        await msg.reply_text(texts.TOO_OLD)
+        return
+    if len(question) > config.ASK_MAX_QUESTION:
+        await msg.reply_text(f"⚠️ Please keep the question under {config.ASK_MAX_QUESTION} characters.")
+        return
+    if any(j.ask_of == parent_id and j.user_id == uid and not j.cancel_reason for j in state.jobs.values()):
+        await msg.reply_text("💬 Still working on your last question about this; ask again when it's answered.")
+        return
+    used, limit, _, frees_in = limits.limit_status(uid, "ask")
+    if limit and used >= limit:
+        await msg.reply_text(f"⏳ You've asked {limit} questions today. You can ask more in about "
+                             f"{render.fmt_until(frees_in or 0)}.")
+        return
+    if refusal := limits.refusal(uid, new_request=False):
+        await msg.reply_text(refusal)
+        return
+    state.asking.pop(uid, None)
+    status = await msg.reply_text(limits.queued_message())
+    await jobs.start_job(uid, msg.chat_id, status.message_id, question, "ask", job_kind=state.JobKind.ASK,
+                         ask_of=parent_id, question=question, reply_to=msg.message_id)
 
 
 def command(**opts):

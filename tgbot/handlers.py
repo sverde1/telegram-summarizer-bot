@@ -6,7 +6,7 @@ import io
 import logging
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import ContextTypes
 
@@ -698,3 +698,32 @@ async def on_md_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await q.answer()
     # A book's text is a sizeable upload; PTB's default 5 s write timeout is too short for it.
     await ctx.bot.send_document(q.message.chat.id, io.BytesIO(data), filename=name, write_timeout=120)
+
+
+ASK_PROMPT = ("💬 Ask anything about this summary, e.g. \"make it longer\" or \"what did they say about "
+              "prices?\"")
+
+
+async def on_ask_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles 💬 Ask (`ask:<summary request id>`): asks for the question.
+
+    The prompt forces a reply (so the question can be traced to its summary, even after a restart) and the
+    user's next plain text counts as the question for a while even if they close the reply bar
+    (state.asking; see intake.on_message).
+    """
+    if not (checked := await button(update)):
+        return
+    q, uid, parts = checked
+    req = db.get_request(int(parts[1])) if len(parts) == 2 and parts[1].isdigit() else None
+    if req is None or not owns(uid, req["user_id"]):
+        await q.answer("This isn't available.")
+        return
+    delivered = db.get_delivered(req["id"])
+    if not delivered or delivered["kind"] == "ask":
+        await q.answer(texts.TOO_OLD, show_alert=True)
+        return
+    await q.answer()
+    prompt = await ctx.bot.send_message(q.message.chat.id, ASK_PROMPT,
+                                        reply_markup=ForceReply(input_field_placeholder="Your question"))
+    db.save_messages(q.message.chat.id, [prompt.message_id], req["id"])
+    state.asking[uid] = (req["id"], time.monotonic())

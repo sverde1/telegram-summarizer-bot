@@ -8,7 +8,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application
 
 import access
-from summarizer import config, db, documents, links, media, memory, pipeline, proc, tts
+from summarizer import config, db, documents, followup, links, media, memory, pipeline, proc, tts
 from tgbot import limits, render, sending, state, texts
 
 
@@ -190,9 +190,20 @@ async def _run_voice(app: Application, job: state.Job, progress: sending.Progres
     return result
 
 
+async def _run_ask(app: Application, job: state.Job, progress: sending.Progress) -> followup.AskResult:
+    """Answers a follow-up question (in a thread: the AI call blocks).
+
+    Raises:
+        pipeline.PipelineError: The summary is too old, or the AI failed.
+    """
+    db.update_request(job.request_id, status="processing")
+    progress(f"💬 {job.question[:60]}\n🧠 Thinking…", None)
+    return await asyncio.to_thread(followup.answer, job.ask_of, job.question, job.user_id, job.backend, job.model)
+
+
 # Each job kind's runner: (app, job, progress) -> its result. Every JobKind must have one (tested).
-RUNNERS = {state.JobKind.VIDEO: _run_video, state.JobKind.MEDIA: _run_media, state.JobKind.DOCUMENT: _run_document,
-           state.JobKind.VOICE: _run_voice}
+RUNNERS = {state.JobKind.VIDEO: _run_video, state.JobKind.MEDIA: _run_media,
+           state.JobKind.DOCUMENT: _run_document, state.JobKind.VOICE: _run_voice, state.JobKind.ASK: _run_ask}
 
 
 async def make_voice(job: state.Job, result: tts.VoiceResult) -> Path:

@@ -102,6 +102,8 @@ def test_every_job_kind_has_a_runner():
     {"job_kind": state.JobKind.DOCUMENT},  # a document job without its upload
     {"job_kind": state.JobKind.MEDIA, "upload_id": 3, "voice_of": 4},
     {"job_kind": state.JobKind.VOICE},
+    {"job_kind": state.JobKind.ASK, "ask_of": 4},  # a question without its text
+    {"ask_of": 4, "question": "why?"},  # a video job carrying a question
 ])
 def test_a_job_must_have_the_fields_of_its_kind(fields):
     with pytest.raises(ValueError):
@@ -113,3 +115,4 @@ def test_jobs_of_each_kind_with_their_fields():
     for kind in (state.JobKind.MEDIA, state.JobKind.DOCUMENT):
         assert state.Job("u", 1, 1, upload_id=3, job_kind=kind).job_kind is kind
     assert state.Job("u", 1, 1, voice_of=4, job_kind=state.JobKind.VOICE).job_kind is state.JobKind.VOICE
+    assert state.Job("why?", 1, 1, ask_of=4, question="why?", job_kind=state.JobKind.ASK).job_kind is state.JobKind.ASK

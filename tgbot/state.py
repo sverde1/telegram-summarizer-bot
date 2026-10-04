@@ -15,6 +15,7 @@ class JobKind(enum.Enum):
     MEDIA = "media"  # a sent recording: voice message, audio or video file, or a shared one (upload_id)
     DOCUMENT = "document"  # a book or document (upload_id, book_mode, chapter)
     VOICE = "voice"  # 🔊: reading a summary aloud (voice_of)
+    ASK = "ask"  # 💬: a follow-up question about a summary (ask_of, question)
 
 
 @dataclass
@@ -54,6 +55,9 @@ class Job:
     chapter: int | None = None  # for "pick": the chosen chapter (None: show the chapter list)
     ocr_ok: bool = False  # the user confirmed OCR of this scanned document
     voice_of: int = 0  # 🔊: the request whose summary to read aloud; 0 for everything else
+    ask_of: int = 0  # 💬: the summary request a question is about; 0 for everything else
+    question: str = ""  # 💬: the question
+    reply_to: int = 0  # 💬: the question's message, which the answer replies to
     started_at: float = 0.0  # when the worker started it (monotonic); the status's elapsed time counts from it
     job_kind: JobKind = JobKind.VIDEO
 
@@ -65,9 +69,11 @@ class Job:
             ValueError: The fields don't fit the kind.
         """
         uploads = self.job_kind in (JobKind.MEDIA, JobKind.DOCUMENT)
-        if bool(self.upload_id) != uploads or bool(self.voice_of) != (self.job_kind is JobKind.VOICE):
+        ask = self.job_kind is JobKind.ASK
+        if (bool(self.upload_id) != uploads or bool(self.voice_of) != (self.job_kind is JobKind.VOICE)
+                or bool(self.ask_of) != ask or bool(self.question) != ask):
             raise ValueError(f"a {self.job_kind.value} job with upload_id={self.upload_id}, "
-                             f"voice_of={self.voice_of}")
+                             f"voice_of={self.voice_of}, ask_of={self.ask_of}")
 
 
 # A single queue drained by a single worker: jobs run one at a time, so Whisper (CPU-heavy) never runs
@@ -86,13 +92,16 @@ delayed: dict[int, asyncio.Task] = {}  # request id -> paced delivery task (see 
 pending_replied: dict[int, float] = {}  # user id -> when they last got the "still waiting for approval" reply
 admin_error_noticed: dict[str, float] = {}  # error type -> when the admins were last told
 block_noticed: dict[str, float] = {}  # platform -> when the admins were last told
+# User id -> (summary request, when) after a 💬 tap: their next plain text is the question even if they closed
+# the reply bar (only for ASK_WINDOW seconds, and never a message with a link).
+asking: dict[int, tuple[int, float]] = {}
 md_sent: dict[int, float] = {}  # request id -> when its 📄 file was last sent (a tap flood mustn't upload a stream)
 
 
 def reset() -> None:
     """Empties all state (tests: each gets a fresh event loop, and an asyncio.Queue binds to the first one)."""
     global queue, jobs, running, user_jobs, waiting_for_memory, delayed, pending_replied, admin_error_noticed
-    global block_noticed, md_sent
+    global block_noticed, md_sent, asking
     queue, jobs, running, user_jobs = asyncio.Queue(), {}, None, collections.Counter()
     waiting_for_memory, delayed, pending_replied, admin_error_noticed, block_noticed = [], {}, {}, {}, {}
-    md_sent = {}
+    md_sent, asking = {}, {}

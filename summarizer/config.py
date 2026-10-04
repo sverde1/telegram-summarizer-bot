@@ -98,6 +98,10 @@ VOICE_CACHE_DAYS = int(_env("VOICE_CACHE_DAYS", "7"))  # how long a made voice m
 TTS_DAILY_LIMIT = int(_env("TTS_DAILY_LIMIT", "20"))
 # Follow-up questions (💬 Ask) per user per 24 h; each resends the transcript, so they aren't free.
 ASK_DAILY_LIMIT = int(_env("ASK_DAILY_LIMIT", "20"))
+# What a question may send to the AI in all (summary, earlier answers, transcript or book text): the size books
+# already use per call on every backend. Longer material is cut, a long book falls back to its summaries.
+ASK_MAX_CHARS = int(_env("ASK_MAX_CHARS", str(BOOK_CHUNK_CHARS)))
+ASK_MAX_QUESTION = int(_env("ASK_MAX_QUESTION", "1000"))  # characters; a question isn't an essay
 # Default units for measurements in summaries (each user can change theirs with /units): metric or imperial,
 # and c or f for temperatures.
 UNIT_SYSTEM = _env("UNIT_SYSTEM", "metric")

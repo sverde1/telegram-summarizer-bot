@@ -6,13 +6,13 @@ import logging
 import re
 import shutil
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import Application
 
 import access
-from summarizer import db, documents, pipeline, tts, units
+from summarizer import db, documents, followup, pipeline, tts, units
 from summarizer.results import JobResult
 from tgbot import menus, render, runners, sending, state
 
@@ -37,6 +37,9 @@ async def deliver(app: Application, job: state.Job, result: JobResult, waited: f
     bot_ = app.bot
     if isinstance(result, tts.VoiceResult):
         await _send_voice(app, job, result)
+        return
+    if isinstance(result, followup.AskResult):
+        await _send_answer(app, job, result)
         return
     if isinstance(result, documents.DocResult):
         reveal = access.is_admin(job.user_id) or db.user_saw_video(job.user_id, "document", result.video_id,
@@ -71,21 +74,40 @@ async def deliver(app: Application, job: state.Job, result: JobResult, waited: f
 
 
 async def _send_chunks(app: Application, job: state.Job, chunks: list[str],
-                       markup: InlineKeyboardMarkup | None, parent_id: int | None = None) -> None:
+                       markup: InlineKeyboardMarkup | None, parent_id: int | None = None,
+                       reply_to: int = 0) -> None:
     """Sends a summary's (or an answer's) messages, the buttons under the last one, and remembers every
     message's id: a reply to any part of it is a question about that summary.
 
     Args:
         parent_id: The summary request replies ask about; this job's own request by default.
+        reply_to: A message the first one replies to (the question); sent anyway if it was deleted.
     """
     ids = []
     for k, chunk in enumerate(chunks, 1):
-        sent = await sending.send_with_retry(lambda chunk=chunk, k=k: app.bot.send_message(
-            job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+        reply = ReplyParameters(reply_to, allow_sending_without_reply=True) if reply_to and k == 1 else None
+        sent = await sending.send_with_retry(lambda chunk=chunk, k=k, reply=reply: app.bot.send_message(
+            job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_parameters=reply,
             reply_markup=markup if k == len(chunks) else None), job)
         if sent is not None:
             ids.append(sent.message_id)
     db.save_messages(job.chat_id, ids, parent_id or job.request_id)
+
+
+def ask_button(parent_id: int) -> InlineKeyboardButton:
+    """The 💬 Ask button for a summary (also under each answer: it asks about the same summary)."""
+    return InlineKeyboardButton("💬 Ask", callback_data=f"ask:{parent_id}")
+
+
+async def _send_answer(app: Application, job: state.Job, result: followup.AskResult) -> None:
+    """Sends an answer as a reply to its question, with 💬 to ask on, and records it for the next questions.
+
+    The answer is stored before it's sent (like a summary), so a quick follow-up already sees it.
+    """
+    db.save_delivered(job.request_id, "ask", result.question, result.answer, parent_id=result.parent_id)
+    chunks = render.answer(result.answer, db.get_user_units(job.user_id))
+    await _send_chunks(app, job, chunks, InlineKeyboardMarkup([[ask_button(result.parent_id)]]),
+                       parent_id=result.parent_id, reply_to=job.reply_to)
 
 
 def transcript_name(result: pipeline.Result) -> str:
@@ -156,7 +178,7 @@ def _with_actions(markup: InlineKeyboardMarkup | None, job: state.Job, result: J
     if tts.available() and lang and spoken.strip():
         db.save_spoken(job.request_id, spoken_title, spoken, *lang)
         buttons.append(InlineKeyboardButton("🔊 Listen", callback_data=f"voice:{job.request_id}"))
-    buttons.append(InlineKeyboardButton("📄 Download", callback_data=f"md:{job.request_id}"))
+    buttons += [ask_button(job.request_id), InlineKeyboardButton("📄 Download", callback_data=f"md:{job.request_id}")]
     rows = list(markup.inline_keyboard) if markup else []
     return InlineKeyboardMarkup(rows + [buttons])
 

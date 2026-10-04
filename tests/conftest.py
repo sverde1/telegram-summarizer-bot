@@ -211,7 +211,8 @@ def _user(uid: int, name: str = "Test", username: str | None = None) -> dict:
 
 
 def msg_update(uid: int, text: str, *, chat_type: str = "private", edited: bool = False,
-               name: str = "Test", username: str | None = None) -> dict:
+               name: str = "Test", username: str | None = None, reply_to: int | None = None,
+               reply_from: int = 999) -> dict:
     """Builds the JSON of an incoming message update (a /command gets its bot_command entity).
 
     Args:
@@ -221,9 +222,17 @@ def msg_update(uid: int, text: str, *, chat_type: str = "private", edited: bool 
         edited: Send it as an edited message instead of a new one.
         name: Sender's first name.
         username: Sender's @username, if any.
+        reply_to: The id of the message this one replies to, if any.
+        reply_from: Who wrote that message: the bot (999, as getMe says) by default.
     """
+    chat = {"id": uid if chat_type == "private" else -100, "type": chat_type}
     message = {"message_id": next(_update_ids), "date": 0, "text": text, "from": _user(uid, name, username),
-               "chat": {"id": uid if chat_type == "private" else -100, "type": chat_type}}
+               "chat": chat}
+    if reply_to is not None:
+        author = ({"id": 999, "is_bot": True, "first_name": "Test bot"} if reply_from == 999
+                  else _user(reply_from))
+        message["reply_to_message"] = {"message_id": reply_to, "date": 0, "chat": chat, "from": author,
+                                       "text": "earlier"}
     if text.startswith("/"):
         message["entities"] = [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
     return {"update_id": next(_update_ids), "edited_message" if edited else "message": message}
