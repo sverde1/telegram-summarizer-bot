@@ -1,7 +1,7 @@
 """The bot's in-memory state: the job queue and every job not yet finished, plus the job type itself.
 
 Module attributes, always used as `state.x` (never imported by name), so a rebinding such as
-`state.running = job` or reset() is seen everywhere.
+`state.queue = asyncio.Queue()` or reset() is seen everywhere.
 """
 import asyncio
 import collections
@@ -19,7 +19,8 @@ class JobKind(enum.Enum):
     ASK = "ask"  # 💬: a follow-up question about a summary (ask_of, question)
 
 
-@dataclass
+# Compared and hashed by identity: jobs go in sets (state.running), and two jobs are never the same job.
+@dataclass(eq=False)
 class Job:
     """One queued request: what to process, where to reply, and on whose behalf.
 
@@ -79,13 +80,12 @@ class Job:
                              f"voice_of={self.voice_of}, ask_of={self.ask_of}")
 
 
-# A single queue drained by a single worker: jobs run one at a time, so Whisper (CPU-heavy) never runs
-# twice in parallel, and two users' LLM conversations can't interleave.
+# The queue, drained by config.WORKERS workers side by side; the heavy CPU steps take turns (summarizer/cpu.py).
 queue: asyncio.Queue[Job] = asyncio.Queue()
-# Every job not yet finished, by request id, so a user's jobs can be found and cancelled. The worker runs one
-# job at a time; `running` is that one (its programs are stopped through its Job.cancel_event).
+# Every job not yet finished, by request id, so a user's jobs can be found and cancelled; `running` are the
+# ones a worker is on now (each stopped through its own Job.cancel_event).
 jobs: dict[int, Job] = {}
-running: Job | None = None
+running: set[Job] = set()
 # Jobs per user, queued or running (see config.MAX_QUEUED_PER_USER). Decremented whenever a job ends,
 # however it ends, so a user is never locked out by a job that's gone.
 user_jobs: collections.Counter = collections.Counter()
@@ -105,6 +105,6 @@ def reset() -> None:
     """Empties all state (tests: each gets a fresh event loop, and an asyncio.Queue binds to the first one)."""
     global queue, jobs, running, user_jobs, waiting_for_memory, delayed, pending_replied, admin_error_noticed
     global block_noticed, md_sent, asking
-    queue, jobs, running, user_jobs = asyncio.Queue(), {}, None, collections.Counter()
+    queue, jobs, running, user_jobs = asyncio.Queue(), {}, set(), collections.Counter()
     waiting_for_memory, delayed, pending_replied, admin_error_noticed, block_noticed = [], {}, {}, {}, {}
     md_sent, asking = {}, {}

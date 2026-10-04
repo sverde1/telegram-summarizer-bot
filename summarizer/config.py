@@ -57,6 +57,9 @@ MAX_DURATION_MIN = int(_env("MAX_DURATION_MIN", "180"))
 # They keep one account (careless or borrowed) from using up the LLM limits or blocking everyone for hours.
 MAX_QUEUED_PER_USER = int(_env("MAX_QUEUED_PER_USER", "3"))  # queued + running
 MAX_QUEUE = int(_env("MAX_QUEUE", "20"))
+# Jobs worked on at the same time. Lookups, downloads and AI calls wait on the network and run fine side by
+# side; the heavy CPU steps (Whisper, OCR, frame sweeps, voice) take turns anyway (summarizer/cpu.py).
+WORKERS = max(1, int(_env("WORKERS", "8")))
 AGAIN_COOLDOWN_MIN = int(_env("AGAIN_COOLDOWN_MIN", "10"))
 # Links a non-admin may send per rolling 24 hours (0 = no limit). Only the starting value: once an admin
 # changes it with /limit, the value stored in the database wins.

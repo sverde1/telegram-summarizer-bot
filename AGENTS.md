@@ -18,7 +18,7 @@ with no GPU.
 | Path | Role |
 |---|---|
 | `bot.py` | Entry point (`python bot.py`): logging, handler registration (`add_handlers`, order matters), `main`. |
-| `tgbot/state.py` | `Job`, `JobKind`, and the in-memory state: the queue, unfinished jobs, the running one (module attributes, `reset()`). |
+| `tgbot/state.py` | `Job`, `JobKind`, and the in-memory state: the queue, unfinished jobs, the running ones (module attributes, `reset()`). |
 | `tgbot/jobs.py` | The queue's life cycle: `start_job`, the worker, cancelling, set aside for memory, finishing (`_finish`), paced delivery (`_deliver_later`), failures and admin notices. |
 | `tgbot/runners.py` | One runner per job kind (`RUNNERS`): gets the input (Telegram or share-link download), runs the blocking work in a thread. |
 | `tgbot/delivery.py` | Sending a finished result: summaries, transcript files, documents, voice messages, the 🔊 button. |
@@ -28,6 +28,7 @@ with no GPU.
 | `tgbot/render.py`, `sending.py`, `menus.py`, `limits.py`, `prefs.py`, `texts.py` | Message rendering and formats; the status message (`Progress`) and retried sends; shared keyboards; limits as users see them; a user's effective AI choice; shared user-facing texts. |
 | `summarizer/followup.py` | 💬 Ask: the material for a question (transcript, book text or its summaries, within `ASK_MAX_CHARS`), the AI call, `AskResult`. |
 | `tgbot/markdown.py` | 📄 Download: the Markdown file of a delivered summary (summary + transcript; a book's full text). |
+| `summarizer/cpu.py` | The CPU slot: Whisper, OCR, frame sweeps and Kokoro take turns (FIFO, cancellable); waits are tracked and left out of timings. |
 | `summarizer/results.py` | `JobResult`, the base of every result (cache and pacing fields, `head()`, `work_seconds()`, `llm_label()`). |
 | `access.py` | Who may use the bot (admins from `.env`, others from the `users` table). |
 | `summarizer/pipeline.py` | URL in, `Result` out: cache lookup, transcript, frames, LLM turns, timings. Blocking; runs in a worker thread. |
@@ -40,7 +41,7 @@ with no GPU.
 | `summarizer/stats.py` | Measured speeds and small remembered values (`data/stats.json`). |
 | `summarizer/updates.py` | Checks for newer Codex / Claude Code releases. |
 | `summarizer/config.py` | Settings from `.env`; puts the venv's `bin` on `PATH`; `clean_env()` for child processes; `umask 077`. |
-| `summarizer/proc.py` | The only way to run external programs: own process group, killed on timeout or cancel (`current_job_cancel`), secrets stripped from the environment. |
+| `summarizer/proc.py` | The only way to run external programs: own process group, killed on timeout or on its job's cancel (`job_cancel`, a context variable; `pool()` for thread pools), secrets stripped from the environment. |
 | `summarizer/memory.py` | Whisper memory estimate and the RAM checks behind the memory guard. |
 | `summarizer/sandbox.py` | bwrap command for code that touches untrusted files: no network, no repo, no environment. |
 | `summarizer/docparse.py` | Reads PDF/EPUB/DOCX/TXT into pages + chapters. Runs **inside** the sandbox; imports no bot module. |
@@ -96,6 +97,11 @@ How the tests are isolated (`tests/conftest.py`):
   across chapters: APIs would resend everything, Claude Code would reuse a session id).
 - Continue Codex conversations by the exact session id from the first turn, never `--last`; jobs
   from different users must not mix.
+- Jobs run side by side (`config.WORKERS` workers). Heavy CPU steps go through `cpu.slot` and time
+  themselves without the wait (`cpu.waited`); a job is cancelled through its own event (`proc.job_cancel`,
+  `Job.cancel_event`), never a global; thread pools inside a job come from `proc.pool` (plain pool threads
+  never see the cancel; `tests/test_layout.py` checks); every job has its own work directory; one job at a
+  time per video or document (`pipeline.one_at_a_time`).
 - Run external programs only through `proc.run` (never `subprocess` directly): it kills the whole
   process tree on timeout/cancel and strips the bot's secrets from the child's environment.
 - Never swallow `proc.ProcCancelled` (a cancelled job must stop) or `media.Blocked` (a platform ban must

@@ -44,7 +44,7 @@ async def test_every_waiting_user_is_told_and_nothing_is_left(app, telegram, mon
     parked.waiting_since, parked.memory_needed = time.monotonic(), 10 ** 15  # set aside, never fits
     state.waiting_for_memory.append(parked)
     state.delayed[replaying.request_id] = asyncio.create_task(asyncio.sleep(60))
-    app.bot_data["worker"] = asyncio.create_task(jobs.worker(app))
+    app.bot_data["workers"] = [asyncio.create_task(jobs.worker(app))]
     await asyncio.wait_for(started.wait(), 5)
 
     await asyncio.wait_for(lifecycle.post_stop(app), 10)
@@ -53,14 +53,14 @@ async def test_every_waiting_user_is_told_and_nothing_is_left(app, telegram, mon
     assert told == set(USERS)
     assert {r["status"] for uid in USERS for r in db.recent_requests(uid)} == {"cancelled"}
     assert state.jobs == {} and state.user_jobs == {} and state.delayed == {} and state.waiting_for_memory == []
-    await asyncio.gather(app.bot_data["worker"], return_exceptions=True)  # let the cancellation finish
-    assert app.bot_data["worker"].cancelled()
+    await asyncio.gather(*app.bot_data["workers"], return_exceptions=True)  # let the cancellation finish
+    assert app.bot_data["workers"][0].cancelled()
 
 
 async def test_a_job_that_cannot_stop_in_time_is_reported_anyway(app, telegram, monkeypatch):
     monkeypatch.setattr(lifecycle, "SHUTDOWN_WAIT", 0.3)
     job = _job(60, 1)
-    monkeypatch.setattr(state, "running", job)  # e.g. stuck in an API call that can't be interrupted
+    monkeypatch.setattr(state, "running", {job})  # e.g. stuck in an API call that can't be interrupted
     await lifecycle.post_stop(app)
     assert telegram.sent("editMessageText")[-1]["text"] == texts.STOPPED
     assert db.recent_requests(60)[0]["status"] == "cancelled" and state.jobs == {}

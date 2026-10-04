@@ -10,7 +10,7 @@ from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, ContextTypes
 
 import access
-from summarizer import db, ocr, pipeline, stats, tts, updates
+from summarizer import config, db, ocr, pipeline, stats, tts, updates
 from tgbot import jobs, state, texts
 
 log = logging.getLogger("bot")  # one logger name for the whole bot, as in the journal
@@ -97,7 +97,7 @@ async def post_init(app: Application) -> None:
     await asyncio.to_thread(pipeline.cleanup_leftovers)
     if stale := db.fail_stale_requests():
         log.info("marked %d request(s) from before the restart as failed", stale)
-    app.bot_data["worker"] = asyncio.create_task(jobs.worker(app))
+    app.bot_data["workers"] = [asyncio.create_task(jobs.worker(app)) for _ in range(config.WORKERS)]
     app.bot_data["update_checker"] = asyncio.create_task(update_checker(app))
     log.info("bot ready; admins: %s, allowed users: %d", sorted(access.ADMINS) or "NONE (setup mode)",
              len(access.all_users()["allowed"]))
@@ -147,26 +147,27 @@ async def post_stop(app: Application) -> None:
 
     PTB calls this after polling stopped but before the bot's connection closes, so messages can still be
     sent. Every unfinished job is cancelled with STOPPED (queued, waiting for memory or replaying ones are
-    reported at once; the running one has its programs killed and the worker reports it). The running job
-    gets SHUTDOWN_WAIT seconds to do so (an API call or a model load can't be interrupted sooner); if it
-    doesn't make it, it's reported from here. Only then are the worker and update checker cancelled (without
-    that, the worker blocked in `queue.get()` was destroyed while pending: "Event loop is closed" errors).
+    reported at once; running ones have their programs killed and their workers report them). The running
+    jobs get SHUTDOWN_WAIT seconds to do so (an API call or a model load can't be interrupted sooner); any
+    that don't make it are reported from here. Only then are the workers and update checker cancelled (without
+    that, a worker blocked in `queue.get()` was destroyed while pending: "Event loop is closed" errors).
 
     Args:
         app: The application being stopped.
     """
-    running = state.running
+    running = set(state.running)
     for job in list(state.jobs.values()):
         await jobs.cancel_job(app, job, texts.STOPPED)
     deadline = time.monotonic() + SHUTDOWN_WAIT
-    while running is not None and state.running is running and time.monotonic() < deadline:
+    while running & state.running and time.monotonic() < deadline:
         await asyncio.sleep(0.2)
-    if running is not None and running.request_id in state.jobs:  # the worker didn't get to report it in time
-        jobs.end_job(running)
-        await jobs.report_cancel(app, running)
-    for name in ("worker", "update_checker", "tts_setup"):
-        if task := app.bot_data.get(name):
-            task.cancel()
+    for job in running:
+        if job.request_id in state.jobs:  # its worker didn't get to report it in time
+            jobs.end_job(job)
+            await jobs.report_cancel(app, job)
+    tasks = [*app.bot_data.get("workers", []), app.bot_data.get("update_checker"), app.bot_data.get("tts_setup")]
+    for task in filter(None, tasks):
+        task.cancel()
 
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:

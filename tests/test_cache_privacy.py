@@ -224,7 +224,7 @@ async def test_shutdown_during_a_hold_tells_the_user(app, telegram, monkeypatch)
     access.set_state(60, "allowed")
     monkeypatch.setattr(pipeline, "run", lambda url, *a, **k: _held(url, seconds=30))
     await state.queue.put(_job(60))
-    app.bot_data["worker"] = asyncio.create_task(jobs.worker(app))
+    app.bot_data["workers"] = [asyncio.create_task(jobs.worker(app))]
     for _ in range(200):
         if state.delayed:
             break

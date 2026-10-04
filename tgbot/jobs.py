@@ -43,7 +43,7 @@ async def cancel_job(app: Application, job: state.Job, reason: str) -> bool:
         return False
     job.cancel_reason = reason
     job.cancel_event.set()  # stops its programs if it's running (proc.job_cancel)
-    if job is state.running:
+    if job in state.running:
         return True
     task = state.delayed.pop(job.request_id, None)
     if task:
@@ -222,7 +222,8 @@ async def worker(app: Application) -> None:
             log.exception("worker: job %s failed", job.request_id if job else "(selecting the next job)")
             await asyncio.sleep(1)  # don't spin if the failure repeats (e.g. the database is locked)
         finally:
-            state.running = None
+            if job is not None:
+                state.running.discard(job)
             if job is not None and not parked:
                 end_job(job)
             if from_queue:
@@ -242,7 +243,7 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: state
     """
     waited = time.monotonic() - job.queued_at
     job.started_at = time.monotonic()
-    state.running = job
+    state.running.add(job)
     try:
         progress = sending.Progress(app, loop, job)
         try:

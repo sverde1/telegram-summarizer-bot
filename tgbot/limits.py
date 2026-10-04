@@ -83,13 +83,15 @@ def queued_message() -> str:
     """The first reply to a link: "working" if it starts now, else an estimated wait.
 
     The wait is shown instead of a queue position: a position would tell users how busy the others are.
-    Jobs ahead are the queued ones plus the running one; jobs waiting for memory or replaying a cached
-    answer don't hold the queue up.
+    It starts right away while a worker is free. Otherwise the jobs ahead (queued, plus the running ones beyond
+    the other workers) are shared by config.WORKERS workers; jobs waiting for memory or replaying a cached
+    answer don't hold a worker.
     """
-    ahead = state.queue.qsize() + (1 if state.running is not None else 0)
-    if not ahead:
+    queued, running = state.queue.qsize(), len(state.running)
+    if not queued and running < config.WORKERS:
         return "⏳ Got it, working…"
-    wait = ahead * stats.get("job", JOB_SECONDS_DEFAULT)
+    ahead = queued + running - config.WORKERS + 1
+    wait = max(1, ahead) * stats.get("job", JOB_SECONDS_DEFAULT) / config.WORKERS
     return f"⏳ Got it, you're in the queue. Estimated wait: about {render.fmt_eta(wait)}."
 
 

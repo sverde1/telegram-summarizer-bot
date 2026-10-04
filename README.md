@@ -246,10 +246,11 @@ The database migrates itself on start.
 | `WHISPER_COMPUTE_TYPE` | `int8` | `float16` on a GPU. |
 | `WHISPER_CPU_THREADS` | `0` (= 4 threads) | CPU threads for Whisper; raise it on CPUs with more cores. |
 | `MAX_DURATION_MIN` | `180` | Longer videos are refused. |
-| `WHISPER_RAM_FRACTION` | `0.5` | Share of RAM Whisper may use. A video that doesn't fit right now waits while other videos go first; one that could never fit is refused. |
+| `WHISPER_RAM_FRACTION` | `0.5` | Share of RAM Whisper may use (checked when a transcription gets its turn; one runs at a time). A video that doesn't fit right now waits while other videos go first; one that could never fit is refused. |
 | `WHISPER_RAM_WAIT_MIN` | `60` | How long such a video waits for memory (the user can stop waiting with a button). |
 | `MAX_QUEUED_PER_USER` | `3` | Videos one user may have queued or running at once (admins: no limit). |
 | `MAX_QUEUE` | `20` | Total videos in the queue; new links are refused beyond that (admins excepted). |
+| `WORKERS` | `8` | Jobs worked on at the same time. Lookups, downloads and AI calls run side by side; Whisper, OCR, frame sweeps and voice messages take turns on the CPU. |
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |
 | `MAX_DOC_PAGES` | `2000` | Most pages read from an uploaded document (EPUB/DOCX/TXT count ~2000 characters as a page). |
 | `MAX_DOC_CHARS` | `3000000` | Most characters read from an uploaded document. |
@@ -449,8 +450,18 @@ Every summary (videos, recordings, books, chapters) also has these buttons:
    soon as it exists, and a failed call is retried once before the job fails.
 6. **Reply:** Title / Author / Summary, or one block per chapter.
 
-Jobs run one at a time from a queue; the status message shows an estimated wait while queued (never the position, which would
-reveal how busy others are), then each stage and an ETA
+Up to `WORKERS` jobs (8) run side by side, so a captioned video, a cached summary, a 💬 question or a book's
+summary never waits behind someone's hour-long transcription. Only the CPU-heavy steps take turns, first
+come first served: Whisper, OCR, frame sweeps and Kokoro each use every core (and Whisper a lot of memory).
+A job reaching one while another runs shows "⏳ Waiting for a turn on the transcription engine…" with a
+rough wait; time spent waiting isn't counted as work in footers or speed estimates. While transcribing,
+the status shows Whisper's progress in % and an ETA from this run's own speed. Two jobs for the same video
+or document never run at once: the second waits and then reuses the first one's work. A transcription that
+doesn't fit in memory yet waits aside and retries; it may alternate between waiting for memory and waiting
+for its turn.
+
+When all workers are busy, the status message shows an estimated wait (never the position, which would
+reveal how busy others are); then each stage and an ETA
 learned from this machine's measured speeds. Every external program runs in its own process group, so a
 timeout, a cancelled job or a removed user stops it at once.
 
