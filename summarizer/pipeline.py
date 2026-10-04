@@ -3,6 +3,7 @@
 `progress(text, eta)` is called at every stage: `text` is the full status to show, `eta` the estimated
 seconds until the summary is ready (None when unknown).
 """
+import contextlib
 import logging
 import re
 import shutil
@@ -14,7 +15,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from . import config, db, frames, media, memory, proc, stats, summarize, transcribe
+from . import config, cpu, db, frames, media, memory, proc, stats, summarize, transcribe
 from .results import JobResult
 from .urls import Video, classify
 
@@ -406,6 +407,7 @@ def _run(video, progress: Callable[..., None], *, use_cache: bool, transcript_on
     backend = backend or config.LLM_BACKEND
     model = model or summarize.default_model(backend)  # the cache key; a pinned model id when possible
     t0 = time.time()
+    cpu.track()  # waits for the CPU slot are left out of this job's timings
 
     if request_id:
         db.update_request(request_id, platform=video.platform, video_id=video.video_id, status="processing")
@@ -493,7 +495,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             label: Step name shown to the user, e.g. "lookup" or "Whisper".
             since: time.monotonic() value when the step started.
         """
-        timings.append((label, time.monotonic() - since))
+        timings.append((label, time.monotonic() - since - cpu.waited(since)))  # waiting for a turn isn't work
 
     is_file = file_meta is not None
     owns_workdir = workdir is None
@@ -656,7 +658,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         finally:
             conv.close()  # deletes the CLI session files; they're only needed for the follow-up turn
         # The saved timings are the real work only: a pause shown to one user isn't part of the video's cost.
-        total = time.time() - t0
+        total = time.time() - t0 - cpu.waited()
         summary["_stats"] = {"steps": list(timings), "total": total, "llm": llm,
                              "backend": backend, "model": model or conv.model}
         # Keyed by backend + model so users on different models don't overwrite each other's summaries.
@@ -746,7 +748,9 @@ def _frames(video, meta, cues, moments: list[dict], workdir, st: Status, notes, 
         vid = media.download_video(video, workdir)
         # Phrase matches ("this book", "as you can see") back up the LLM's choice of moments.
         moments_ = times[:frames.MAX_MOMENTS_EACH] + frames.regex_moments(cues)[:frames.MAX_MOMENTS_EACH]
-        images = frames.extract(vid, dur, moments_, workdir, sweep=sweep, sandboxed=video.platform == "file")
+        # A sweep decodes the whole video on every core, so it takes its turn; a few single grabs don't.
+        with cpu.slot(st.show, "video", None) if sweep else contextlib.nullcontext():
+            images = frames.extract(vid, dur, moments_, workdir, sweep=sweep, sandboxed=video.platform == "file")
         vid.unlink(missing_ok=True)
     except media.Blocked:
         raise
@@ -800,10 +804,14 @@ def _whisper(video, meta, workdir, st: Status, notes, why: str, rest: float) -> 
         notes.append("downloaded file has no audio track")
         return None
     stage = f"🗣 {why} → transcribing {fmt_duration(dur)} of audio with {whisper}…"
-    estimate = transcribe.estimate(dur) + rest
-    st.show(stage, estimate)
-    cues, lang, prob = transcribe.transcribe(str(audio), workdir if video.platform == "file" else None,
-                                             whisper_progress(st, stage, estimate, rest))
+    with cpu.slot(st.show, "transcription", transcribe.estimate(dur)):
+        # Checked again now that it's this job's turn: no other transcription runs, so the guard is exact.
+        if not memory.fits_now(needed):
+            raise memory.NeedsMemory(needed, dur)  # the slot is released; the worker parks the job
+        estimate = transcribe.estimate(dur) + rest
+        st.show(stage, estimate)
+        cues, lang, prob = transcribe.transcribe(str(audio), workdir if video.platform == "file" else None,
+                                                 whisper_progress(st, stage, estimate, rest))
     if not audio.name.startswith("vid."):  # a TikTok video file stays for frames (deleted with the workdir)
         audio.unlink(missing_ok=True)
     log.info("whisper: %d segments, lang=%s p=%.2f", len(cues), lang, prob)

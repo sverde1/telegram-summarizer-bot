@@ -20,7 +20,7 @@ from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, wait
 from pathlib import Path
 
-from . import config, db, fetch, proc, sandbox, stats
+from . import config, cpu, db, fetch, proc, sandbox, stats
 
 log = logging.getLogger(__name__)
 
@@ -296,6 +296,13 @@ def run(pdf: Path, sha256: str, pages: list[int], langs: str, workdir: Path,
     Raises:
         proc.ProcCancelled: The job was cancelled (finished batches stay stored).
     """
+    with cpu.slot(status, "text recognition", estimate(len(pages))):
+        _run_batches(pdf, sha256, pages, langs, workdir, status)
+
+
+def _run_batches(pdf: Path, sha256: str, pages: list[int], langs: str, workdir: Path,
+                 status: Callable[[str, float | None], None]) -> None:
+    """ocr.run's work, once the job holds the CPU slot (so the measured speed has no waiting in it)."""
     import time
     batches = [pages[i:i + BATCH] for i in range(0, len(pages), BATCH)]
     done, started = 0, time.monotonic()

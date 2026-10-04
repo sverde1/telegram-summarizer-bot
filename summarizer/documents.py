@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import books, config, db, docparse, ocr, pipeline, proc, sandbox, summarize
+from . import books, config, cpu, db, docparse, ocr, pipeline, proc, sandbox, summarize
 from .results import JobResult
 
 log = logging.getLogger(__name__)
@@ -200,7 +200,7 @@ def _ocr(digest: str, doc: dict, path: Path | None, workdir: Path, st: "pipeline
         db.update_request(request_id, ocr=1)  # counts toward the OCR limit from the moment it starts
         t = time.monotonic()
         ocr.run(path, digest, need, doc["language"], workdir, st.show)
-        steps.append(("OCR", time.monotonic() - t))
+        steps.append(("OCR", time.monotonic() - t - cpu.waited(t)))  # waiting for a turn isn't work
     pages = db.get_pages(digest)
     ordered = [pages[i] for i in sorted(pages)]
     _check_text(ordered)
@@ -238,6 +238,7 @@ def run(upload: dict, mode: str, chapter: int | None, path: Path | None, workdir
         proc.ProcCancelled: The job was cancelled.
     """
     t0 = time.time()
+    cpu.track()  # waits for the CPU slot (OCR) are left out of this job's timings
     backend = backend or config.LLM_BACKEND
     model = model or summarize.default_model(backend)
     st = pipeline.Status(progress)
@@ -313,7 +314,7 @@ def run(upload: dict, mode: str, chapter: int | None, path: Path | None, workdir
             raise DocumentError(str(e), e.detail)
         if b.steps:
             steps.append(("summary", sum(sec for _, sec in b.steps)))
-        result.steps, result.llm, result.total = steps, b.llm, time.time() - t0 + pause
+        result.steps, result.llm, result.total = steps, b.llm, time.time() - t0 - cpu.waited() + pause
         if pause:
             result.hold = [(st.text("📑 Listing the chapters…" if result.kind == "pick"
                                     else f"🧠 Summarizing with {b.llm}…"), pause)]

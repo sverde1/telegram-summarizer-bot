@@ -2,13 +2,14 @@
 import asyncio
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application
 
 import access
-from summarizer import config, db, documents, followup, links, media, memory, pipeline, proc, tts
+from summarizer import config, cpu, db, documents, followup, links, media, memory, pipeline, proc, tts
 from tgbot import limits, render, sending, state, texts
 
 
@@ -186,7 +187,7 @@ async def _run_voice(app: Application, job: state.Job, progress: sending.Progres
             result.hold = [(status, min(estimate * pipeline.REPLAY_SHARE, pipeline.REPLAY_MAX))]
         return result
     progress(status, estimate)
-    result.ogg = await make_voice(job, result)
+    result.ogg = await make_voice(job, result, progress)
     return result
 
 
@@ -206,16 +207,29 @@ RUNNERS = {state.JobKind.VIDEO: _run_video, state.JobKind.MEDIA: _run_media,
            state.JobKind.DOCUMENT: _run_document, state.JobKind.VOICE: _run_voice, state.JobKind.ASK: _run_ask}
 
 
-async def make_voice(job: state.Job, result: tts.VoiceResult) -> Path:
-    """Runs the speech in the sandbox (off the event loop); returns the .ogg in the job's work folder."""
+async def make_voice(job: state.Job, result: tts.VoiceResult,
+                     status: Callable[[str, float | None], None] | None = None) -> Path:
+    """Runs the speech in the sandbox (off the event loop, in its turn on the CPU); returns the .ogg in the job's
+    work folder.
+
+    Args:
+        status: Callback (text, eta) for the job's status while it waits for its turn.
+    """
     workdir = config.DATA_DIR / "work" / f"voice_{job.request_id}"
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True)
     estimate = tts.estimate(len(result.text))
-    started = time.monotonic()
+
+    def speak() -> tuple[Path, float]:
+        """Speaks in this job's turn on the CPU; returns the file and the seconds the speech itself took."""
+        with cpu.slot(status, "voice", estimate):
+            started = time.monotonic()
+            out = tts.synthesize(tts.split(result.text), workdir, voice=result.voice, lang=result.lang,
+                                 speed=config.TTS_SPEED, timeout=estimate * 3 + 120)
+            return out, time.monotonic() - started
+
     try:
-        ogg = await asyncio.to_thread(tts.synthesize, tts.split(result.text), workdir, voice=result.voice,
-                                      lang=result.lang, speed=config.TTS_SPEED, timeout=estimate * 3 + 120)
+        ogg, took = await asyncio.to_thread(speak)
     except proc.ProcCancelled:  # a ProcError, so a RuntimeError too: must stay a cancel
         shutil.rmtree(workdir, ignore_errors=True)
         raise
@@ -225,5 +239,5 @@ async def make_voice(job: state.Job, result: tts.VoiceResult) -> Path:
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
-    tts.record_speed(len(result.text), time.monotonic() - started)
+    tts.record_speed(len(result.text), took)
     return ogg
