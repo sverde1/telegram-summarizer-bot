@@ -156,8 +156,7 @@ def _with_actions(markup: InlineKeyboardMarkup | None, job: state.Job, result: J
     if tts.available() and lang and spoken.strip():
         db.save_spoken(job.request_id, spoken_title, spoken, *lang)
         buttons.append(InlineKeyboardButton("🔊 Listen", callback_data=f"voice:{job.request_id}"))
-    if not buttons:
-        return markup
+    buttons.append(InlineKeyboardButton("📄 Download", callback_data=f"md:{job.request_id}"))
     rows = list(markup.inline_keyboard) if markup else []
     return InlineKeyboardMarkup(rows + [buttons])
 

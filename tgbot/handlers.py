@@ -2,6 +2,7 @@
 cancel, OCR approval and 🔊.
 """
 import asyncio
+import io
 import logging
 import time
 
@@ -11,7 +12,7 @@ from telegram.ext import ContextTypes
 
 import access
 from summarizer import config, db, ocr, summarize, tts
-from tgbot import jobs, lifecycle, limits, menus, prefs, render, state, texts
+from tgbot import jobs, lifecycle, limits, markdown, menus, prefs, render, state, texts
 
 log = logging.getLogger("bot")  # one logger name for the whole bot, as in the journal
 
@@ -664,3 +665,36 @@ async def on_voice_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     job = await jobs.start_job(uid, q.message.chat.id, status.message_id, req["url"], "voice", voice_of=req["id"],
                            job_kind=state.JobKind.VOICE)
     db.update_request(job.request_id, platform="voice", video_id=key)  # what db.user_saw_video looks for
+
+
+MD_EVERY = 10  # seconds between 📄 files of the same summary
+
+
+async def on_md_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles 📄 Download (`md:<request id>`): sends the summary as a Markdown file, right away.
+
+    No AI and no queue, so no limit; only one file per summary every MD_EVERY seconds. The owner of the
+    summary (or an admin) only, like every button.
+    """
+    if not (checked := await button(update)):
+        return
+    q, uid, parts = checked
+    req = db.get_request(int(parts[1])) if len(parts) == 2 and parts[1].isdigit() else None
+    if req is None or not owns(uid, req["user_id"]):
+        await q.answer("This isn't available.")
+        return
+    if time.monotonic() - state.md_sent.get(req["id"], -MD_EVERY) < MD_EVERY:
+        await q.answer("Already sent.")
+        return
+    state.md_sent[req["id"]] = time.monotonic()
+    built = await asyncio.to_thread(markdown.build, req["id"], db.get_user_units(uid))
+    if built is None:
+        await q.answer(texts.TOO_OLD, show_alert=True)
+        return
+    name, data = built
+    if len(data) > markdown.MAX_BYTES:
+        await q.answer("⚠️ Too large to send as a file.", show_alert=True)
+        return
+    await q.answer()
+    # A book's text is a sizeable upload; PTB's default 5 s write timeout is too short for it.
+    await ctx.bot.send_document(q.message.chat.id, io.BytesIO(data), filename=name, write_timeout=120)

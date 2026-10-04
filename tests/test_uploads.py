@@ -119,7 +119,7 @@ async def test_single_chapter_document_gets_no_chapter_button(app, telegram, tmp
     up = await _upload(app, telegram, ANA, tmp_path / "memo.txt")
     await send(app, callback_update(ANA, f"book:{up}:whole"))
     await _work(app)
-    assert telegram.sent("sendMessage")[-1].get("reply_markup") is None
+    assert f"book:{up}:" not in str(telegram.sent("sendMessage")[-1].get("reply_markup"))  # only 📄
 
 
 async def test_by_chapter_menu_and_short_mode(app, telegram, tmp_path):

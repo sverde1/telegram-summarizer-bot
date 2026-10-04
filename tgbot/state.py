@@ -86,11 +86,13 @@ delayed: dict[int, asyncio.Task] = {}  # request id -> paced delivery task (see 
 pending_replied: dict[int, float] = {}  # user id -> when they last got the "still waiting for approval" reply
 admin_error_noticed: dict[str, float] = {}  # error type -> when the admins were last told
 block_noticed: dict[str, float] = {}  # platform -> when the admins were last told
+md_sent: dict[int, float] = {}  # request id -> when its 📄 file was last sent (a tap flood mustn't upload a stream)
 
 
 def reset() -> None:
     """Empties all state (tests: each gets a fresh event loop, and an asyncio.Queue binds to the first one)."""
     global queue, jobs, running, user_jobs, waiting_for_memory, delayed, pending_replied, admin_error_noticed
-    global block_noticed
+    global block_noticed, md_sent
     queue, jobs, running, user_jobs = asyncio.Queue(), {}, None, collections.Counter()
     waiting_for_memory, delayed, pending_replied, admin_error_noticed, block_noticed = [], {}, {}, {}, {}
+    md_sent = {}

@@ -41,6 +41,7 @@ def add_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(handlers.on_cancel_button, pattern=r"^cancel:"))
     app.add_handler(CallbackQueryHandler(intake.on_book_button, pattern=r"^book:"))
     app.add_handler(CallbackQueryHandler(handlers.on_voice_button, pattern=r"^voice:"))
+    app.add_handler(CallbackQueryHandler(handlers.on_md_button, pattern=r"^md:"))
     app.add_handler(CallbackQueryHandler(handlers.on_units_button, pattern=r"^units:"))
     app.add_handler(CallbackQueryHandler(handlers.on_ocr_button, pattern=r"^ocr:"))
     app.add_handler(CallbackQueryHandler(handlers.on_ocr_admin_button, pattern=r"^ocradm:"))

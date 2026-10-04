@@ -46,6 +46,7 @@ UNREADABLE_MEDIA = "⚠️ I couldn't read this file as audio or video."
 CANCELLED = "✖️ Cancelled. You can send the link again any time."
 
 
+TOO_OLD = "This summary is too old for that; ask for it again."
 VOICE_TOO_OLD = "This summary is too old to read aloud; ask for it again."
 
 
