@@ -2,6 +2,7 @@
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -111,7 +112,9 @@ def _decode(path: str, sandbox_dir: Path | None = None) -> np.ndarray:
     return np.frombuffer(p.stdout, dtype=np.float32)
 
 
-def transcribe(audio_path: str, sandbox_dir: Path | None = None) -> tuple[list[tuple[float, str]], str, float]:
+def transcribe(audio_path: str, sandbox_dir: Path | None = None,
+               on_progress: Callable[[float, float], None] | None = None
+               ) -> tuple[list[tuple[float, str]], str, float]:
     """Transcribes an audio file, detecting its language.
 
     Language is always auto-detected: forcing it (or using an English-only *.en model) on
@@ -121,6 +124,7 @@ def transcribe(audio_path: str, sandbox_dir: Path | None = None) -> tuple[list[t
     Args:
         audio_path: The audio file.
         sandbox_dir: For a file a user sent: decode it in the sandbox (see _decode).
+        on_progress: Called after each segment with (seconds of audio done, seconds in all), for a percentage.
 
     Returns:
         ([(start_seconds, text)], language code, language probability). The list is empty when no
@@ -136,11 +140,13 @@ def transcribe(audio_path: str, sandbox_dir: Path | None = None) -> tuple[list[t
         # The voice-activity filter skips silence and music, where Whisper tends to hallucinate text.
         segments, info = model.transcribe(audio, language=None, vad_filter=True)
         cues = []
+        audio_sec = len(audio) / 16000
         for s in segments:  # the generator transcribes as it's consumed: a cancel stops it between segments
             proc.check_cancelled()
             if s.text.strip():
                 cues.append((s.start, s.text.strip()))
-        audio_sec = len(audio) / 16000
+            if on_progress:
+                on_progress(min(s.end, audio_sec), audio_sec)
         # Very short clips are dominated by fixed overhead and would skew the realtime factor.
         if audio_sec > 5:
             stats.record(speed_key(), (time.monotonic() - t0) / audio_sec)

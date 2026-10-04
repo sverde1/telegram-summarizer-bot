@@ -760,14 +760,54 @@ def _whisper(video, meta, workdir, st: Status, notes, why: str, rest: float) -> 
     if not has_audio:
         notes.append("downloaded file has no audio track")
         return None
-    st.show(f"🗣 {why} → transcribing {fmt_duration(dur)} of audio with {whisper}…",
-            transcribe.estimate(dur) + rest)
-    cues, lang, prob = transcribe.transcribe(str(audio), workdir if video.platform == "file" else None)
+    stage = f"🗣 {why} → transcribing {fmt_duration(dur)} of audio with {whisper}…"
+    estimate = transcribe.estimate(dur) + rest
+    st.show(stage, estimate)
+    cues, lang, prob = transcribe.transcribe(str(audio), workdir if video.platform == "file" else None,
+                                             whisper_progress(st, stage, estimate, rest))
     if not audio.name.startswith("vid."):  # a TikTok video file stays for frames (deleted with the workdir)
         audio.unlink(missing_ok=True)
     log.info("whisper: %d segments, lang=%s p=%.2f", len(cues), lang, prob)
     st.ok(f"✅ Transcript: Whisper, language {lang}" if cues else "✅ Whisper: no speech found")
     return cues, f"whisper-{config.WHISPER_MODEL}", lang
+
+
+WHISPER_PROGRESS_EVERY = 10  # seconds between percentage updates (each is a Telegram edit)
+
+
+def whisper_progress(st: Status, stage: str, estimate: float, rest: float) -> Callable[[float, float], None]:
+    """A Whisper progress callback that adds "37 %" to the status line and estimates from this run's rate.
+
+    Updates at most every WHISPER_PROGRESS_EVERY seconds and only when the percentage changed. The voice filter
+    skips silence and music, so the percentage can jump; it stays below 100 until Whisper is done. Once 2 % is
+    done, the time left is this run's own rate applied to the rest of the audio (plus the later steps),
+    instead of the speed measured on earlier runs.
+
+    Args:
+        st: The job's status.
+        stage: The transcribing line, without the percentage.
+        estimate: The estimate shown when transcribing started (counted down until the live rate takes over).
+        rest: Estimated seconds for the steps after transcription.
+    """
+    started = time.monotonic()
+    last = {"shown": -1, "at": started}
+
+    def report(done: float, total: float) -> None:
+        """Shows the percentage (and a live estimate) for done of total seconds of audio."""
+        if total <= 0:
+            return
+        percent = min(99, int(done / total * 100))
+        now = time.monotonic()
+        if percent == last["shown"] or now - last["at"] < WHISPER_PROGRESS_EVERY:
+            return
+        last["shown"], last["at"] = percent, now
+        if percent >= 2:
+            eta = (now - started) / done * (total - done) + rest
+        else:
+            eta = max(0.0, estimate - (now - started))
+        st.show(f"{stage} {percent} %", eta)
+
+    return report
 
 
 def _transcript(video, meta, workdir, st: Status, notes, transcript_only: bool) -> tuple[list, str, str]:

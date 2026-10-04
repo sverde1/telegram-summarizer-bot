@@ -126,7 +126,7 @@ def whisper(monkeypatch):
     """A fake Whisper: returns `whisper.cues` and records where it was asked to decode."""
     calls = []
 
-    def fake(path, sandbox_dir=None):
+    def fake(path, sandbox_dir=None, on_progress=None):
         """Records the call; returns the prepared cues."""
         calls.append((path, sandbox_dir))
         return list(fake.cues), "en", 0.9
