@@ -143,6 +143,23 @@ CREATE TABLE IF NOT EXISTS voices (
     duration    INTEGER,
     created_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS delivered (
+    request_id  INTEGER PRIMARY KEY,           -- a summary (or an answer) the user received
+    parent_id   INTEGER,                       -- for an answer: the summary request it was about
+    kind        TEXT NOT NULL,                 -- video | file | document | ask
+    title       TEXT NOT NULL,                 -- for an answer: the question
+    text        TEXT NOT NULL,                 -- what was shown, before unit conversion
+    backend     TEXT,                          -- the resolved backend and model that wrote it
+    model       TEXT,
+    created_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS messages (
+    chat_id     INTEGER NOT NULL,              -- a bot message a user can reply to with a question:
+    message_id  INTEGER NOT NULL,              -- every part of a summary or answer, and the 💬 prompt
+    request_id  INTEGER NOT NULL,              -- the summary request a reply to it asks about
+    PRIMARY KEY (chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS delivered_parent ON delivered (parent_id);
 CREATE INDEX IF NOT EXISTS requests_user ON requests (user_id, created_at);
 CREATE INDEX IF NOT EXISTS requests_video ON requests (platform, video_id);
 """
@@ -840,3 +857,55 @@ def _migrate_old_files() -> None:
 
 
 init()  # at import: every user of this module needs the schema in place first
+
+
+def save_delivered(request_id: int, kind: str, title: str, text: str, backend: str | None = None,
+                   model: str | None = None, parent_id: int | None = None) -> None:
+    """Records what a request showed the user (the 💬 and 📄 buttons work from it).
+
+    Args:
+        request_id: The request whose result was delivered.
+        kind: video | file | document | ask.
+        title: Its title (for an answer: the question).
+        text: The text shown, before unit conversion.
+        backend: The resolved backend that wrote it.
+        model: The resolved model that wrote it.
+        parent_id: For an answer, the summary request it was about.
+    """
+    with _db() as c:
+        c.execute("INSERT OR REPLACE INTO delivered VALUES (?,?,?,?,?,?,?,?)",
+                  (request_id, parent_id, kind, title, text, backend, model, time.time()))
+
+
+def get_delivered(request_id: int) -> dict | None:
+    """What a request showed the user, or None."""
+    with _db() as c:
+        row = c.execute("SELECT * FROM delivered WHERE request_id=?", (request_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def ask_history(parent_id: int, user_id: int, n: int = 3) -> list[dict]:
+    """The last n questions and answers about a summary by one user, oldest first.
+
+    Only that user's: an admin asking about someone's summary mustn't change what the user's next answer sees.
+    """
+    with _db() as c:
+        rows = c.execute("""SELECT d.title, d.text FROM delivered d JOIN requests r ON r.id=d.request_id
+                            WHERE d.parent_id=? AND r.user_id=? ORDER BY d.request_id DESC LIMIT ?""",
+                         (parent_id, user_id, n)).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def save_messages(chat_id: int, message_ids: list[int], request_id: int) -> None:
+    """Remembers bot messages a reply can point at, and which summary request a reply to them asks about."""
+    with _db() as c:
+        c.executemany("INSERT OR REPLACE INTO messages VALUES (?,?,?)",
+                      [(chat_id, m, request_id) for m in message_ids])
+
+
+def message_request(chat_id: int, message_id: int) -> int | None:
+    """The summary request a bot message belongs to (see save_messages), or None."""
+    with _db() as c:
+        row = c.execute("SELECT request_id FROM messages WHERE chat_id=? AND message_id=?",
+                        (chat_id, message_id)).fetchone()
+    return row["request_id"] if row else None

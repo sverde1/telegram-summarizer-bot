@@ -81,6 +81,8 @@ class DocResult(JobResult):
     steps: list[tuple[str, float]] = field(default_factory=list)
     total: float = 0.0
     llm: str = ""
+    backend: str = ""  # the resolved backend and model that wrote the summaries (their cache key)
+    model: str = ""
     platform: str = "document"
     video_id: str = ""
 
@@ -281,7 +283,7 @@ def run(upload: dict, mode: str, chapter: int | None, path: Path | None, workdir
 
     b = books.Books(digest, backend, model, st.show)
     kind = {"whole": "book", "short": "short", "each": "each"}.get(mode) or ("pick" if chapter is None else "chapter")
-    result = DocResult(kind, upload["name"], doc, video_id=digest, llm=b.llm)
+    result = DocResult(kind, upload["name"], doc, video_id=digest, llm=b.llm, backend=b.backend, model=b.model)
     if kind == "chapter" and not 0 <= chapter < len(doc["chapters"]):
         raise DocumentError("⚠️ That chapter doesn't exist any more. Please pick again.", f"chapter {chapter}")
     summary_cached = _summaries_cached(b, result.kind, chapter)

@@ -46,11 +46,8 @@ async def deliver(app: Application, job: state.Job, result: JobResult, waited: f
         # Under a whole-book summary: the chapter options, for a reader who wants more detail.
         more = (menus.book_menu(job.upload_id, chapters=True, back=False)
                 if result.kind == "book" and len(result.doc.get("chapters") or []) > 1 else None)
-        more = _with_listen(more, job, *tts.document_text(_spoken_document(result, units_)))
-        for k, chunk in enumerate(chunks, 1):
-            await sending.send_with_retry(lambda chunk=chunk, k=k: bot_.send_message(
-                job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
-                reply_markup=more if k == len(chunks) else None), job)
+        more = _with_actions(more, job, result, units_)
+        await _send_chunks(app, job, chunks, more)
         return
     if job.transcript_only:
         if not result.transcript:
@@ -70,12 +67,25 @@ async def deliver(app: Application, job: state.Job, result: JobResult, waited: f
         job.user_id, result.platform, result.video_id, job.request_id)
     units_ = db.get_user_units(job.user_id)
     chunks = render.render(result, waited, reveal_cache=reveal, units_=units_)
-    listen = _with_listen(None, job, *tts.video_text(_spoken_summary(result.summary or {}, units_),
-                                                     (result.meta or {}).get("title", "")))
+    await _send_chunks(app, job, chunks, _with_actions(None, job, result, units_))
+
+
+async def _send_chunks(app: Application, job: state.Job, chunks: list[str],
+                       markup: InlineKeyboardMarkup | None, parent_id: int | None = None) -> None:
+    """Sends a summary's (or an answer's) messages, the buttons under the last one, and remembers every
+    message's id: a reply to any part of it is a question about that summary.
+
+    Args:
+        parent_id: The summary request replies ask about; this job's own request by default.
+    """
+    ids = []
     for k, chunk in enumerate(chunks, 1):
-        await sending.send_with_retry(lambda chunk=chunk, k=k: bot_.send_message(
+        sent = await sending.send_with_retry(lambda chunk=chunk, k=k: app.bot.send_message(
             job.chat_id, chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
-            reply_markup=listen if k == len(chunks) else None), job)
+            reply_markup=markup if k == len(chunks) else None), job)
+        if sent is not None:
+            ids.append(sent.message_id)
+    db.save_messages(job.chat_id, ids, parent_id or job.request_id)
 
 
 def transcript_name(result: pipeline.Result) -> str:
@@ -100,19 +110,56 @@ def _spoken_document(result: documents.DocResult, units_: tuple[str, str]) -> do
     return dataclasses.replace(result, book=book, chapters=chapters)
 
 
-def _with_listen(markup: InlineKeyboardMarkup | None, job: state.Job, title: str,
-                 text: str) -> InlineKeyboardMarkup | None:
-    """Adds the 🔊 Listen button to a summary's last message, storing first what it will read.
+def _delivered(job: state.Job, result: JobResult) -> tuple[str, str, str, str, str]:
+    """What a summary showed, as plain text before unit conversion (what 💬 and 📄 work from).
+
+    Returns:
+        (kind video|file|document, title, text, backend, model).
+    """
+    if isinstance(result, documents.DocResult):
+        if result.kind == "book":
+            b = result.book or {}
+            author = f"Author: {b['author']}\n\n" if b.get("author") else ""
+            title, text = b.get("title") or result.name, author + b.get("summary", "")
+        else:
+            title = result.name
+            text = "\n\n".join(f"{t}\n{s}" for _, t, s in result.chapters)
+        return "document", title, text, result.backend, result.model
+    s = result.summary or {}
+    stats_ = s.get("_stats") or {}
+    # A recording's title is the summary's or its label: never the neutral title of the shared videos row.
+    title = s.get("title") or (job.url if result.platform == "file" else (result.meta or {}).get("title", ""))
+    text = s.get("summary", "")
+    if result.platform != "file" and s.get("is_clickbait") and s.get("clickbait_answer"):
+        text = f"Clickbait answer: {s['clickbait_answer']}\n\n{text}"
+    return ("file" if result.platform == "file" else "video", title, text, stats_.get("backend"),
+            stats_.get("model"))
+
+
+def _with_actions(markup: InlineKeyboardMarkup | None, job: state.Job, result: JobResult,
+                  units_: tuple[str, str]) -> InlineKeyboardMarkup | None:
+    """Adds the summary's buttons under its last message, storing first what they work from.
 
     Stored before the message is sent, so even an immediate tap finds it; it's exactly what the user reads.
-    No button when voice messages aren't available or there's nothing to read.
+    Called only from deliver(), so only for summaries that were really delivered (after any pacing).
+    🔊 only when voice messages are available and there's something to read.
     """
+    kind, title, text, backend, model = _delivered(job, result)
+    db.save_delivered(job.request_id, kind, title, text, backend, model)
+    if isinstance(result, documents.DocResult):
+        spoken_title, spoken = tts.document_text(_spoken_document(result, units_))
+    else:
+        spoken_title, spoken = tts.video_text(_spoken_summary(result.summary or {}, units_),
+                                              (result.meta or {}).get("title", ""))
+    buttons = []
     lang = tts.language()
-    if not tts.available() or not lang or not text.strip():
+    if tts.available() and lang and spoken.strip():
+        db.save_spoken(job.request_id, spoken_title, spoken, *lang)
+        buttons.append(InlineKeyboardButton("🔊 Listen", callback_data=f"voice:{job.request_id}"))
+    if not buttons:
         return markup
-    db.save_spoken(job.request_id, title, text, *lang)
     rows = list(markup.inline_keyboard) if markup else []
-    return InlineKeyboardMarkup(rows + [[InlineKeyboardButton("🔊 Listen", callback_data=f"voice:{job.request_id}")]])
+    return InlineKeyboardMarkup(rows + [buttons])
 
 
 async def _send_voice(app: Application, job: state.Job, result: tts.VoiceResult) -> None:
