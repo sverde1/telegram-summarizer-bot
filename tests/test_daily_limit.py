@@ -109,3 +109,26 @@ def test_usage_window_and_reset_time():
 
 def test_every_limit_has_a_usage_query_and_a_ui():
     assert set(db.USAGE_FILTERS) == set(access.LIMITS) == set(limits.LIMIT_UI)
+
+
+def test_questions_have_their_own_limit_and_skip_the_daily_one(monkeypatch):
+    monkeypatch.setattr(config, "ASK_DAILY_LIMIT", 2)
+    db.add_request(ANA, "what about prices?", "ask")  # still queued: counts already
+    db.update_request(db.add_request(ANA, "longer please", "ask"), status="failed")
+    assert db.usage(ANA, "ask")[0] == 2 and db.usage(ANA, "daily")[0] == 0
+    used, limit, _, frees_in = limits.limit_status(ANA, "ask")
+    assert (used, limit) == (2, 2) and frees_in > 0
+    assert access.limit(ADMIN_ID, "ask") == (None, False)
+
+
+async def test_limit_ask_command_and_users_list(app, telegram):
+    await send(app, msg_update(ADMIN_ID, "/limit ask 5"))
+    assert telegram.texts()[-1] == "✅ Question limit for everyone: 5."
+    await send(app, msg_update(ADMIN_ID, f"/limit ask {ANA} 9"))
+    assert access.limit(ANA, "ask") == (9, False) and access.global_limit("ask") == 5
+    await send(app, msg_update(ADMIN_ID, "/limit"))
+    assert "Question limit for everyone: 5 questions per 24 h." in telegram.texts()[-1]
+    assert '"ask"' in telegram.texts()[-1]
+    await send(app, msg_update(ANA, "/limit"))
+    assert "💬 Today: 0 of your 9 questions (last 24 h). 9 left." in telegram.texts()[-1]
+    assert "💬 0/9" in limits.limit_label(ANA)

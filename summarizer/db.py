@@ -196,6 +196,8 @@ def init() -> None:
             c.execute("ALTER TABLE users ADD COLUMN ocr_limit INTEGER")
         if "tts_limit" not in cols:  # …and before the voice-message limit
             c.execute("ALTER TABLE users ADD COLUMN tts_limit INTEGER")
+        if "ask_limit" not in cols:  # …and before the question limit
+            c.execute("ALTER TABLE users ADD COLUMN ask_limit INTEGER")
         for col in ("unit_system", "temperature"):  # …and before per-user units (NULL = the default)
             if col not in cols:
                 c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
@@ -623,15 +625,18 @@ def get_page_sources(sha256: str) -> dict[int, str]:
 
 
 # What counts toward each limit (access.LIMITS), as a filter on the user's requests in the window:
-# - daily: every link, file or book request; voice messages don't count (listening is free, TTS has its own).
+# - daily: every link, file or book request; voice messages and questions don't count (they have their own).
 # - ocr: requests that started a full OCR run (finished or not; a cached OCR text costs nothing).
 # - voice: newly made voice messages (reused ones are free); queued ones count only once they run.
+# - ask: follow-up questions, queued ones included (so queueing several can't overrun the limit); cancelled
+#   and failed ones count too, as for OCR.
 USAGE_FILTERS = {
-    "daily": "kind<>'voice'",
+    "daily": "kind NOT IN ('voice','ask')",
     "ocr": "ocr=1",
     "voice": "kind='voice' AND cached=0 AND status<>'queued'",
+    "ask": "kind='ask'",
 }
-_USER_LIMIT_COLUMNS = {"daily": "daily_limit", "ocr": "ocr_limit", "voice": "tts_limit"}
+_USER_LIMIT_COLUMNS = {"daily": "daily_limit", "ocr": "ocr_limit", "voice": "tts_limit", "ask": "ask_limit"}
 
 
 def usage(uid: int, kind: str, window: float = 86400) -> tuple[int, float | None]:

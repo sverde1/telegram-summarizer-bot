@@ -96,6 +96,8 @@ TTS_DEVICE = _env("TTS_DEVICE", "cpu")  # cpu, or cuda (needs onnxruntime-gpu; f
 VOICE_CACHE_DAYS = int(_env("VOICE_CACHE_DAYS", "7"))  # how long a made voice message is reused
 # New voice messages a non-admin may have made per rolling 24 h (0 = no limit); reused ones are free.
 TTS_DAILY_LIMIT = int(_env("TTS_DAILY_LIMIT", "20"))
+# Follow-up questions (💬 Ask) per user per 24 h; each resends the transcript, so they aren't free.
+ASK_DAILY_LIMIT = int(_env("ASK_DAILY_LIMIT", "20"))
 # Default units for measurements in summaries (each user can change theirs with /units): metric or imperial,
 # and c or f for temperatures.
 UNIT_SYSTEM = _env("UNIT_SYSTEM", "metric")

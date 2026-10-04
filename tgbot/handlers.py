@@ -319,7 +319,8 @@ async def on_llm_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles /limit: users see their own usage; admins see and change the limits.
 
-    Admin forms, each also with "ocr" first for the OCR limit (e.g. `/limit ocr 5`): `/limit` (show),
+    Admin forms, each also with a limit's word first for that limit (`/limit ocr 5`, `/limit ask 20`; see
+    limits.LIMIT_UI): `/limit` (show),
     `/limit 50` (everyone), `/limit <user id> 200` (one user), `/limit <user id> default` (remove the
     override), `0` meaning no limit.
     """
@@ -330,9 +331,11 @@ async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("\n".join(limits.usage_line(uid, k) for k in limits.LIMIT_UI))
         return
     args = list(ctx.args)
-    kind = args[0].lower() if args and args[0].lower() in ("ocr", "voice") else "daily"
+    words = {ui.word: k for k, ui in limits.LIMIT_UI.items() if ui.word}
+    kind = words.get(args[0].lower(), "daily") if args else "daily"
     if kind != "daily":
         args = args[1:]
+    others = ", ".join(f'"{w}"' for w in words)
     title = limits.LIMIT_UI[kind].title
     if not args:
         lines = []
@@ -342,7 +345,7 @@ async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             lines += [f"  • {access.label(u['id'], u)}: {u[col] or 'no limit'}"
                       for u in access.all_users()["allowed"] if u.get(col) is not None]
         lines.append("\nChange it: /limit 50 · one user: /limit <user id> 200 · /limit <user id> default · "
-                     "0 = no limit. The same with \"ocr\" or \"voice\" first for those limits: /limit ocr 5")
+                     f"0 = no limit. The same with {others} first for those limits: /limit ocr 5")
         await update.message.reply_text("\n".join(lines))
         return
     if len(args) == 1 and args[0].isdigit():
@@ -360,7 +363,7 @@ async def on_limit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"✅ {title} for {who}: {text}.")
         return
     await update.message.reply_text("Usage: /limit · /limit 50 · /limit <user id> 200 · /limit <user id> default "
-                                    "(add \"ocr\" first for the OCR limit)")
+                                    f"(add {others} first for those limits)")
 
 
 async def on_ocrlang(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

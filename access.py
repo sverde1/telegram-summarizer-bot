@@ -105,6 +105,7 @@ LIMITS = {
     "daily": Limit("daily_limit", "daily_limit", "DAILY_LIMIT"),  # requests (links, files, books)
     "ocr": Limit("ocr_limit", "ocr_limit", "OCR_DAILY_LIMIT"),  # scanned documents read with OCR
     "voice": Limit("tts_limit", "tts_limit", "TTS_DAILY_LIMIT"),  # newly made voice messages
+    "ask": Limit("ask_limit", "ask_limit", "ASK_DAILY_LIMIT"),  # follow-up questions (💬 Ask)
 }
 
 

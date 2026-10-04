@@ -12,27 +12,38 @@ def limit_label(uid: int) -> str:
     used, limit, is_default, _ = limit_status(uid, "daily")
     if limit is None:  # admins
         return "no limit"
-    daily = f"{used}/{limit} today" + (" (default)" if is_default else "") if limit else "no daily limit"
-    used, limit, _, _ = limit_status(uid, "ocr")
-    ocr_ = f"OCR {used}/{limit}" if limit else "OCR no limit"
-    used, limit, _, _ = limit_status(uid, "voice")
-    voice = f"🔊 {used}/{limit}" if limit else "🔊 no limit"
-    return f"{daily} · {ocr_} · {voice}"
+    parts = [f"{used}/{limit} today" + (" (default)" if is_default else "") if limit else "no daily limit"]
+    for kind, ui in LIMIT_UI.items():
+        if kind != "daily":
+            used, limit, _, _ = limit_status(uid, kind)
+            parts.append(f"{ui.short} {used}/{limit}" if limit else f"{ui.short} no limit")
+    return " · ".join(parts)
 
 
 @dataclass(frozen=True)
 class LimitUI:
-    """How a limit (access.LIMITS) is shown: its icon, what it counts, and its name."""
+    """How a limit (access.LIMITS) is shown.
+
+    Attributes:
+        icon: Its emoji in /limit.
+        what: What it counts ("requests").
+        title: Its name ("Daily limit").
+        word: What admins type after /limit to change it ("" for the daily limit, the default).
+        short: Its label in the /users list ("OCR").
+    """
     icon: str
     what: str
     title: str
+    word: str
+    short: str
 
 
 # One entry per access.LIMITS kind, in the order /limit shows them.
 LIMIT_UI = {
-    "daily": LimitUI("📊", "requests", "Daily limit"),
-    "ocr": LimitUI("🔍", "scanned documents (OCR)", "OCR limit"),
-    "voice": LimitUI("🔊", "new voice messages", "Voice-message limit"),
+    "daily": LimitUI("📊", "requests", "Daily limit", "", ""),
+    "ocr": LimitUI("🔍", "scanned documents (OCR)", "OCR limit", "ocr", "OCR"),
+    "voice": LimitUI("🔊", "new voice messages", "Voice-message limit", "voice", "🔊"),
+    "ask": LimitUI("💬", "questions", "Question limit", "ask", "💬"),
 }
 
 

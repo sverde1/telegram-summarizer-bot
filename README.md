@@ -264,6 +264,7 @@ The database migrates itself on start.
 | `UNIT_SYSTEM` / `TEMPERATURE` | `metric` / `c` | Default units for measurements in summaries; each user can change theirs with `/units`. |
 | `OCR_ENGINE` | `auto` | Text recognition for scanned PDFs. `auto`: RapidOCR when `OCR_DEVICE=cuda` works, else Tesseract (measured on a 475-page scanned book, 4 cores, 3 workers: Tesseract 1.2 s/page, RapidOCR 6.4 s/page, same text). Or force `tesseract` / `rapidocr`. Switching engines needs the OCR languages added again (`/ocrlang`); the bot logs which at startup. |
 | `OCR_DEVICE` | `cpu` | `cuda` runs OCR with RapidOCR on an NVIDIA GPU (see GPU below); falls back to Tesseract on the CPU when CUDA isn't available. |
+| `ASK_DAILY_LIMIT` | `20` | Follow-up questions (💬 Ask) a user may ask per 24 h (admins: no limit; `0` = no limit). They don't count toward `DAILY_LIMIT`. `/limit ask` changes it. |
 | `OCR_DAILY_LIMIT` | `5` | Scanned documents a user may have read per rolling 24 h (admins: no limit; `0` = no limit). Once changed with `/limit ocr`, the stored value wins. |
 | `OCR_MAX_PAGES` | `400` | Longest scan read without an admin's approval (pages needing OCR). |
 | `OCR_WORKERS` | `3` | OCR processes in parallel (one thread each); keep below the number of cores. |
@@ -303,7 +304,7 @@ sandbox. Without a working CUDA runtime it logs a warning and stays on the CPU.
 | `/history` | users | Your recent requests (admins: everyone's, with who sent them). |
 | `/models` | users | Show or choose the AI: provider first, then model. |
 | `/limit` | users | Your limits: requests, scanned documents (OCR) and new voice messages in the last 24 h, and how many are left. |
-| `/limit` | admins | Show the daily and OCR limits and per-user overrides. `/limit 50` sets the daily limit for everyone, `/limit <user id> 200` for one user, `/limit <user id> default` removes the override; `0` = no limit. The same with `ocr` or `voice` first (`/limit ocr 5`, `/limit voice 20`) for the OCR and voice-message limits. |
+| `/limit` | admins | Show the daily and OCR limits and per-user overrides. `/limit 50` sets the daily limit for everyone, `/limit <user id> 200` for one user, `/limit <user id> default` removes the override; `0` = no limit. The same with `ocr`, `voice` or `ask` first (`/limit ocr 5`, `/limit voice 20`, `/limit ask 20`) for the OCR, voice-message and question limits. |
 | `/ocrlang` | admins | Languages for scanned documents: `/ocrlang` lists them, `/ocrlang add slv` downloads and installs one (Tesseract: from tesseract-ocr's `tessdata_fast` on GitHub, checked with a test run; RapidOCR: the script's model, checked against RapidOCR's pinned SHA-256), `/ocrlang remove slv`. |
 | `/units` | users | Units for measurements in summaries: Metric / Imperial and °C / °F (default: metric, °C). |
 | `/users` | admins | Users with Allow / Deny / Remove / Unblock buttons, their AI choice and daily limit with today's usage. |
