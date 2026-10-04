@@ -18,3 +18,5 @@ python-dotenv==1.2.3
 python-telegram-bot==22.8
 yt-dlp-ejs==0.8.0
 yt-dlp==2026.8.19
+# YouTube PO tokens (optional; the token script is built by deploy/install-pot.sh at the same version)
+bgutil-ytdlp-pot-provider==2.0.1

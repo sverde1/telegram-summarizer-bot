@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Node.js for the PO-token script (bgutil-ytdlp-pot-provider), always inside a sandbox.
+#
+# yt-dlp starts this through `--js-runtimes node:<this file>` (summarizer/media.py). The script runs YouTube's
+# obfuscated BotGuard JavaScript, so it gets the network (the challenge comes from Google) and nothing else:
+# the provider's built script read-only, its own cache directory, an empty /tmp. No repo, no .env, no home,
+# no inherited environment. Not --new-session: the bot kills yt-dlp's whole process group on a cancel or
+# timeout, and this must stay in it.
+#
+# POT_SERVER_HOME (the built server directory) and POT_CACHE come from the bot's environment for yt-dlp.
+set -euo pipefail
+server=${POT_SERVER_HOME:?POT_SERVER_HOME not set}
+cache=${POT_CACHE:?POT_CACHE not set}
+mkdir -p "$cache"
+sandbox=(
+  bwrap --unshare-all --share-net --die-with-parent
+  --ro-bind /usr /usr
+  --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64
+  --ro-bind-try /etc/alternatives /etc/alternatives
+  # Name resolution: resolv.conf is a symlink into /run/systemd/resolve on systemd distros.
+  --ro-bind-try /etc/resolv.conf /etc/resolv.conf
+  --ro-bind-try /run/systemd/resolve /run/systemd/resolve
+  --ro-bind-try /etc/hosts /etc/hosts
+  --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf
+  --ro-bind-try /etc/ssl /etc/ssl
+  --proc /proc --dev /dev --tmpfs /tmp
+  --ro-bind "$server" "$server"  # at the same path: the plugin passes paths inside it
+  --bind "$cache" /cache
+  --clearenv --setenv PATH /usr/bin --setenv HOME /tmp --setenv LANG C.UTF-8
+  --setenv XDG_CACHE_HOME /cache  # the script keeps its token cache there
+)
+if [ -n "${TOKEN_TTL:-}" ]; then
+  sandbox+=(--setenv TOKEN_TTL "$TOKEN_TTL")
+fi
+# flock: the script rewrites its cache file without locking, so mints from parallel jobs take turns (tokens
+# are cached for hours, so this costs nothing). prlimit: a memory ceiling; node's heap is capped below it.
+exec flock "$cache/.lock" prlimit --as=6442450944 "${sandbox[@]}" /usr/bin/node --max-old-space-size=1024 "$@"

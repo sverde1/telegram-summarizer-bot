@@ -54,6 +54,7 @@ Dropbox link): the whole book, or chapter by chapter. Scanned PDFs are read with
 - poppler-utils (`pdftotext`, `pdftoppm`) for PDFs, and Tesseract for scanned documents: on the CPU it read
   a test book 5× faster than RapidOCR with the same text, and it checks a scan's script (Latin, Cyrillic, …)
   before OCR. With an NVIDIA GPU, RapidOCR (installed with the Python dependencies) is used instead.
+- Node.js 22+ (optional) for YouTube's bot check: PO tokens, see "YouTube bot checks" below.
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 - At least one LLM:
   - [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) and a ChatGPT plan, or
@@ -199,6 +200,21 @@ on your API account, separately from ChatGPT or Claude plans.
 The bot uses long polling. If the token was used with a webhook before (e.g. n8n), remove it first:
 `curl "https://api.telegram.org/bot<token>/deleteWebhook"`.
 
+### 6b. YouTube bot checks (optional, recommended)
+
+YouTube flags servers whose requests lack a "proof of origin" (PO) token: "Sign in to confirm you're not a
+bot". `deploy/install-pot.sh` installs [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+(pinned version and commit), which mints the token with YouTube's own BotGuard check, as a real player does.
+No Google account is involved. The bot uses it automatically once it's built; the startup log says
+"PO tokens: on".
+
+- The token script runs YouTube's obfuscated JavaScript, so it runs only through `deploy/node-sandboxed`:
+  Node in bwrap with network access, the built script read-only and its own cache, and nothing else (no
+  repo, no `.env`, no home).
+- The npm build runs in bwrap too (install scripts run code). Only the built output is kept: the sources
+  would make the plugin prefer its deno variant, which would run outside the sandbox.
+- Tokens are cached for 6 h (`data/bgutil/cache`).
+
 ### 7. Run it as a service
 
 ```bash
@@ -250,6 +266,7 @@ The database migrates itself on start.
 | `WHISPER_RAM_WAIT_MIN` | `60` | How long such a video waits for memory (the user can stop waiting with a button). |
 | `MAX_QUEUED_PER_USER` | `3` | Videos one user may have queued or running at once (admins: no limit). |
 | `MAX_QUEUE` | `20` | Total videos in the queue; new links are refused beyond that (admins excepted). |
+| `POT_HOME` | `data/bgutil/server` | Where `deploy/install-pot.sh` builds the PO-token script; without it, no PO tokens. |
 | `YOUTUBE_PARALLEL` | `2` | YouTube lookups (video info, captions) at the same time. A burst of them gets the server's IP flagged ("Sign in to confirm you're not a bot"); downloads from a looked-up video don't count. |
 | `WORKERS` | `8` | Jobs worked on at the same time. Lookups, downloads and AI calls run side by side; Whisper, OCR, frame sweeps and voice messages take turns on the CPU. |
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |
@@ -546,6 +563,9 @@ Also there: `codex-home/` (the bot's Codex login), `stats.json` (measured speeds
   `systemctl --user daemon-reload`. Requests lost in a crash are marked failed at the next start.
 - **Blocks:** if YouTube or TikTok throttle or block the server ("too many requests", "confirm you're not a
   bot"), users are told to try later and the admins get the raw error, at most once per platform every 6 h.
+- **PO tokens:** the plugin and the token script must stay the same version, so the weekly upgrade leaves
+  them alone. To upgrade, set `VERSION` and `COMMIT` in `deploy/install-pot.sh` (and the pin in
+  `requirements.txt`), rerun it and restart. A broken setup is reported to the admins once at startup.
 - **yt-dlp / gallery-dl** break when YouTube or TikTok change. The weekly timer runs
   `deploy/update-extractors.sh` to upgrade them; no restart needed.
 - **Codex / Claude Code** are installed outside the venv. Every 12 h the bot checks npm for newer

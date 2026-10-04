@@ -73,12 +73,13 @@ def describe(e: MediaError) -> str:
     return "⚠️ Couldn't load this video. It may be private, deleted or unavailable here."
 
 
-def _run(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], timeout: int = 900, env: dict | None = None) -> subprocess.CompletedProcess:
     """Runs a command and turns a non-zero exit into a readable MediaError.
 
     Args:
         cmd: The command and its arguments.
         timeout: Seconds before the command is killed.
+        env: Extra environment variables for it (added to config.clean_env()).
 
     Returns:
         The completed process, with text stdout/stderr.
@@ -91,20 +92,26 @@ def _run(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     """
     log.debug("run: %s", " ".join(cmd))
     try:
-        p = proc.run(cmd, timeout=timeout)
+        p = proc.run(cmd, timeout=timeout, env=config.clean_env() | env if env else None)
     except proc.ProcTimeout:
         raise MediaError("the download timed out")  # ProcCancelled is deliberately not caught: it stops the job
+    # Warnings are kept for YouTube with PO tokens on: a failing token provider is only a warning (yt-dlp then
+    # goes on without a token), and it must reach the journal rather than end as a mysterious bot check.
+    for line in (p.stderr or "").splitlines():
+        if line.startswith("WARNING"):
+            log.warning("yt-dlp: %s", line[:500])
     if p.returncode != 0:
         err = (p.stderr or p.stdout).strip().splitlines()
         msg = next((ln for ln in reversed(err) if "ERROR" in ln), err[-1] if err else "unknown error")
         msg = msg.replace("ERROR: ", "")
         if _is_blocked(msg):
-            raise Blocked(msg)
+            token = next((ln for ln in err if "PO Token" in ln and "WARNING" in ln), "")
+            raise Blocked(f"{msg} (PO token: {token[:300]})" if token else msg)
         raise MediaError(msg)
     return p
 
 
-def _ytdlp(*args: str, timeout: int = 900) -> subprocess.CompletedProcess:
+def _ytdlp(*args: str, timeout: int = 900, youtube: bool = False) -> subprocess.CompletedProcess:
     """Runs the venv's yt-dlp with the options every call shares.
 
     `config.YTDLP` is the binary next to the interpreter, because an old system yt-dlp on PATH fails on
@@ -115,6 +122,7 @@ def _ytdlp(*args: str, timeout: int = 900) -> subprocess.CompletedProcess:
     Args:
         *args: yt-dlp arguments, including the URL.
         timeout: Seconds before yt-dlp is killed.
+        youtube: It's a YouTube video: PO tokens are used when they're set up (see pot_ready).
 
     Returns:
         The completed process.
@@ -122,8 +130,70 @@ def _ytdlp(*args: str, timeout: int = 900) -> subprocess.CompletedProcess:
     Raises:
         MediaError: yt-dlp failed.
     """
+    if youtube and pot_ready():
+        return _run([config.YTDLP, "--no-playlist", "--sleep-requests", "1", *_pot_args(), *args],
+                    timeout=timeout, env=_pot_env())
     return _run([config.YTDLP, "--no-warnings", "--no-playlist", "--sleep-requests", "1", *args],
                 timeout=timeout)
+
+
+# ---------- PO tokens ----------
+
+NODE_SANDBOXED = config.ROOT / "deploy" / "node-sandboxed"
+_pot: dict = {}  # {"ready": bool, "why": str}, from check_pot at startup
+
+
+def _pot_args() -> list[str]:
+    """yt-dlp arguments for PO tokens: the plugin's script mode, and Node only through the sandbox wrapper.
+
+    `--js-runtimes` adds node next to yt-dlp's default deno (its signature solver keeps preferring deno); one
+    `--extractor-args` per extractor, since `;` separates arguments of the same one.
+    """
+    return ["--extractor-args", f"youtubepot-bgutilscript:server_home={config.POT_HOME}",
+            "--js-runtimes", f"node:{NODE_SANDBOXED}"]
+
+
+def _pot_env() -> dict:
+    """What deploy/node-sandboxed needs from the bot: the script's directory and its token cache."""
+    return {"POT_SERVER_HOME": str(config.POT_HOME), "POT_CACHE": str(config.POT_HOME.parent / "cache")}
+
+
+def pot_ready() -> bool:
+    """Whether YouTube calls use PO tokens (decided once by check_pot at startup)."""
+    return _pot.get("ready", False)
+
+
+def check_pot() -> str:
+    """Checks the PO-token setup once (at startup): the plugin, the built script, the sandboxed Node.
+
+    Returns:
+        "" when PO tokens are on, else why they're off.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        plugin = version("bgutil-ytdlp-pot-provider")
+    except PackageNotFoundError:
+        plugin = ""
+    script = config.POT_HOME / "build" / "generate_once.js"
+    why = ""
+    if not plugin and not script.exists():
+        why = "not installed (deploy/install-pot.sh)"
+    elif not plugin or not script.exists():
+        why = "half installed: rerun deploy/install-pot.sh"
+    elif (config.POT_HOME / "src").exists():
+        # The plugin would prefer its deno variant from src/, which runs outside the sandbox.
+        why = f"{config.POT_HOME / 'src'} must not exist: rerun deploy/install-pot.sh"
+    else:
+        try:
+            p = proc.run([str(NODE_SANDBOXED), str(script), "--version"], timeout=30,
+                         env=config.clean_env() | _pot_env())
+            got = p.stdout.strip()
+            if p.returncode != 0 or got != plugin:
+                why = f"the token script says {got or p.stderr.strip()[:200]!r}, the plugin is {plugin}"
+        except (OSError, proc.ProcError) as e:
+            why = f"the sandboxed Node failed: {e}"
+    _pot.update(ready=not why, why=why, version=plugin)
+    return why
 
 
 _youtube = threading.BoundedSemaphore(config.YOUTUBE_PARALLEL)  # see _youtube_turn
@@ -178,7 +248,8 @@ def _from_info(video: Video, workdir: Path, args: list[str], timeout: int) -> su
     info = workdir / INFO_JSON
     if info.exists():
         try:
-            return _ytdlp(*args, "--load-info-json", str(info), timeout=timeout)
+            return _ytdlp(*args, "--load-info-json", str(info), timeout=timeout,
+                          youtube=video.platform == "youtube")
         except Blocked:
             raise
         except MediaError as e:
@@ -187,7 +258,7 @@ def _from_info(video: Video, workdir: Path, args: list[str], timeout: int) -> su
             log.info("stored video info expired (%s); looking the video up again", e)
             info.unlink(missing_ok=True)
     with _youtube_turn(video):  # without stored info, this looks the video up
-        return _ytdlp(*args, video.url, timeout=timeout)
+        return _ytdlp(*args, video.url, timeout=timeout, youtube=video.platform == "youtube")
 
 
 # ---------- metadata ----------
@@ -212,7 +283,8 @@ def probe(video: Video, info_path: Path | None = None) -> dict:
     extra = ["--ignore-no-formats-error"] if video.platform == "tiktok" else []
     try:
         with _youtube_turn(video):
-            raw = _ytdlp("--skip-download", "-J", *extra, video.url, timeout=120).stdout
+            raw = _ytdlp("--skip-download", "-J", *extra, video.url, timeout=120,
+                         youtube=video.platform == "youtube").stdout
         d = json.loads(raw)
     except MediaError as e:
         # yt-dlp often refuses live streams itself ("This live stream recording is not available.", "This

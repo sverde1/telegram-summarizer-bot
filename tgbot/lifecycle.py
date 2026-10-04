@@ -6,11 +6,11 @@ import time
 
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import Application, ContextTypes
 
 import access
-from summarizer import config, db, ocr, pipeline, stats, tts, updates
+from summarizer import config, db, media, ocr, pipeline, stats, tts, updates
 from tgbot import jobs, state, texts
 
 log = logging.getLogger("bot")  # one logger name for the whole bot, as in the journal
@@ -61,6 +61,27 @@ async def sync_commands(bot, uid: int) -> None:
         log.warning("couldn't set commands for %s: %s", uid, e)
 
 
+async def _check_pot(app: Application) -> None:
+    """Checks the PO-token setup (YouTube's bot check) once; tells the admins if it's broken, not if absent.
+
+    A setup that was never installed is the owner's choice: only logged. A broken one (half installed,
+    mismatched versions, the sandbox failing) is told once per problem, remembered across restarts.
+    """
+    why = await asyncio.to_thread(media.check_pot)
+    if not why:
+        log.info("PO tokens: on (bgutil %s, Node in the sandbox)", media._pot.get("version"))
+        return
+    log.info("PO tokens: off (%s)", why)
+    if why.startswith("not installed") or stats.recall("pot_problem") == why:
+        return
+    stats.remember("pot_problem", why)
+    for admin in access.ADMINS:
+        try:
+            await app.bot.send_message(admin, f"⚠️ YouTube PO tokens are off: {why}")
+        except TelegramError:
+            pass
+
+
 async def _prepare_tts() -> None:
     """Downloads Kokoro's model if missing (off the event loop) and checks voice messages can be made; logs
     what's missing for the admins. Until it's ready, summaries get no 🔊 button."""
@@ -97,6 +118,7 @@ async def post_init(app: Application) -> None:
     await asyncio.to_thread(pipeline.cleanup_leftovers)
     if stale := db.fail_stale_requests():
         log.info("marked %d request(s) from before the restart as failed", stale)
+    await _check_pot(app)
     app.bot_data["workers"] = [asyncio.create_task(jobs.worker(app)) for _ in range(config.WORKERS)]
     app.bot_data["update_checker"] = asyncio.create_task(update_checker(app))
     log.info("bot ready; admins: %s, allowed users: %d", sorted(access.ADMINS) or "NONE (setup mode)",

@@ -55,7 +55,7 @@ with no GPU.
 | `summarizer/units.py` | Measurements shown in each reader's units (rules, display-only; the cached text is never changed). |
 | `summarizer/documents.py` | Bot side of docparse: runs it sandboxed, maps errors to user messages, stores pages by SHA-256. |
 | `tests/` | pytest suite; `conftest.py` isolates tests from the real bot (see above), `helpers.py` has the fake LLM. |
-| `deploy/` | systemd units and the weekly extractor-upgrade script. |
+| `deploy/` | systemd units, the weekly extractor-upgrade script, `install-pot.sh` (pinned PO-token provider, built in bwrap) and `node-sandboxed` (the only way the token script's Node runs). |
 | `data/` | Runtime state, git-ignored: database, the bot's Codex login, temp job dirs. |
 
 ## Running and checking changes
@@ -102,6 +102,11 @@ How the tests are isolated (`tests/conftest.py`):
   `Job.cancel_event`), never a global; thread pools inside a job come from `proc.pool` (plain pool threads
   never see the cancel; `tests/test_layout.py` checks); every job has its own work directory; one job at a
   time per video or document (`pipeline.one_at_a_time`).
+- YouTube PO tokens: the token script runs YouTube's BotGuard JavaScript, so its runtime is only
+  `deploy/node-sandboxed` (bwrap, network only, the built script read-only, its own cache); never plain
+  node or deno. `data/bgutil/server` holds only the built output: with `src/` there, the plugin would
+  prefer its deno variant outside the sandbox (`media.check_pot` refuses it). yt-dlp keeps warnings for
+  YouTube with tokens on, so a failing provider shows in the journal.
 - Run external programs only through `proc.run` (never `subprocess` directly): it kills the whole
   process tree on timeout/cancel and strips the bot's secrets from the child's environment.
 - Never swallow `proc.ProcCancelled` (a cancelled job must stop) or `media.Blocked` (a platform ban must

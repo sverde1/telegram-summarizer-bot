@@ -121,6 +121,8 @@ WHISPER_RAM_WAIT_MIN = int(_env("WHISPER_RAM_WAIT_MIN", "60"))
 MAX_SLIDES = int(_env("MAX_SLIDES", "35"))  # TikTok carousels allow up to 35 images
 
 DATA_DIR = Path(_env("DATA_DIR", str(ROOT / "data")))
+# The PO-token script (deploy/install-pot.sh builds it here; see media.pot_ready). Absent = no PO tokens.
+POT_HOME = Path(_env("POT_HOME", str(DATA_DIR / "bgutil" / "server")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 # The bot's own Codex login, separate from ~/.codex so the sandbox never sees your sessions/history.
 # 0700: it holds the ChatGPT login tokens.
