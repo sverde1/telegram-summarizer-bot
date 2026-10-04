@@ -12,7 +12,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 
 from . import config, db, pipeline, proc, stats, summarize
 
@@ -157,7 +157,7 @@ class Books:
 
         progress(len(units))
         failed: list[list[int]] = []
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with proc.pool(workers) as pool:
             futures = {pool.submit(run, unit): unit for unit in units}
             left = len(units)
             for future in as_completed(futures):

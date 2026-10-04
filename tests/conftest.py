@@ -66,7 +66,7 @@ LOCAL_TOOLS = {"bwrap", "prlimit", "pdftotext", "pdfinfo", "pdftoppm", "tesserac
 # ---------- isolation ----------
 
 @pytest.fixture(autouse=True)
-def fresh_state(tmp_path, monkeypatch):
+def fresh_state(tmp_path, monkeypatch, request):
     """Gives every test its own empty database and stats file, and resets in-memory bot state.
 
     A fresh database (rather than emptying tables) keeps the admin row that `sync_admins` creates, so
@@ -80,7 +80,9 @@ def fresh_state(tmp_path, monkeypatch):
     state.reset()
     import threading
     from summarizer import proc
-    monkeypatch.setattr(proc, "current_job_cancel", threading.Event())
+    # The test's own "job" cancel event (sync tests run in this context; async tests' tasks copy it).
+    token = proc.job_cancel.set(threading.Event())
+    request.addfinalizer(lambda: proc.job_cancel.reset(token))
     # OCR models live in the worker's data dir, shared by its tests: start each test with none added.
     for folder in ("tessdata", "rapidocr"):
         shutil.rmtree(config.DATA_DIR / folder, ignore_errors=True)

@@ -12,7 +12,6 @@ from pathlib import Path
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from . import config, db, frames, media, memory, proc, stats, summarize, transcribe
@@ -544,7 +543,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         raise
     llm = summarize.llm_label(backend, model or "")  # replaced by the model that actually answers, below
     # The thumbnail (for the clickbait check) downloads while the transcript is made; not for /transcript.
-    side = ThreadPoolExecutor(max_workers=1)
+    side = proc.pool(1)
     thumb_job = None if transcript_only else side.submit(media.download_thumbnail, meta, workdir)
     paced: tuple[str, float] | None = None  # the paced transcript step shown to a first-time requester
     try:

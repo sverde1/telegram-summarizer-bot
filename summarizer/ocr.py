@@ -15,8 +15,9 @@ import json
 import logging
 import shutil
 import statistics
+import threading
 from collections.abc import Callable
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, wait
 from pathlib import Path
 
 from . import config, db, fetch, proc, sandbox, stats
@@ -314,7 +315,8 @@ def run(pdf: Path, sha256: str, pages: list[int], langs: str, workdir: Path,
         done += len(batch)
         return True
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    stop = threading.Event()  # stops the running batches after a failure or cancel, see below
+    with proc.pool(workers, stop) as pool:
         pending = {pool.submit(_read_batch, pdf, batch, langs, workdir, str(k)): batch
                    for k, batch in enumerate(batches)}
         # FIRST_COMPLETED, not FIRST_EXCEPTION: the latter returns only once every batch is done (unless one
@@ -332,7 +334,7 @@ def run(pdf: Path, sha256: str, pages: list[int], langs: str, workdir: Path,
         if error is not None:
             for future in pending:
                 future.cancel()  # not started yet
-            proc.current_job_cancel.set()  # stop the batches still running (their programs get killed)
+            stop.set()  # stop the batches still running (their programs get killed); the job isn't cancelled
     # The pool has waited for the running batches: keep any that finished before they could be stopped.
     for future, batch in pending.items():
         save(future, batch)

@@ -36,13 +36,13 @@ def test_a_second_job_waits_for_the_first():
 def test_a_cancel_stops_the_wait(monkeypatch):
     pipeline._busy.add(("youtube", "z"))
     try:
-        proc.current_job_cancel.set()
+        proc.cancel_event().set()
         with pytest.raises(proc.ProcCancelled):
             with pipeline.one_at_a_time(("youtube", "z"), lambda: None):
                 pass
     finally:
         pipeline._busy.discard(("youtube", "z"))
-        proc.current_job_cancel.clear()
+        proc.cancel_event().clear()
 
 
 def test_the_same_video_twice_at_once_is_processed_once(fake_media, llm, monkeypatch):

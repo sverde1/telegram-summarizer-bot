@@ -273,7 +273,8 @@ def _batched_run(monkeypatch, tmp_path, read):
     except BaseException as e:  # noqa: BLE001
         return lines, e
     finally:
-        proc.current_job_cancel.clear()
+        _batched_run.job_cancelled = proc.cancel_event().is_set()  # before the cleanup below
+        proc.cancel_event().clear()
 
 
 def test_progress_advances_batch_by_batch(monkeypatch, tmp_path):
@@ -304,15 +305,16 @@ def test_a_failing_batch_keeps_the_finished_ones(monkeypatch, tmp_path):
     _, error = _batched_run(monkeypatch, tmp_path, read)
     assert isinstance(error, RuntimeError)
     assert {0: "p0", 1: "p1"}.items() <= db.get_pages("d" * 64).items()
+    assert not _batched_run.job_cancelled  # stopping the other batches doesn't mark the job cancelled
 
 
 def test_cancel_keeps_the_finished_pages(monkeypatch, tmp_path):
     def read(pdf, batch, langs, wd, tag):
         """The first batch finishes; then the job is cancelled."""
         if batch[0] > 0:
-            proc.current_job_cancel.wait(2)
+            proc.cancel_event().wait(2)
             raise proc.ProcCancelled("cancelled")
-        proc.current_job_cancel.set()
+        proc.cancel_event().set()
         return {0: "p0"}
 
     _, error = _batched_run(monkeypatch, tmp_path, read)

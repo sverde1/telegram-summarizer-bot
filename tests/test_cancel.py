@@ -69,7 +69,7 @@ async def test_a_running_job_is_killed_and_the_worker_moves_on(app, telegram, mo
 def test_stage_changes_are_checkpoints(monkeypatch):
     st = pipeline.Status(lambda *a: None)
     st.show("one")
-    proc.current_job_cancel.set()
+    proc.cancel_event().set()
     with pytest.raises(proc.ProcCancelled):
         st.show("two")
 
@@ -80,7 +80,7 @@ def test_a_cancelled_video_is_not_marked_failed(monkeypatch, llm):
 
     def probe(v, *a, **k):
         """Probes, then the job gets cancelled."""
-        proc.current_job_cancel.set()
+        proc.cancel_event().set()
         return meta()
 
     monkeypatch.setattr(media, "probe", probe)

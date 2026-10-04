@@ -10,15 +10,53 @@ import os
 import signal
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 import time
 
 from . import config
 
 log = logging.getLogger(__name__)
 
-# Set by the worker to cancel the job it's running (one worker runs one job at a time, so one event is
-# enough). Every run() polls it, so a cancel stops the current download/transcode/LLM call within ~0.5 s.
-current_job_cancel = threading.Event()
+# Each job has its own cancel event, set as this context variable while the job runs: asyncio.to_thread copies
+# the context into the job's threads, and pool() into its thread pools. Every run() polls it, so a cancel stops
+# that job's download/transcode/LLM call within ~0.5 s, and only that job's: jobs run side by side.
+# Outside a job (the update check, /ocrlang) the default applies, an event nobody ever sets.
+_NEVER = threading.Event()
+job_cancel: ContextVar[threading.Event] = ContextVar("job_cancel", default=_NEVER)
+# A pool's own stop (see pool): ends its other tasks' programs without marking the whole job cancelled.
+_pool_stop: ContextVar[threading.Event] = ContextVar("pool_stop", default=_NEVER)
+
+
+def cancel_event() -> threading.Event:
+    """The current job's cancel event (one nobody sets, outside a job)."""
+    return job_cancel.get()
+
+
+def _stopped() -> bool:
+    """Whether the current job was cancelled, or its pool stopped."""
+    return job_cancel.get().is_set() or _pool_stop.get().is_set()
+
+
+def pool(workers: int, stop: threading.Event | None = None) -> ThreadPoolExecutor:
+    """A thread pool whose threads belong to the current job: its cancel (and an optional stop) reach them.
+
+    Use it for every pool inside a job: plain ThreadPoolExecutor threads don't inherit the job's context, so
+    a cancel would never reach their programs.
+
+    Args:
+        workers: Threads.
+        stop: An event that stops the pool's programs too (e.g. after one task failed), without cancelling
+            the job.
+    """
+    event, halt = cancel_event(), stop or _NEVER
+
+    def init() -> None:
+        """Puts the job's cancel event (and the pool's stop) into each new thread's context."""
+        job_cancel.set(event)
+        _pool_stop.set(halt)
+
+    return ThreadPoolExecutor(max_workers=workers, initializer=init)
 
 _POLL = 0.5  # seconds between checks for cancellation and the deadline
 
@@ -42,7 +80,7 @@ def check_cancelled() -> None:
     Raises:
         ProcCancelled: The job was cancelled.
     """
-    if current_job_cancel.is_set():
+    if _stopped():
         raise ProcCancelled("cancelled")
 
 
@@ -95,7 +133,7 @@ def run(cmd: list[str], *, timeout: float, input: str | bytes | None = None, tex
         except subprocess.TimeoutExpired:
             # Input goes in on the first call only: communicate() refuses it once communication started.
             pending_input = None
-        if current_job_cancel.is_set():
+        if _stopped():
             _kill(p)
             raise ProcCancelled("cancelled")
         if time.monotonic() > deadline:

@@ -6,7 +6,8 @@ Module attributes, always used as `state.x` (never imported by name), so a rebin
 import asyncio
 import collections
 import enum
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 
 
 class JobKind(enum.Enum):
@@ -58,6 +59,8 @@ class Job:
     ask_of: int = 0  # 💬: the summary request a question is about; 0 for everything else
     question: str = ""  # 💬: the question
     reply_to: int = 0  # 💬: the question's message, which the answer replies to
+    # Set to stop this job's programs (proc.job_cancel while it runs); jobs run side by side, so each has its own.
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     started_at: float = 0.0  # when the worker started it (monotonic); the status's elapsed time counts from it
     job_kind: JobKind = JobKind.VIDEO
 
@@ -80,7 +83,7 @@ class Job:
 # twice in parallel, and two users' LLM conversations can't interleave.
 queue: asyncio.Queue[Job] = asyncio.Queue()
 # Every job not yet finished, by request id, so a user's jobs can be found and cancelled. The worker runs one
-# job at a time; `running` is that one (its programs are stopped through proc.current_job_cancel).
+# job at a time; `running` is that one (its programs are stopped through its Job.cancel_event).
 jobs: dict[int, Job] = {}
 running: Job | None = None
 # Jobs per user, queued or running (see config.MAX_QUEUED_PER_USER). Decremented whenever a job ends,

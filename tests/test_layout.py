@@ -32,3 +32,10 @@ def test_summarizer_never_imports_the_bot_side():
             names = [node.module or ""] if isinstance(node, ast.ImportFrom) else [a.name for a in node.names]
             bad += [f"{path.name}: {n}" for n in names if n.split(".")[0] in ("tgbot", "telegram", "bot", "access")]
     assert not bad
+
+
+def test_thread_pools_come_from_proc_pool():
+    # A plain ThreadPoolExecutor's threads don't get the job's cancel event: a cancel wouldn't reach them.
+    bad = [p.name for p in sorted((ROOT / "summarizer").glob("*.py")) + TGBOT + [ROOT / "bot.py"]
+           if p.name != "proc.py" and "ThreadPoolExecutor(" in p.read_text()]
+    assert not bad

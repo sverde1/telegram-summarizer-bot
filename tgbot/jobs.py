@@ -42,8 +42,8 @@ async def cancel_job(app: Application, job: state.Job, reason: str) -> bool:
     if job.cancel_reason or job.request_id not in state.jobs:
         return False
     job.cancel_reason = reason
+    job.cancel_event.set()  # stops its programs if it's running (proc.job_cancel)
     if job is state.running:
-        proc.current_job_cancel.set()
         return True
     task = state.delayed.pop(job.request_id, None)
     if task:
@@ -211,7 +211,13 @@ async def worker(app: Application) -> None:
                 db.update_request(job.request_id, status="cancelled", error="cancelled: access removed")
                 await fail(app, job, texts.ACCESS_REMOVED)
             if not job.cancel_reason:  # cancelled while queued: already reported, just skip it
-                parked = await _run_job(app, loop, job)
+                # The job's own cancel event for every program it runs: asyncio.to_thread and the paced
+                # delivery task copy this context.
+                token = proc.job_cancel.set(job.cancel_event)
+                try:
+                    parked = await _run_job(app, loop, job)
+                finally:
+                    proc.job_cancel.reset(token)
         except Exception:
             log.exception("worker: job %s failed", job.request_id if job else "(selecting the next job)")
             await asyncio.sleep(1)  # don't spin if the failure repeats (e.g. the database is locked)
@@ -236,7 +242,6 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: state
     """
     waited = time.monotonic() - job.queued_at
     job.started_at = time.monotonic()
-    proc.current_job_cancel.clear()
     state.running = job
     try:
         progress = sending.Progress(app, loop, job)
