@@ -26,6 +26,8 @@ with no GPU.
 | `tgbot/intake.py` | Turning messages into jobs: links, uploaded documents and recordings, share links, book menus. |
 | `tgbot/lifecycle.py` | Start-up, shutdown, per-user command menus, update notices, the error handler. |
 | `tgbot/render.py`, `sending.py`, `menus.py`, `limits.py`, `prefs.py`, `texts.py` | Message rendering and formats; the status message (`Progress`) and retried sends; shared keyboards; limits as users see them; a user's effective AI choice; shared user-facing texts. |
+| `summarizer/followup.py` | 💬 Ask: the material for a question (transcript, book text or its summaries, within `ASK_MAX_CHARS`), the AI call, `AskResult`. |
+| `tgbot/markdown.py` | 📄 Download: the Markdown file of a delivered summary (summary + transcript; a book's full text). |
 | `summarizer/results.py` | `JobResult`, the base of every result (cache and pacing fields, `head()`, `work_seconds()`, `llm_label()`). |
 | `access.py` | Who may use the bot (admins from `.env`, others from the `users` table). |
 | `summarizer/pipeline.py` | URL in, `Result` out: cache lookup, transcript, frames, LLM turns, timings. Blocking; runs in a worker thread. |
@@ -113,7 +115,14 @@ How the tests are isolated (`tests/conftest.py`):
   `transcribe._decode` / `frames` paths with a sandbox directory. Never open them with PyAV or ffmpeg in the
   bot's process, and never store their file name in the shared `videos` row (it would show to the next
   sender of the same file).
-- Unit conversion is display-only (`units.convert` in `render` / `render_document` / the 🔊 text); never store
+- Follow-up questions (💬): the summary, earlier answers and the material are data in tags
+  (`FOLLOWUP_SYSTEM`); only `<question>` is the reader's. The prompt answers only from the material and
+  declines unrelated requests. Questions (`ASK_MAX_QUESTION`) and answers (`render.FIELD_LIMITS["answer"]`)
+  are capped, the whole prompt stays within `ASK_MAX_CHARS`. Answers are never shared between users; the thread
+  history is the asker's own (`db.ask_history`). Questions are detected inside `intake.on_message` (a separate
+  reply handler would swallow every other reply); `delivered` is written only from `delivery.deliver`, after
+  any privacy pacing.
+- Unit conversion is display-only (`units.convert` in `render` / `render_document` / answers / the 📄 file / the 🔊 text); never store
   converted text. Only the converted value is shown, so add a guard and a test for every new unit or
   phrasing that could be read wrongly.
 - Links are accepted only through `urls.check` / `urls.classify` (host allow-list; TikTok short-link
@@ -127,11 +136,12 @@ How the tests are isolated (`tests/conftest.py`):
 user message and put raw tool output, paths or exception text in `detail` (admins see it, users never).
 Anything unexpected becomes the generic "something went wrong" message plus an admin notice.
 
-**Abuse limits** (keep them when changing the queue). The three per-user daily limits (requests, OCR,
-voice messages) are one table each: `access.LIMITS` (setting, override column, default),
+**Abuse limits** (keep them when changing the queue). The per-user daily limits (requests, OCR, voice
+messages, questions) are one table each: `access.LIMITS` (setting, override column, default),
 `db.USAGE_FILTERS` (what counts) and `limits.LIMIT_UI` (wording); a test keeps their kinds equal. The
 voice-message limit (new ones only:
-`requests.kind='voice'` with `cached=0`; listening never counts toward the daily limit), the OCR limit (`requests.ocr`, set when an OCR run
+`requests.kind='voice'` with `cached=0`; listening never counts toward the daily limit), the question
+limit (`kind='ask'`, queued ones included; never the daily limit; one open question per summary), the OCR limit (`requests.ocr`, set when an OCR run
 starts; cancelled runs count), the OCR page cap with admin approval (`ocr_holds`), the daily limit (global in the `settings` table,
 per-user override in `users.daily_limit`, read from the database on each check), per-user and total queue
 limits, the `/again` cooldown, the pending-request cap and reply throttling, the memory guard, and the

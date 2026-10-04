@@ -8,13 +8,15 @@ HELP = (
     "/transcript <url> - send the raw transcript as a file\n"
     "/history - your recent requests\n"
     "/models - show or choose the AI (Codex or Claude) and model\n"
-    "/limit - how many requests you can still send today\n"
+    "/limit - how many requests and questions you have left today\n"
     "/units - measurements in metric or imperial, temperatures in °C or °F\n\n"
     "🎤 Send a voice message, audio or video file (up to 20 MB) to summarize it; with the caption /transcript "
     "you get the transcript instead.\n"
     "📄 You can also send a book or document (PDF, EPUB, DOCX or TXT, up to 20 MB), or a Google Drive or "
     "Dropbox link to one (shared as \"Anyone with the link\"): I'll summarize the whole thing or chapter by "
-    "chapter."
+    "chapter.\n\n"
+    "Under every summary: 💬 Ask to ask about it (or just reply to it), 📄 Download for a file to take to "
+    "another chat."
 )
 
 

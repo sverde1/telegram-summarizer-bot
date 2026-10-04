@@ -259,6 +259,8 @@ The database migrates itself on start.
 | `TTS_SPEED` | `1.0` | Reading speed, 0.5–2.0. |
 | `TTS_DEVICE` | `cpu` | `cuda` makes voice messages on an NVIDIA GPU (with `onnxruntime-gpu`, see GPU below): seconds instead of about a minute. Falls back to the CPU without CUDA. |
 | `VOICE_CACHE_DAYS` | `7` | Days a made voice message is reused (only Telegram's id for it is stored); then it's made again. |
+| `ASK_MAX_CHARS` | `BOOK_CHUNK_CHARS` | Most a question may send to the AI, in characters (summary, earlier answers, transcript or book text). Longer material is cut; a longer book falls back to its summaries. |
+| `ASK_MAX_QUESTION` | `1000` | Longest question accepted, in characters. |
 | `TTS_DAILY_LIMIT` | `20` | New voice messages a user may have made per 24 h (admins: no limit; `0` = no limit). Reused ones are free, and listening doesn't count toward `DAILY_LIMIT`. `/limit voice` changes it. |
 | `ESPEAK_LIB` / `ESPEAK_DATA` | Debian/Ubuntu paths | The system's espeak-ng, which Kokoro needs. |
 | `UNIT_SYSTEM` / `TEMPERATURE` | `metric` / `c` | Default units for measurements in summaries; each user can change theirs with `/units`. |
@@ -391,6 +393,28 @@ links, with bullets read as sentences. The whole summary is read, however long.
 - Read in the language of `SUMMARY_LANGUAGE` (English, Spanish, French, Italian, Portuguese or Hindi; others
   get no button).
 
+### Questions and downloads (💬 Ask, 📄 Download)
+
+Every summary (videos, recordings, books, chapters) also has these buttons:
+
+- **💬 Ask**: ask anything about the summary, e.g. "make it longer" or "what did they say about prices?".
+  Tap the button and type the question, or just reply to any part of the summary or to an earlier answer. The
+  answer comes as a reply, with its own 💬 to ask on.
+  - The AI gets the summary, your last 3 questions about it, and what it came from: the transcript, or a
+    book's full text. A book too long to send in one go is answered from its stored summaries plus the
+    chapters the question names ("chapter 7", or a chapter's title). Everything stays within
+    `ASK_MAX_CHARS`.
+  - It answers only from that material and declines unrelated requests (it isn't a general chatbot).
+    Questions are capped at `ASK_MAX_QUESTION` characters, answers at 8000.
+  - Questions have their own daily limit (`ASK_DAILY_LIMIT`, 20 per 24 h, `/limit ask`) and don't count
+    toward the daily request limit. One open question per summary at a time.
+  - Only the person who got the summary (or an admin) can ask about it; answers are never shared between
+    users. Admins see questions in `/history`, as they see links.
+- **📄 Download**: a Markdown file to take to ChatGPT or any other chat. For videos and recordings: the
+  summary (in your units) and the timestamped transcript. For books and documents: the full text, with chapter
+  headings. Sent right away (no AI, no limit; one file per summary every 10 s). Unlike `/transcript`, it
+  doesn't use a request.
+
 ## How it works
 
 1. **Link check** as soon as the link arrives: only YouTube/TikTok hosts, no network needed; then the
@@ -473,7 +497,7 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 
 - `users`: id, name, username, status (admin / allowed / pending / blocked), chosen `backend` + `model`,
   per-user limit overrides (`daily_limit`, `ocr_limit`, `tts_limit`; empty = the global value) and units
-  (`unit_system`, `temperature`).
+  (`unit_system`, `temperature`); `ask_limit` too.
 - `videos`: metadata and transcript, status `processing` → `done` / `failed` (or `waiting` for memory,
   `cancelled`).
 - `summaries`: one per video and model.
@@ -488,7 +512,11 @@ injection. The model therefore gets no capability beyond returning its JSON answ
 - `spoken`: per summary request, exactly the text its 🔊 button reads aloud (with the language and voice).
 - `voices`: Telegram's id of each made voice message, by a hash of voice, language, speed and text (no
   user), so the same text isn't synthesized twice; deleted after `VOICE_CACHE_DAYS`.
-- `settings`: values set from Telegram (`/limit`, `/limit ocr`, `/limit voice`, `/ocrlang`).
+- `delivered`: what each summary (and each 💬 answer) showed, as plain text with the model that wrote it;
+  💬 and 📄 work from it.
+- `messages`: the bot's summary, answer and 💬 prompt messages per chat, so a reply to any of them is a
+  question about the right summary.
+- `settings`: values set from Telegram (`/limit`, `/limit ocr`, `/limit voice`, `/limit ask`, `/ocrlang`).
 
 Also there: `codex-home/` (the bot's Codex login), `stats.json` (measured speeds for ETAs), `tessdata/` and
 `rapidocr/` (OCR language models added with `/ocrlang`).
