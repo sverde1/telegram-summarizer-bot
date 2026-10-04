@@ -84,7 +84,9 @@ def test_check_pot_says_why_tokens_are_off(monkeypatch, tmp_path, plugin, script
 
 def test_check_pot_runs_the_script_through_the_sandbox_and_compares_versions(monkeypatch, tmp_path):
     import importlib.metadata as md
+    from summarizer import netjail
     monkeypatch.undo()
+    monkeypatch.setattr(netjail, "_state", {"ready": True})
     monkeypatch.setattr(config, "POT_HOME", tmp_path / "server")
     (tmp_path / "server" / "build").mkdir(parents=True)
     (tmp_path / "server" / "build" / "generate_once.js").write_text("")
@@ -117,7 +119,9 @@ async def test_admins_hear_of_a_broken_setup_once_but_not_of_a_missing_one(app, 
 
 def test_the_wrapper_sandboxes_node_with_network_only():
     code = WRAPPER_CODE
-    assert "--unshare-all --share-net --die-with-parent" in code and "--clearenv" in code
+    assert "--share-net" not in code and "--clearenv" in code  # the network is the jail's
+    assert '/usr/bin/python3 -I "$jail" "${sandbox[@]}" --' in code and "netjail.py" in code
+    assert "/etc/resolv.conf" not in code and "/run/systemd/resolve" not in code  # the jail brings its own DNS
     assert "--new-session" not in code  # stays in yt-dlp's process group, so a cancel kills it
     binds = [line.split()[1:3] for line in code.splitlines() if line.strip().startswith(("--bind ", "--ro-bind "))]
     assert ["/usr", "/usr"] in binds and ['"$server"', '"$server"'] in binds and ['"$cache"', "/cache"] in binds
@@ -154,3 +158,16 @@ def test_a_real_token_is_minted_in_the_sandbox():
     assert f"Executing command to get POT via script: {wrapper} " in p.stderr
     assert "Retrieved a gvs PO Token for web client" in p.stderr
     assert "bgutil:script-deno-2.0.1 (external, unavailable)" in p.stderr
+
+
+
+def test_no_tokens_without_the_network_jail(monkeypatch, tmp_path):
+    import importlib.metadata as md
+    from summarizer import netjail
+    monkeypatch.undo()
+    monkeypatch.setattr(netjail, "_state", {"ready": False})
+    monkeypatch.setattr(config, "POT_HOME", tmp_path / "server")
+    (tmp_path / "server" / "build").mkdir(parents=True)
+    (tmp_path / "server" / "build" / "generate_once.js").write_text("")
+    monkeypatch.setattr(md, "version", lambda name: "2.0.1")
+    assert "network jail" in media.check_pot() and not media.pot_ready()

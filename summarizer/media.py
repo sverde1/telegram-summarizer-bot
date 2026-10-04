@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from . import config, cpu, proc, sandbox
+from . import config, cpu, netjail, proc, sandbox
 from .urls import Video
 
 log = logging.getLogger(__name__)
@@ -183,6 +183,8 @@ def check_pot() -> str:
     elif (config.POT_HOME / "src").exists():
         # The plugin would prefer its deno variant from src/, which runs outside the sandbox.
         why = f"{config.POT_HOME / 'src'} must not exist: rerun deploy/install-pot.sh"
+    elif not netjail.ready():
+        why = "the network jail doesn't work (see its startup line): the token script runs only in it"
     else:
         try:
             p = proc.run([str(NODE_SANDBOXED), str(script), "--version"], timeout=30,
