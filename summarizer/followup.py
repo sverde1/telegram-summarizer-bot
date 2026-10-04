@@ -16,6 +16,10 @@ from .results import JobResult
 log = logging.getLogger(__name__)
 
 TOO_OLD = "This summary is too old for questions; ask for it again."
+# The reply to an unrelated request, by what the summary was of (the prompt asks for exactly this sentence).
+OFF_TOPIC = {"video": "I can only answer questions about topics related to the video you sent.",
+             "file": "I can only answer questions about topics related to the recording you sent.",
+             "document": "I can only answer questions about topics related to the book or document you sent."}
 HISTORY = 3  # earlier questions and answers about the same summary sent along (this user's only)
 _CHAPTER_NUMBER = re.compile(r"\b(?:chapter|chap\.?|ch\.?|poglavje|poglavju|poglavja)\s*(\d{1,3})\b", re.I)
 
@@ -127,6 +131,13 @@ def prompt(parent_id: int, question: str, user_id: int) -> str:
             f"<question>\n{question}\n</question>")
 
 
+def off_topic_rule(kind: str) -> str:
+    """The last line of the instructions: the exact reply to an unrelated request, for this kind of summary."""
+    sentence = OFF_TOPIC.get(kind, OFF_TOPIC["video"])
+    return (f'For an unrelated request, reply with exactly this sentence (translated into '
+            f'{config.SUMMARY_LANGUAGE} if that is another language): "{sentence}"')
+
+
 def answer(parent_id: int, question: str, user_id: int, backend: str | None, model: str | None) -> AskResult:
     """Answers one question about a delivered summary.
 
@@ -142,8 +153,9 @@ def answer(parent_id: int, question: str, user_id: int, backend: str | None, mod
         proc.ProcCancelled: The job was cancelled.
     """
     text = prompt(parent_id, question, user_id)
+    system = summarize.FOLLOWUP_SYSTEM + "\n" + off_topic_rule(db.get_delivered(parent_id)["kind"])
     try:
-        got, answered_by = summarize.ask(backend, model, summarize.FOLLOWUP_SYSTEM, text, summarize.ANSWER_SCHEMA)
+        got, answered_by = summarize.ask(backend, model, system, text, summarize.ANSWER_SCHEMA)
     except summarize.SummaryError as e:
         raise pipeline.PipelineError(str(e), detail=e.detail)
     llm = summarize.llm_label(backend, answered_by or model or "")
