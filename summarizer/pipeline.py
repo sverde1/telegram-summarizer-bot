@@ -6,9 +6,12 @@ seconds until the summary is ready (None when unknown).
 import logging
 import re
 import shutil
+import tempfile
+import threading
 from pathlib import Path
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -278,6 +281,39 @@ class Status:
         self.done.append(line)
 
 
+_busy: set[tuple[str, str]] = set()  # videos and documents being worked on right now (see one_at_a_time)
+_busy_changed = threading.Condition()
+
+
+@contextmanager
+def one_at_a_time(key: tuple[str, str], on_wait: Callable[[], None]):
+    """Lets one job at a time work on a video or document; others wait (cancellably) until it's done.
+
+    Parallel jobs for the same thing would download, transcribe or summarize it twice and interleave their
+    writes to its database row; after the wait, the second job finds the first one's work in the cache.
+
+    Args:
+        key: (platform, video id), or ("document", sha256).
+        on_wait: Called once if this job has to wait (to show it in the status).
+
+    Raises:
+        proc.ProcCancelled: The job was cancelled while waiting.
+    """
+    with _busy_changed:
+        if key in _busy:
+            on_wait()
+        while key in _busy:
+            _busy_changed.wait(1)
+            proc.check_cancelled()
+        _busy.add(key)
+    try:
+        yield
+    finally:
+        with _busy_changed:
+            _busy.discard(key)
+            _busy_changed.notify_all()
+
+
 def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         transcript_only: bool = False, request_id: int | None = None, backend: str | None = None,
         model: str | None = None, again_limit_user: int | None = None,
@@ -384,41 +420,44 @@ def _run(video, progress: Callable[..., None], *, use_cache: bool, transcript_on
             raise PipelineError(f"⏳ You redid this video {ago} min ago; you can redo it again in "
                                 f"{max(1, round(wait / 60))} min.")
 
-    hide_cache = bool(hide_cache_from) and not db.user_saw_video(hide_cache_from, video.platform,
-                                                                 video.video_id, request_id or 0)
-    cached = db.get_video(video.platform, video.video_id)
-    saved = db.get_summary(video.platform, video.video_id, backend, model) if model else None
-    if cached and use_cache and cached["meta"] and (
-            saved or (transcript_only and cached["transcript_source"])):
-        result = Result(video.platform, video.video_id, video.url, cached["meta"], cached["transcript"] or "",
-                        cached["transcript_source"] or "none", cached["language"] or "",
-                        saved["result"] if saved else None, bool(saved and saved["frames_used"]), cached=True)
-        if hide_cache:
-            plan_replay(result, transcript_only, backend)
-        return result
+    # One job per video at a time: a second request for it waits, then finds the first one's work cached
+    # (no second Whisper or summary, no interleaved writes to the videos row).
+    with one_at_a_time((video.platform, video.video_id), lambda: progress("⏳ Processing…", None)):
+        hide_cache = bool(hide_cache_from) and not db.user_saw_video(hide_cache_from, video.platform,
+                                                                     video.video_id, request_id or 0)
+        cached = db.get_video(video.platform, video.video_id)
+        saved = db.get_summary(video.platform, video.video_id, backend, model) if model else None
+        if cached and use_cache and cached["meta"] and (
+                saved or (transcript_only and cached["transcript_source"])):
+            result = Result(video.platform, video.video_id, video.url, cached["meta"], cached["transcript"] or "",
+                            cached["transcript_source"] or "none", cached["language"] or "",
+                            saved["result"] if saved else None, bool(saved and saved["frames_used"]), cached=True)
+            if hide_cache:
+                plan_replay(result, transcript_only, backend)
+            return result
 
-    # The videos row exists from the start (status "processing") and is filled in as data arrives, so a
-    # crash mid-way still leaves a record of what was attempted and how far it got.
-    # A file's name stays out of the shared row (see run_file).
-    db.start_video(video.platform, video.video_id, "" if file_meta else video.url)
-    try:
-        return _process(video, progress, cached, transcript_only, t0, backend, model, hide_cache,
-                        workdir=workdir, file_meta=file_meta)
-    except proc.ProcCancelled:
-        # The video itself is fine; only this request was stopped. Don't record it as a failed video.
-        db.update_video(video.platform, video.video_id, status="cancelled", error=None)
-        raise
-    except memory.NeedsMemory:
-        db.update_video(video.platform, video.video_id, status="waiting", error=None)  # will be retried
-        raise
-    except media.Blocked as e:
-        db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
-        name = {"youtube": "YouTube", "tiktok": "TikTok"}.get(video.platform, video.platform)
-        raise Blocked(f"🚫 {name} is currently blocking downloads from this bot's server (too many requests). "
-                      "Please try again later.", detail=str(e), platform=video.platform)
-    except Exception as e:
-        db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
-        raise
+        # The videos row exists from the start (status "processing") and is filled in as data arrives, so a
+        # crash mid-way still leaves a record of what was attempted and how far it got.
+        # A file's name stays out of the shared row (see run_file).
+        db.start_video(video.platform, video.video_id, "" if file_meta else video.url)
+        try:
+            return _process(video, progress, cached, transcript_only, t0, backend, model, hide_cache,
+                            workdir=workdir, file_meta=file_meta)
+        except proc.ProcCancelled:
+            # The video itself is fine; only this request was stopped. Don't record it as a failed video.
+            db.update_video(video.platform, video.video_id, status="cancelled", error=None)
+            raise
+        except memory.NeedsMemory:
+            db.update_video(video.platform, video.video_id, status="waiting", error=None)  # will be retried
+            raise
+        except media.Blocked as e:
+            db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
+            name = {"youtube": "YouTube", "tiktok": "TikTok"}.get(video.platform, video.platform)
+            raise Blocked(f"🚫 {name} is currently blocking downloads from this bot's server (too many requests). "
+                          "Please try again later.", detail=str(e), platform=video.platform)
+        except Exception as e:
+            db.update_video(video.platform, video.video_id, status="failed", error=str(e)[:500])
+            raise
 
 
 def _process(video, progress, cached: dict | None, transcript_only: bool, t0: float,
@@ -460,9 +499,9 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
     is_file = file_meta is not None
     owns_workdir = workdir is None
     if owns_workdir:
-        workdir = config.DATA_DIR / "work" / f"{video.platform}_{video.video_id}"
-        shutil.rmtree(workdir, ignore_errors=True)  # leftovers from a crashed earlier run
-        workdir.mkdir(parents=True)
+        # A new directory per job: two jobs for the same video must not share (and delete) each other's files.
+        (config.DATA_DIR / "work").mkdir(parents=True, exist_ok=True)
+        workdir = Path(tempfile.mkdtemp(dir=config.DATA_DIR / "work", prefix=f"{video.platform}_{video.video_id}_"))
     # A saved transcript makes the lookup unnecessary: its metadata is stored with it, and nothing needs
     # downloading unless the LLM asks for frames (then the video download looks it up itself).
     reuse_meta = bool(not is_file and cached and cached.get("meta")
@@ -593,7 +632,8 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
                          (time.monotonic() - t_llm) / llm_load(len(transcript), len(first_images)))
             summary = {k: answer[k] for k in summarize.SCHEMA["required"]}
             log.info("needs_frames=%s moments=%s", answer.get("needs_frames"), answer.get("frame_moments"))
-            if answer.get("needs_frames") and not images and meta.get("has_video", True):  # it already has slides/frames otherwise
+            # Not when it already has slides or frames.
+            if answer.get("needs_frames") and not images and meta.get("has_video", True):
                 st.ok("✅ First summary written")
                 t = time.monotonic()
                 frames_ = _frames(video, meta, cues, answer.get("frame_moments") or [], workdir, st, notes)

@@ -248,76 +248,79 @@ def run(upload: dict, mode: str, chapter: int | None, path: Path | None, workdir
         raise DocumentError(MESSAGES["broken"], "neither a stored document nor a file")
     db.set_upload_sha(upload["id"], digest)
     db.update_request(request_id, platform="document", video_id=digest, status="processing")
-    hide = bool(hide_cache_from) and not db.user_saw_video(hide_cache_from, "document", digest, request_id)
-    doc = db.get_document(digest)
-    # A scan read before but not OCRed yet ("needs-ocr") isn't parsed again: its pages are stored.
-    read_now = not doc or doc["status"] not in ("done", "needs-ocr")
-    if read_now:
-        if path is None:
-            raise DocumentError("⚠️ Please send the file again.", "document text missing")
-        st.show("📄 Reading the file…")
-        t = time.monotonic()
-        db.save_document(digest, name=upload["name"][:200], status="processing")
-        try:
-            parsed = parse(path, workdir)
-            scan = _is_scan(parsed)
-            if not scan:
-                _check_text(parsed["pages"])
-        except DocumentError as e:
-            db.save_document(digest, status="failed", error=(e.detail or str(e))[:500])
-            raise
-        store(digest, upload["name"], parsed, scan)
-        steps.append(("reading the file", time.monotonic() - t))
+    # One job per document at a time (see pipeline.one_at_a_time): no double parsing, OCR or summaries.
+    with pipeline.one_at_a_time(("document", digest), lambda: st.show("⏳ Processing…")):
+        hide = bool(hide_cache_from) and not db.user_saw_video(hide_cache_from, "document", digest, request_id)
         doc = db.get_document(digest)
-    if doc["status"] == "needs-ocr":
-        try:
-            steps += _ocr(digest, doc, path, workdir, st, request_id, ocr_confirmed)
-        except DocumentError as e:
-            if str(e) == EMPTY:
-                db.save_document(digest, status="failed", error="no text after OCR")
-            raise
-        doc = db.get_document(digest)
-        read_now = True
-    st.head = f"📄 {upload['name'][:80]} ({doc['pages']} pages)"
-    st.ok(f"✅ {len(doc['chapters'])} chapters" if len(doc["chapters"]) > 1 else "✅ File read")
+        # A scan read before but not OCRed yet ("needs-ocr") isn't parsed again: its pages are stored.
+        read_now = not doc or doc["status"] not in ("done", "needs-ocr")
+        if read_now:
+            if path is None:
+                raise DocumentError("⚠️ Please send the file again.", "document text missing")
+            st.show("📄 Reading the file…")
+            t = time.monotonic()
+            db.save_document(digest, name=upload["name"][:200], status="processing")
+            try:
+                parsed = parse(path, workdir)
+                scan = _is_scan(parsed)
+                if not scan:
+                    _check_text(parsed["pages"])
+            except DocumentError as e:
+                db.save_document(digest, status="failed", error=(e.detail or str(e))[:500])
+                raise
+            store(digest, upload["name"], parsed, scan)
+            steps.append(("reading the file", time.monotonic() - t))
+            doc = db.get_document(digest)
+        if doc["status"] == "needs-ocr":
+            try:
+                steps += _ocr(digest, doc, path, workdir, st, request_id, ocr_confirmed)
+            except DocumentError as e:
+                if str(e) == EMPTY:
+                    db.save_document(digest, status="failed", error="no text after OCR")
+                raise
+            doc = db.get_document(digest)
+            read_now = True
+        st.head = f"📄 {upload['name'][:80]} ({doc['pages']} pages)"
+        st.ok(f"✅ {len(doc['chapters'])} chapters" if len(doc["chapters"]) > 1 else "✅ File read")
 
-    b = books.Books(digest, backend, model, st.show)
-    kind = {"whole": "book", "short": "short", "each": "each"}.get(mode) or ("pick" if chapter is None else "chapter")
-    result = DocResult(kind, upload["name"], doc, video_id=digest, llm=b.llm, backend=b.backend, model=b.model)
-    if kind == "chapter" and not 0 <= chapter < len(doc["chapters"]):
-        raise DocumentError("⚠️ That chapter doesn't exist any more. Please pick again.", f"chapter {chapter}")
-    summary_cached = _summaries_cached(b, result.kind, chapter)
-    pause = 0.0
-    if hide and not read_now and not summary_cached:
-        # The text was read before, for someone else: show the reading step a fresh run takes (paced like a
-        # cached answer), or an instant "file read" would tell them. It stays on screen while the real work
-        # runs; the time still owed is waited out by the bot, off the worker (DocResult.hold).
-        pause = min(read_seconds(doc["pages"]) * pipeline.REPLAY_SHARE, pipeline.REPLAY_MAX)
-        st.show("📄 Reading the file…")
-        st.frozen = True
-        steps.append(("reading the file", pause))
-    try:
-        if result.kind == "book":
-            result.book = b.book()
-        elif result.kind in ("short", "each"):
-            all_ = list(range(len(doc["chapters"])))
-            got = b.chapters_summaries(all_, "short" if result.kind == "short" else "full")
-            result.chapters = [(i, doc["chapters"][i]["title"], got[i]) for i in all_]
-        elif result.kind == "chapter":
-            got = b.chapters_summaries([chapter], "full")
-            result.chapters = [(chapter, doc["chapters"][chapter]["title"], got[chapter])]
-    except summarize.SummaryError as e:
-        raise DocumentError(str(e), e.detail)
-    if b.steps:
-        steps.append(("summary", sum(sec for _, sec in b.steps)))
-    result.steps, result.llm, result.total = steps, b.llm, time.time() - t0 + pause
-    if pause:
-        result.hold = [(st.text("📑 Listing the chapters…" if result.kind == "pick"
-                                else f"🧠 Summarizing with {b.llm}…"), pause)]
-    result.cached = not read_now and not b.steps and result.kind != "pick"
-    if result.cached and hide:
-        _plan_replay(result, backend)
-    return result
+        b = books.Books(digest, backend, model, st.show)
+        kind = ({"whole": "book", "short": "short", "each": "each"}.get(mode)
+                or ("pick" if chapter is None else "chapter"))
+        result = DocResult(kind, upload["name"], doc, video_id=digest, llm=b.llm, backend=b.backend, model=b.model)
+        if kind == "chapter" and not 0 <= chapter < len(doc["chapters"]):
+            raise DocumentError("⚠️ That chapter doesn't exist any more. Please pick again.", f"chapter {chapter}")
+        summary_cached = _summaries_cached(b, result.kind, chapter)
+        pause = 0.0
+        if hide and not read_now and not summary_cached:
+            # The text was read before, for someone else: show the reading step a fresh run takes (paced like a
+            # cached answer), or an instant "file read" would tell them. It stays on screen while the real work
+            # runs; the time still owed is waited out by the bot, off the worker (DocResult.hold).
+            pause = min(read_seconds(doc["pages"]) * pipeline.REPLAY_SHARE, pipeline.REPLAY_MAX)
+            st.show("📄 Reading the file…")
+            st.frozen = True
+            steps.append(("reading the file", pause))
+        try:
+            if result.kind == "book":
+                result.book = b.book()
+            elif result.kind in ("short", "each"):
+                all_ = list(range(len(doc["chapters"])))
+                got = b.chapters_summaries(all_, "short" if result.kind == "short" else "full")
+                result.chapters = [(i, doc["chapters"][i]["title"], got[i]) for i in all_]
+            elif result.kind == "chapter":
+                got = b.chapters_summaries([chapter], "full")
+                result.chapters = [(chapter, doc["chapters"][chapter]["title"], got[chapter])]
+        except summarize.SummaryError as e:
+            raise DocumentError(str(e), e.detail)
+        if b.steps:
+            steps.append(("summary", sum(sec for _, sec in b.steps)))
+        result.steps, result.llm, result.total = steps, b.llm, time.time() - t0 + pause
+        if pause:
+            result.hold = [(st.text("📑 Listing the chapters…" if result.kind == "pick"
+                                    else f"🧠 Summarizing with {b.llm}…"), pause)]
+        result.cached = not read_now and not b.steps and result.kind != "pick"
+        if result.cached and hide:
+            _plan_replay(result, backend)
+        return result
 
 
 def _summaries_cached(b: "books.Books", kind: str, chapter: int | None) -> bool:
