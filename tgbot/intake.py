@@ -386,7 +386,7 @@ async def ask(update: Update, parent_id: int, question: str) -> None:
 
 
 def command(**opts):
-    """Makes a handler for a `/command <url>` that queues the link with the given job options.
+    """Makes a handler for a `/command [url]` that queues the link with the given job options.
 
     Args:
         **opts: Job options, e.g. `use_cache=False` (/again) or `transcript_only=True` (/transcript).
@@ -395,7 +395,9 @@ def command(**opts):
         An async command handler.
     """
     async def handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Queues the URL given as the command's argument, for allowed users."""
+        """Queues the URL given as the command's argument, for allowed users; without one, the user's latest
+        video link (so "/again" after a failure redoes it)."""
         if await handlers.guard(update, ctx):
-            await enqueue(update, find_url(" ".join(ctx.args)), **opts)
+            url = find_url(" ".join(ctx.args)) or db.last_video_link(update.effective_user.id)
+            await enqueue(update, url, **opts)
     return handler

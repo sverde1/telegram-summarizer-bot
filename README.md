@@ -323,8 +323,8 @@ sandbox. Without a working CUDA runtime it logs a warning and stays on the CPU.
 | Command | Who | |
 |---|---|---|
 | *(a link)* | users | Summarize it. |
-| `/again <url>` | users | Summarize again with your current model, ignoring the cache. |
-| `/transcript <url>` | users | The raw transcript as a `.txt` file (YouTube/TikTok, or a Drive/Dropbox link to a recording; for an uploaded recording, send it with the caption `/transcript`). |
+| `/again [url]` | users | Summarize again with your current model, ignoring the cache. Without a link: your latest YouTube/TikTok video (e.g. after a failure). |
+| `/transcript [url]` | users | The raw transcript as a `.txt` file; without a link, of your latest video (YouTube/TikTok, or a Drive/Dropbox link to a recording; for an uploaded recording, send it with the caption `/transcript`). |
 | `/history` | users | Your recent requests (admins: everyone's, with who sent them). |
 | `/models` | users | Show or choose the AI: provider first, then model. |
 | `/limit` | users | Your limits: requests, scanned documents (OCR) and new voice messages in the last 24 h, and how many are left. |

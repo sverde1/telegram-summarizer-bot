@@ -87,3 +87,11 @@ def test_codex_runs_in_the_network_jail_or_not_at_all(monkeypatch, tmp_path):
     shared = summarize._bwrap(tmp_path)
     assert shared[:4] == ["bwrap", "--unshare-all", "--share-net", "--die-with-parent"]
     assert "/etc/resolv.conf" in shared
+
+
+def test_codex_errors_come_from_its_json_events():
+    out = ('{"type":"thread.started","thread_id":"S"}\n'
+           '{"type":"error","message":"stream disconnected before completion"}\n'
+           '{"type":"turn.failed","error":{"message":"stream disconnected before completion"}}\n')
+    assert summarize._codex_error(out) == "stream disconnected before completion"
+    assert summarize._codex_error("not json\n") == ""

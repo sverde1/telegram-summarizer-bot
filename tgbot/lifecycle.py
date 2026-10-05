@@ -24,8 +24,8 @@ STRANGER_COMMANDS = [BotCommand("start", "Request access to this bot")]
 # /start isn't listed for approved users: they don't need it, and its menu entry says "request access".
 USER_COMMANDS = [
     BotCommand("help", "How to use the bot"),
-    BotCommand("again", "Summarize again, ignoring the cache: /again <url>"),
-    BotCommand("transcript", "Get the raw transcript as a file: /transcript <url>"),
+    BotCommand("again", "Summarize again, ignoring the cache (your latest video, or /again <url>)"),
+    BotCommand("transcript", "Get the raw transcript as a file (your latest video, or /transcript <url>)"),
     BotCommand("history", "Your recent requests"),
     BotCommand("models", "Show or choose the AI: Codex or Claude, then the model"),
     BotCommand("limit", "Your daily limit"),

@@ -913,3 +913,11 @@ def message_request(chat_id: int, message_id: int) -> int | None:
         row = c.execute("SELECT request_id FROM messages WHERE chat_id=? AND message_id=?",
                         (chat_id, message_id)).fetchone()
     return row["request_id"] if row else None
+
+
+def last_video_link(user_id: int) -> str | None:
+    """The link of a user's latest YouTube/TikTok request (for /again or /transcript without a link), or None."""
+    with _db() as c:
+        row = c.execute("""SELECT url FROM requests WHERE user_id=? AND platform IN ('youtube', 'tiktok')
+                           ORDER BY id DESC LIMIT 1""", (user_id,)).fetchone()
+    return row["url"] if row else None

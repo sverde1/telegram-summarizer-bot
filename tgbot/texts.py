@@ -4,8 +4,8 @@
 HELP = (
     "Send me a YouTube or TikTok link and I'll reply with the title, an answer to any clickbait, "
     "and a summary.\n\n"
-    "/again <url> - ignore the cache and summarize again\n"
-    "/transcript <url> - send the raw transcript as a file\n"
+    "/again [url] - summarize again, ignoring the cache (no link: your latest video)\n"
+    "/transcript [url] - send the raw transcript as a file (no link: your latest video)\n"
     "/history - your recent requests\n"
     "/models - show or choose the AI (Codex or Claude) and model\n"
     "/limit - how many requests and questions you have left today\n"

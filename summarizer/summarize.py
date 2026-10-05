@@ -643,6 +643,20 @@ def _bwrap(job: Path) -> list[str]:
     return netjail.run_args(args, [])
 
 
+def _codex_error(stdout: str) -> str:
+    """The error messages in Codex's JSONL events ("error", "turn.failed"), joined; "" if there are none."""
+    found = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") in ("error", "turn.failed"):
+            err = event.get("error")
+            found.append(str(event.get("message") or (err.get("message") if isinstance(err, dict) else err) or ""))
+    return "; ".join(dict.fromkeys(m for m in found if m))
+
+
 class CodexConversation(Conversation):
     """Codex CLI on the ChatGPT subscription, run inside the bwrap sandbox."""
 
@@ -704,7 +718,9 @@ class CodexConversation(Conversation):
                         pass
             out = job / "out" / "result.json"
             if p.returncode != 0 or not out.exists():
-                tail = (p.stderr or p.stdout).strip()[-600:]
+                # Codex reports the actual failure as a JSON event on stdout; stderr often has only its
+                # "Reading prompt from stdin..." banner.
+                tail = (_codex_error(p.stdout) or p.stderr or p.stdout).strip()[-600:]
                 log.error("codex failed (%s): %s", p.returncode, tail)
                 if "usage limit" in tail.lower() or "rate limit" in tail.lower():
                     raise SummaryError(AI_LIMIT, f"ChatGPT usage limit: {tail[-300:]}")
