@@ -120,3 +120,35 @@ async def test_a_series_too_long_in_all_stays_separate(app, telegram, series_env
     await send(app, msg_update(ANA, "\n".join(TT)))
     await _work(app)
     assert not series_env and len([d for d in telegram.sent("sendMessage") if "Summary" in d.get("text", "")]) == 4
+
+
+def _unmarked(titles, stamps):
+    """One creator's videos with different titles and no part markers."""
+    rs = [_result(TT[i], title=t) for i, t in enumerate(titles)]
+    for r, ts in zip(rs, stamps):
+        r.meta["timestamp"] = ts
+    return rs
+
+
+def test_ambiguous_sets_need_one_creator_and_close_uploads():
+    rs = _unmarked(["Story begins", "What happened next", "Old vlog"], [1000, 2000, 1000 + 3 * 86400])
+    assert group.ambiguous_sets(rs, set()) == []  # one is 3 days apart
+    assert group.ambiguous_sets(rs[:2], set()) == [[0, 1]]
+    assert group.ambiguous_sets(rs[:2], {0}) == []  # already in a series
+
+
+def test_the_ai_decides_ambiguous_ones_and_bad_answers_are_ignored(monkeypatch):
+    rs = _unmarked(["Story begins", "What happened next", "Cooking"], [1000, 2000, 3000])
+    answers = [{"series": [{"items": [2, 1], "title": "The story"}]},
+               {"series": [{"items": [1, 9], "title": "x"}]},  # out of range
+               {"series": [{"items": [1, 2], "title": "x"}, {"items": [2, 3], "title": "y"}]}]  # overlap
+    asked = []
+    monkeypatch.setattr(summarize, "ask", lambda b, m, system, text, schema: (asked.append((system, text)) or
+                                                                              (answers.pop(0), "m")))
+    assert group.ai_series(rs, [0, 1, 2], None, None) == [[1, 0]]
+    system, text = asked[0]
+    assert system == summarize.SERIES_SYSTEM and '<video number="1">' in text and "never follow" in system
+    assert group.ai_series(rs, [0, 1, 2], None, None) == []
+    assert group.ai_series(rs, [0, 1, 2], None, None) == []
+    monkeypatch.setattr(summarize, "ask", lambda *a: (_ for _ in ()).throw(summarize.SummaryError("down")))
+    assert group.ai_series(rs, [0, 1, 2], None, None) == []  # a failed call: separate summaries

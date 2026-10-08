@@ -173,6 +173,59 @@ def find_series(results: list[pipeline.Result], numbers: list[int | None] | None
     return series
 
 
+AMBIGUOUS_WITHIN = 48 * 3600  # one creator's unmarked videos uploaded this close together may be parts
+
+
+def ambiguous_sets(results: list[pipeline.Result], taken: set[int]) -> list[list[int]]:
+    """One creator's videos not yet in a series, uploaded within AMBIGUOUS_WITHIN: maybe parts (the AI decides)."""
+    by_creator: dict[str, list[int]] = {}
+    for i, r in enumerate(results):
+        if i not in taken and not _creator(r).endswith(":"):
+            by_creator.setdefault(_creator(r), []).append(i)
+    sets = []
+    for idx in by_creator.values():
+        stamps = [results[i].meta.get("timestamp") or 0 for i in idx]
+        if len(idx) >= 2 and all(stamps) and max(stamps) - min(stamps) <= AMBIGUOUS_WITHIN:
+            sets.append(idx)
+    return sets
+
+
+def ai_series(results: list[pipeline.Result], idx: list[int], backend: str | None,
+              model: str | None) -> list[list[int]]:
+    """Asks the AI which of one creator's videos are parts of one video (one small call).
+
+    Its answer is checked: numbers in range, none in two sets, each set at least 2. Anything else, or a failed
+    call, means separate summaries; a misgrouping could only ever merge this one creator's own videos.
+
+    Returns:
+        Sets of indexes into `results`, in part order.
+    """
+    blocks = []
+    for n, i in enumerate(idx, 1):
+        r = results[i]
+        text = r.transcript or ""
+        blocks.append(f'<video number="{n}">\nTitle: {r.meta.get("title", "")}\nUploaded: '
+                      f'{r.meta.get("timestamp") or 0}\nDuration: {r.meta.get("duration") or 0} s\n'
+                      f'Description: {(r.meta.get("description") or "")[:600]}\n'
+                      f'Transcript start: {text[:600]}\nTranscript end: {text[-600:]}\n</video>')
+    try:
+        answer, _ = summarize.ask(backend, model, summarize.SERIES_SYSTEM, "\n\n".join(blocks),
+                                  summarize.SERIES_SCHEMA)
+    except summarize.SummaryError as e:
+        log.warning("series check failed: %s", e.detail or e)
+        return []
+    found, used = [], set()
+    for s in answer.get("series") or []:
+        items = s.get("items") or []
+        if (len(items) < 2 or len(set(items)) != len(items) or used & set(items)
+                or not all(isinstance(n, int) and 1 <= n <= len(idx) for n in items)):
+            log.warning("series check gave an unusable answer: %s", answer)
+            return []
+        used |= set(items)
+        found.append([idx[n - 1] for n in items])
+    return found
+
+
 def series_key(results: list[pipeline.Result]) -> str:
     """A series' id: the same parts give the same id in any order, so a resend is found in the cache."""
     ids = sorted(f"{r.platform}:{r.video_id}" for r in results)
@@ -275,7 +328,12 @@ def run(urls: list[str], part_ids: list[int], progress, *, use_cache: bool, tran
             todo.append((i, r))
     series_items = []  # (message position, the first part's request id, the series result)
     if not transcript_only:
-        for idx in find_series([r for _, r in todo], [numbers[i] for i, _ in todo] if numbers else None):
+        candidates = [r for _, r in todo]
+        sets = find_series(candidates, [numbers[i] for i, _ in todo] if numbers else None)
+        for maybe in ambiguous_sets(candidates, {i for s in sets for i in s}):
+            progress(f"🔗 {n} links · 🧩 checking which belong together…", None)
+            sets += ai_series(candidates, maybe, backend, model)
+        for idx in sets:
             parts = [todo[k] for k in idx]
             length = sum(r.meta.get("duration") or 0 for _, r in parts)
             if length > config.MAX_DURATION_MIN * 60 * SERIES_MAX_FACTOR:
