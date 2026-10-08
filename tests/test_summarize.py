@@ -95,3 +95,8 @@ def test_codex_errors_come_from_its_json_events():
            '{"type":"turn.failed","error":{"message":"stream disconnected before completion"}}\n')
     assert summarize._codex_error(out) == "stream disconnected before completion"
     assert summarize._codex_error("not json\n") == ""
+
+
+def test_the_prompt_ignores_ads_in_descriptions():
+    assert "affiliate or shop links" in summarize.SYSTEM and "mention a sponsorship only in the caveats" in \
+        summarize.SYSTEM
