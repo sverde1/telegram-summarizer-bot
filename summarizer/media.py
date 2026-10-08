@@ -316,6 +316,9 @@ def probe(video: Video, info_path: Path | None = None) -> dict:
         "title": title.strip(),
         "description": (d.get("description") or "")[:3000],
         "uploader": d.get("uploader") or d.get("channel") or "",
+        # An id, unlike the display name: whether several links are one creator's (parts of one video).
+        "uploader_id": d.get("channel_id") or d.get("uploader_id") or d.get("uploader") or "",
+        "timestamp": d.get("timestamp") or 0,
         "duration": d.get("duration") or 0,
         "upload_date": d.get("upload_date") or "",
         "language": d.get("language") or "",

@@ -361,6 +361,9 @@ def status_head(platform: str, url: str, meta: dict, photo: bool = False) -> str
     """
     if platform == "file":
         return f"{url[:80]} ({fmt_duration(meta.get('duration') or 0)})"
+    if platform == "series":  # parts of one video, summarized as one
+        return f"🧩 {meta.get('title', '')[:80]} ({len(meta.get('parts') or [])} parts, " \
+               f"{fmt_duration(meta.get('duration') or 0)})"
     if photo or meta.get("is_carousel"):
         return f"🖼 {meta.get('title', '')[:80]} (photo post)"  # "duration" would be the music's
     return f"🎬 {meta.get('title', '')[:80]} ({fmt_duration(meta.get('duration') or 0)})"

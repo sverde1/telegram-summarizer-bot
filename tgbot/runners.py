@@ -209,7 +209,7 @@ async def _run_group(app: Application, job: state.Job, progress: sending.Progres
     return await asyncio.to_thread(
         group.run, job.urls, job.part_ids, progress, use_cache=job.use_cache, transcript_only=job.transcript_only,
         backend=job.backend, model=job.model, hide_cache_from=None if admin else job.user_id,
-        again_limit_user=None if admin else job.user_id)
+        again_limit_user=None if admin else job.user_id, numbers=job.numbers)
 
 
 # Each job kind's runner: (app, job, progress) -> its result. Every JobKind must have one (tested).

@@ -61,7 +61,13 @@ def _video_material(req: dict, budget: int) -> str:
     if not (row.get("transcript") or "").strip():
         # Photo posts and silent videos: the summary came from what was shown, which the AI can't see now.
         return "<transcript>(no transcript; the summary may rely on what was shown on screen)</transcript>"
-    return f"<transcript>\n{_cut(row['transcript'], budget - 30, 'transcript')}\n</transcript>"
+    text = row["transcript"]
+    parts = re.split(r"(?m)^(?==== Part \d+)", text)
+    if req["platform"] == "series" and len(text) > budget - 30 and len(parts) > 1:
+        # Parts of one video: each part keeps its share, so the last parts aren't the ones cut away.
+        share = (budget - 30) // len([p for p in parts if p.strip()])
+        text = "".join(_cut(p, share, "part") + "\n" for p in parts if p.strip())
+    return f"<transcript>\n{_cut(text, budget - 30, 'transcript')}\n</transcript>"
 
 
 def named_chapters(question: str, chapters: list[dict]) -> list[int]:

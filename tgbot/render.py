@@ -140,6 +140,9 @@ def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True,
     """
     s = r.summary
     title = _cap(s.get("title") or r.meta.get("title", ""), FIELD_LIMITS["title"])
+    if r.platform == "series":  # parts of one video, summarized as one
+        length = pipeline.fmt_duration(r.meta.get("duration") or 0)
+        title = f"🧩 {title} ({len(r.meta.get('parts') or [])} parts, {length})"
     if s.get("is_clickbait") and s.get("clickbait_answer"):
         answer = _cap(units.convert(s["clickbait_answer"], *units_), FIELD_LIMITS["clickbait_answer"])
     else:
