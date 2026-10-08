@@ -108,6 +108,32 @@ def _is_short_link(p: _Parsed) -> bool:
             or (p.host in TIKTOK_POST_HOSTS and bool(_TT_T_PATH.fullmatch(p.path))))
 
 
+# A list marker at the start of a line: "1." "1)" "1:" (the number is kept as an order hint) or "-" "•" "*".
+_LIST_MARK = re.compile(r"^\s*(?:(\d{1,2})\s*[.):]|[-•*])\s*")
+_TRAILING = ",;:.!?)]}>\"'»”’"
+
+
+def find_urls(text: str) -> list[tuple[str, int | None]]:
+    """Every http(s) link in a message, in order, without duplicates: (link, its list number or None).
+
+    Any layout works: links separated by spaces, commas or newlines, numbered ("1. url", "1) url") or bulleted
+    ("- url", "• url") lists, links inside text. Trailing punctuation and closing brackets never stick to a link.
+    The number of a numbered list is a hint for the order of a video's parts.
+    """
+    found, seen = [], set()
+    for line in (text or "").splitlines():
+        mark = _LIST_MARK.match(line)
+        number = int(mark.group(1)) if mark and mark.group(1) else None
+        for raw in URL_RE.findall(line):
+            for url in re.split(r",(?=https?://)", raw):  # "url1,url2" without a space
+                url = url.rstrip(_TRAILING)
+                if url and url not in seen:
+                    seen.add(url)
+                    found.append((url, number))
+                number = None  # only the first link on a numbered line gets its number
+    return found
+
+
 def find_url(text: str) -> str | None:
     """Returns the first http(s) link in a message, or None."""
     m = URL_RE.search(text or "")

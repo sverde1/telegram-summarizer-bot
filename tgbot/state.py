@@ -17,6 +17,7 @@ class JobKind(enum.Enum):
     DOCUMENT = "document"  # a book or document (upload_id, book_mode, chapter)
     VOICE = "voice"  # 🔊: reading a summary aloud (voice_of)
     ASK = "ask"  # 💬: a follow-up question about a summary (ask_of, question)
+    GROUP = "group"  # several links in one message, worked on together (urls, part_ids)
 
 
 # Compared and hashed by identity: jobs go in sets (state.running), and two jobs are never the same job.
@@ -60,6 +61,9 @@ class Job:
     ask_of: int = 0  # 💬: the summary request a question is about; 0 for everything else
     question: str = ""  # 💬: the question
     reply_to: int = 0  # 💬: the question's message, which the answer replies to
+    urls: list[str] = field(default_factory=list)  # a group: its links, in the message's order
+    part_ids: list[int] = field(default_factory=list)  # a group: each link's request row (they count)
+    numbers: list[int | None] = field(default_factory=list)  # a group: each link's list number, if any
     # Set to stop this job's programs (proc.job_cancel while it runs); jobs run side by side, so each has its own.
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     started_at: float = 0.0  # when the worker started it (monotonic); the status's elapsed time counts from it
@@ -74,8 +78,10 @@ class Job:
         """
         uploads = self.job_kind in (JobKind.MEDIA, JobKind.DOCUMENT)
         ask = self.job_kind is JobKind.ASK
+        group = self.job_kind is JobKind.GROUP
         if (bool(self.upload_id) != uploads or bool(self.voice_of) != (self.job_kind is JobKind.VOICE)
-                or bool(self.ask_of) != ask or bool(self.question) != ask):
+                or bool(self.ask_of) != ask or bool(self.question) != ask
+                or (len(self.urls) >= 2) != group or (group and len(self.part_ids) != len(self.urls))):
             raise ValueError(f"a {self.job_kind.value} job with upload_id={self.upload_id}, "
                              f"voice_of={self.voice_of}, ask_of={self.ask_of}")
 

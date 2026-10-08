@@ -1,5 +1,6 @@
 """The job queue's life cycle: queueing, the worker, cancelling, finishing, failing, admin notices."""
 import asyncio
+import dataclasses
 import enum
 import json
 import logging
@@ -10,7 +11,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application
 
 import access
-from summarizer import config, db, documents, memory, pipeline, proc, stats, summarize, transcribe, urls
+from summarizer import config, db, documents, group, memory, pipeline, proc, stats, summarize, transcribe, urls
 from summarizer.results import JobResult
 from summarizer.urls import UnsupportedURL
 from tgbot import delivery, limits, menus, prefs, render, runners, sending, state, texts
@@ -22,6 +23,8 @@ async def report_cancel(app: Application, job: state.Job) -> None:
     """Records a job as cancelled and shows the reason on its status message."""
     reason = job.cancel_reason or texts.CANCELLED
     db.update_request(job.request_id, status="cancelled", error="cancelled: " + reason[:200])
+    if job.job_kind is state.JobKind.GROUP:
+        db.close_group(job.request_id)  # a queued group is ended before it's marked: close its links here
     # A cancelled or stopped job can be queued again as it was (not one whose user lost access).
     if reason in (texts.CANCELLED, texts.STOPPED):  # what it was, for the user deciding to try again
         await fail(app, job, f"{reason}\n{describe(job)}", markup=retry_button(job.request_id))
@@ -142,6 +145,8 @@ def end_job(job: state.Job) -> None:
     """
     if state.jobs.pop(job.request_id, None) is None:
         return
+    if job.job_kind is state.JobKind.GROUP:
+        db.close_group(job.request_id)  # its links end like the group (cancelled, failed, …)
     state.user_jobs[job.user_id] -= 1
     if state.user_jobs[job.user_id] <= 0:
         del state.user_jobs[job.user_id]
@@ -358,6 +363,9 @@ async def _finish(app: Application, job: state.Job, result: JobResult, waited: f
         UserBlockedBot: The user can't be reached.
         TelegramError: Telegram refused the result.
     """
+    if isinstance(result, group.GroupResult):
+        await _finish_group(app, job, result, waited)
+        return
     if isinstance(result, documents.DocResult) and result.kind == "pick":
         await delivery.show_pick_list(app, job, result)
         return
@@ -371,6 +379,28 @@ async def _finish(app: Application, job: state.Job, result: JobResult, waited: f
         await app.bot.delete_message(job.chat_id, job.status_id)
     except TelegramError:
         pass  # the user deleted it already, or can't be reached: the result is delivered either way
+
+
+async def _finish_group(app: Application, job: state.Job, result: "group.GroupResult", waited: float) -> None:
+    """Delivers a several-link message: each link's result as if it had been sent alone (its own request,
+    messages and buttons), a short note for each link that failed, then closes the group."""
+    for part_id, item in result.items:
+        part = dataclasses.replace(job, request_id=part_id, job_kind=state.JobKind.VIDEO, urls=[], part_ids=[],
+                                   numbers=[])
+        await delivery.deliver(app, part, item, waited)
+        db.update_request(part_id, status="done", cached=int(item.cached))
+    for part_id, url, message in result.failures:
+        db.update_request(part_id, status="failed", error=message[:500])
+        text = f"⚠️ {url}\n{message}"
+        await sending.send_with_retry(lambda text=text: app.bot.send_message(
+            job.chat_id, text, disable_web_page_preview=True), job)
+    db.update_request(job.request_id, status="done" if result.items else "failed", cached=int(result.cached))
+    if not result.cached and (total := result.work_seconds()):
+        stats.record("job", total)
+    try:
+        await app.bot.delete_message(job.chat_id, job.status_id)
+    except TelegramError:
+        pass
 
 
 async def _deliver_later(app: Application, job: state.Job, result: JobResult, waited: float) -> None:

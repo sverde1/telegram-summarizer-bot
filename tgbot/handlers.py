@@ -438,7 +438,7 @@ async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     uid = update.effective_user.id
     admin = access.is_admin(uid)
-    rows = db.recent_requests(None if admin else uid, limit=20)
+    rows = db.recent_requests(None if admin else uid, limit=20, hide_parts=not admin)
     if not rows:
         await update.message.reply_text("No requests yet.")
         return
@@ -451,8 +451,11 @@ async def on_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if admin:
             who = "you" if r["user_id"] == uid else (r["user_name"] or str(r["user_id"]))
             line += f"[{who}] "
-        line += (r["title"] or r["url"])[:70]
-        if r["kind"] != "summary":
+        if r["kind"] == "group":
+            line += f"🔗 {len(r['url'].split())} links"
+        else:
+            line += ("  ↳ " if r.get("group_id") else "") + (r["title"] or r["url"])[:70]
+        if r["kind"] not in ("summary", "group"):
             line += f" ({r['kind']})"
         if admin and r["cached"]:
             line += " ⚡"
@@ -755,6 +758,8 @@ async def on_retry_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     opts = dict(spec["opts"])
     opts["job_kind"] = state.JobKind(opts.get("job_kind", state.JobKind.VIDEO.value))
     db.update_request(req["id"], status="queued", error=None)
+    for part_id in opts.get("part_ids") or []:  # a several-link message: its links are tried again too
+        db.update_request(part_id, status="queued", error=None)
     await q.answer()
     await q.edit_message_text(limits.queued_message())
     await jobs.start_job(req["user_id"], q.message.chat.id, q.message.message_id, spec["url"],

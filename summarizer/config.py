@@ -66,6 +66,8 @@ NETJAIL = _env("NETJAIL", "on").strip().lower() != "off"
 # YouTube lookups (probe, captions) at the same time: a burst of them gets the server's IP flagged as a bot
 # ("Sign in to confirm you're not a bot"). Downloads from a looked-up video aren't counted.
 YOUTUBE_PARALLEL = max(1, int(_env("YOUTUBE_PARALLEL", "2")))
+# Links in one message, worked on as one job (parts of one video get one summary). More are refused.
+MAX_GROUP_LINKS = int(_env("MAX_GROUP_LINKS", "10"))
 AGAIN_COOLDOWN_MIN = int(_env("AGAIN_COOLDOWN_MIN", "10"))
 # Links a non-admin may send per rolling 24 hours (0 = no limit). Only the starting value: once an admin
 # changes it with /limit, the value stored in the database wins.

@@ -220,6 +220,10 @@ def init() -> None:
                 c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
         if "ocr" not in {r["name"] for r in c.execute("PRAGMA table_info(requests)")}:
             c.execute("ALTER TABLE requests ADD COLUMN ocr INTEGER DEFAULT 0")  # 1: this request ran OCR
+        if "group_id" not in {r["name"] for r in c.execute("PRAGMA table_info(requests)")}:
+            # Several links in one message: one "group" request, and one per link pointing at it.
+            c.execute("ALTER TABLE requests ADD COLUMN group_id INTEGER")
+        c.execute("CREATE INDEX IF NOT EXISTS requests_group ON requests (group_id)")
         if "job" not in {r["name"] for r in c.execute("PRAGMA table_info(requests)")}:
             # The queued job as JSON (url, kind, options), so a stopped or cancelled one can be tried again,
             # also after a restart (the queue itself lives in memory).
@@ -646,13 +650,14 @@ def get_page_sources(sha256: str) -> dict[int, str]:
 
 
 # What counts toward each limit (access.LIMITS), as a filter on the user's requests in the window:
-# - daily: every link, file or book request; voice messages and questions don't count (they have their own).
+# - daily: every link, file or book request; voice messages and questions don't count (they have their own),
+#   nor does the "group" request of a message with several links (each of its links counts).
 # - ocr: requests that started a full OCR run (finished or not; a cached OCR text costs nothing).
 # - voice: newly made voice messages (reused ones are free); queued ones count only once they run.
 # - ask: follow-up questions, queued ones included (so queueing several can't overrun the limit); cancelled
 #   and failed ones count too, as for OCR.
 USAGE_FILTERS = {
-    "daily": "kind NOT IN ('voice','ask')",
+    "daily": "kind NOT IN ('voice','ask','group')",
     "ocr": "ocr=1",
     "voice": "kind='voice' AND cached=0 AND status<>'queued'",
     "ask": "kind='ask'",
@@ -797,12 +802,13 @@ def user_saw_video(user_id: int, platform: str, video_id: str, except_request: i
     return row is not None
 
 
-def recent_requests(user_id: int | None, limit: int = 15) -> list[dict]:
+def recent_requests(user_id: int | None, limit: int = 15, hide_parts: bool = False) -> list[dict]:
     """Recent requests, newest first, with the video title and sender's name.
 
     Args:
         user_id: Only this user's requests; None = everyone's (admins only, it shows who sent what).
         limit: Maximum number of rows.
+        hide_parts: Leave out the links of a several-link message (its "group" row stands for them).
 
     Returns:
         Request rows as dicts, plus "title", "user_name" and "user_username".
@@ -815,6 +821,8 @@ def recent_requests(user_id: int | None, limit: int = 15) -> list[dict]:
     if user_id is not None:
         q += " WHERE r.user_id=?"
         args = (user_id,)
+    if hide_parts:
+        q += (" AND" if user_id is not None else " WHERE") + " r.group_id IS NULL"
     q += " ORDER BY r.id DESC LIMIT ?"
     with _db() as c:
         return [dict(r) for r in c.execute(q, (*args, limit))]
@@ -916,8 +924,21 @@ def message_request(chat_id: int, message_id: int) -> int | None:
 
 
 def last_video_link(user_id: int) -> str | None:
-    """The link of a user's latest YouTube/TikTok request (for /again or /transcript without a link), or None."""
+    """The link(s) of a user's latest YouTube/TikTok request or several-link message (for /again or /transcript
+    without a link), or None."""
     with _db() as c:
-        row = c.execute("""SELECT url FROM requests WHERE user_id=? AND platform IN ('youtube', 'tiktok')
+        # A several-link message counts as one: its group row holds all its links.
+        row = c.execute("""SELECT url FROM requests WHERE user_id=? AND group_id IS NULL
+                           AND (platform IN ('youtube', 'tiktok') OR kind='group')
                            ORDER BY id DESC LIMIT 1""", (user_id,)).fetchone()
     return row["url"] if row else None
+
+
+def close_group(group_id: int) -> None:
+    """Gives a several-link message's unfinished links the status their group ended with (cancelled, failed)."""
+    with _db() as c:
+        row = c.execute("SELECT status, error FROM requests WHERE id=?", (group_id,)).fetchone()
+        if row and row["status"] not in ("queued", "processing", "waiting"):
+            c.execute("""UPDATE requests SET status=?, error=?, finished_at=? WHERE group_id=?
+                         AND status IN ('queued', 'processing', 'waiting')""",
+                      (row["status"], row["error"], time.time(), group_id))

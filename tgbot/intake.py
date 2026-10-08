@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from summarizer import config, db, links, memory, pipeline, transcribe
-from summarizer.urls import UnsupportedURL, check as check_url, find_url
+from summarizer.urls import UnsupportedURL, check as check_url, find_url, find_urls
 from tgbot import handlers, jobs, limits, menus, render, state, texts
 
 log = logging.getLogger("bot")  # one logger name for the whole bot, as in the journal
@@ -49,6 +49,52 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
     status = await update.message.reply_text(limits.queued_message())
     kind = _request_kind(opts.get("transcript_only", False), opts.get("use_cache", True))
     await jobs.start_job(uid, update.effective_chat.id, status.message_id, url, kind, **opts)
+
+
+async def enqueue_group(update: Update, items: list[tuple[str, int | None]], **opts) -> None:
+    """Queues the links of one message as one job (each link still counts as a request).
+
+    All or nothing: too many links, an invalid one, a Drive/Dropbox link among them, or too few requests left
+    today refuses the whole message before anything is queued.
+
+    Args:
+        update: The incoming message.
+        items: (link, its list number or None), from find_urls.
+        **opts: Job options: use_cache=False (/again), transcript_only=True (/transcript).
+    """
+    msg, uid = update.message, update.effective_user.id
+    if len(items) > config.MAX_GROUP_LINKS:
+        await msg.reply_text(f"⚠️ Send at most {config.MAX_GROUP_LINKS} links at once (you sent {len(items)}). "
+                             "Nothing was processed.")
+        return
+    for url, _ in items:
+        try:
+            shared = links.parse(url)
+        except links.LinkError:
+            shared = True
+        if shared:
+            await msg.reply_text("⚠️ Send Google Drive and Dropbox links on their own, not with other links. "
+                                 "Nothing was processed.")
+            return
+        try:
+            check_url(url)
+        except UnsupportedURL as e:
+            await msg.reply_text(f"⚠️ {url[:200]}\n{e} Nothing was processed.", disable_web_page_preview=True)
+            return
+    if refusal := limits.refusal(uid, count=len(items)):
+        await msg.reply_text(refusal)
+        return
+    status = await msg.reply_text(limits.queued_message())
+    urls = [url for url, _ in items]
+    group_id = db.add_request(uid, " ".join(urls), "group")
+    kind = _request_kind(opts.get("transcript_only", False), opts.get("use_cache", True))
+    part_ids = []
+    for url in urls:  # each link counts toward the daily limit from the moment it arrives
+        part_ids.append(db.add_request(uid, url, kind))
+        db.update_request(part_ids[-1], group_id=group_id)
+    await jobs.start_job(uid, msg.chat_id, status.message_id, " ".join(urls), "group", request_id=group_id,
+                         job_kind=state.JobKind.GROUP, urls=urls, part_ids=part_ids,
+                         numbers=[number for _, number in items], **opts)
 
 
 def _request_kind(transcript_only: bool, use_cache: bool) -> str:
@@ -325,6 +371,9 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await ask(update, parent, update.message.text.strip())
         return
     text = update.message.text or update.message.caption or ""
+    if len(items := find_urls(text)) > 1:
+        await enqueue_group(update, items)
+        return
     await enqueue(update, find_url(text))
 
 
@@ -398,6 +447,10 @@ def command(**opts):
         """Queues the URL given as the command's argument, for allowed users; without one, the user's latest
         video link (so "/again" after a failure redoes it)."""
         if await handlers.guard(update, ctx):
-            url = find_url(" ".join(ctx.args)) or db.last_video_link(update.effective_user.id)
-            await enqueue(update, url, **opts)
+            items = (find_urls(" ".join(ctx.args))
+                     or find_urls(db.last_video_link(update.effective_user.id) or ""))
+            if len(items) > 1:
+                await enqueue_group(update, items, **opts)
+            else:
+                await enqueue(update, items[0][0] if items else None, **opts)
     return handler

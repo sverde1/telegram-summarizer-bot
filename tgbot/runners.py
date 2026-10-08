@@ -9,7 +9,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application
 
 import access
-from summarizer import config, cpu, db, documents, followup, links, media, memory, pipeline, proc, tts
+from summarizer import config, cpu, db, documents, followup, group, links, media, memory, pipeline, proc, tts
 from tgbot import limits, render, sending, state, texts
 
 
@@ -202,9 +202,20 @@ async def _run_ask(app: Application, job: state.Job, progress: sending.Progress)
     return await asyncio.to_thread(followup.answer, job.ask_of, job.question, job.user_id, job.backend, job.model)
 
 
+async def _run_group(app: Application, job: state.Job, progress: sending.Progress) -> group.GroupResult:
+    """Works on a several-link message (in a thread: downloads, Whisper and AI calls block)."""
+    db.update_request(job.request_id, status="processing")
+    admin = access.is_admin(job.user_id)
+    return await asyncio.to_thread(
+        group.run, job.urls, job.part_ids, progress, use_cache=job.use_cache, transcript_only=job.transcript_only,
+        backend=job.backend, model=job.model, hide_cache_from=None if admin else job.user_id,
+        again_limit_user=None if admin else job.user_id)
+
+
 # Each job kind's runner: (app, job, progress) -> its result. Every JobKind must have one (tested).
 RUNNERS = {state.JobKind.VIDEO: _run_video, state.JobKind.MEDIA: _run_media,
-           state.JobKind.DOCUMENT: _run_document, state.JobKind.VOICE: _run_voice, state.JobKind.ASK: _run_ask}
+           state.JobKind.DOCUMENT: _run_document, state.JobKind.VOICE: _run_voice, state.JobKind.ASK: _run_ask,
+           state.JobKind.GROUP: _run_group}
 
 
 async def make_voice(job: state.Job, result: tts.VoiceResult,

@@ -95,13 +95,14 @@ def queued_message() -> str:
     return f"⏳ Got it, you're in the queue. Estimated wait: about {render.fmt_eta(wait)}."
 
 
-def refusal(uid: int, *, new_request: bool = True) -> str | None:
+def refusal(uid: int, *, new_request: bool = True, count: int = 1) -> str | None:
     """Why a user may not start another job right now, or None if they may (admins always may).
 
     Args:
         uid: The user.
         new_request: Whether the job creates a request row (counts toward the daily limit); False when it
             continues one (a chapter picked from a list).
+        count: How many requests it is (the links of a several-link message); all must fit today's limit.
     """
     if access.is_admin(uid):
         return None
@@ -110,6 +111,8 @@ def refusal(uid: int, *, new_request: bool = True) -> str | None:
                 "done.")
     if new_request:
         used, limit, _, frees_in = limit_status(uid, "daily")
+        if limit and used < limit < used + count:
+            return f"⏳ You have {limit - used} requests left today, and these are {count} links. Send fewer."
         if limit and used >= limit:
             return (f"⏳ You've reached today's limit of {limit} requests. You can send more in about "
                     f"{render.fmt_until(frees_in or 0)}.")
