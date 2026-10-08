@@ -270,6 +270,7 @@ The database migrates itself on start.
 | `MAX_QUEUE` | `20` | Total videos in the queue; new links are refused beyond that (admins excepted). |
 | `POT_HOME` | `data/bgutil/server` | Where `deploy/install-pot.sh` builds the PO-token script; without it, no PO tokens. |
 | `NETJAIL` | `on` | `off` lets Codex share this machine's network when the network jail can't work here (logged at every start; PO tokens stay off). |
+| `MAX_GROUP_LINKS` | `10` | Links in one message, worked on together (parts of one video get one summary). More, or any invalid link among them, refuses the whole message. |
 | `YOUTUBE_PARALLEL` | `2` | YouTube lookups (video info, captions) at the same time. A burst of them gets the server's IP flagged ("Sign in to confirm you're not a bot"); downloads from a looked-up video don't count. |
 | `WORKERS` | `8` | Jobs worked on at the same time. Lookups, downloads and AI calls run side by side; Whisper, OCR, frame sweeps and voice messages take turns on the CPU. |
 | `AGAIN_COOLDOWN_MIN` | `10` | Minutes before the same user may `/again` the same video again (admins: no limit). |
@@ -414,6 +415,26 @@ links, with bullets read as sentences. The whole summary is read, however long.
   20 per 24 h, `/limit voice`); reused ones are free.
 - Read in the language of `SUMMARY_LANGUAGE` (English, Spanish, French, Italian, Portuguese or Hindi; others
   get no button).
+
+### Several links at once
+
+Send up to `MAX_GROUP_LINKS` (10) YouTube/TikTok links in one message: separated by spaces, commas or new
+lines, or as a numbered or bulleted list. They're one job (one status message, one ✖️ Cancel and 🔁 Try
+again), and each link counts as one request toward the daily limit. Too many links, an invalid one, or a
+Drive/Dropbox link among them refuses the whole message, and nothing is processed.
+
+- **Unrelated videos** get a summary each, exactly as if sent one by one (each with its own buttons). The same
+  video twice gets one; a link that fails gets a short note.
+- **Parts of one video** (TikTok's length limit makes creators split videos) get **one** summary,
+  "🧩 Title (4 parts, 14:29)", with every part's link. Only one creator's videos can be parts. They're
+  recognized by part markers in the titles or descriptions ("part 2", "Teil 2", "2/4", "(2)"), else by an
+  identical title (TikTok parts often share one caption, with the number only on screen), else, for
+  different titles uploaded within 48 h, by one small AI check. The order comes from the part numbers, your
+  numbered list, then the upload time. 💬 Ask, 📄 Download (every part's transcript) and 🔊 work on the
+  whole; the summary is cached, so sending the same parts again (in any order) is instant.
+- `/again` alone redoes your latest message, all its links; `/transcript` with several links sends one file
+  per video.
+- `/history` shows the message once ("🔗 4 links").
 
 ### Questions and downloads (💬 Ask, 📄 Download)
 

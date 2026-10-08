@@ -15,6 +15,7 @@ HELP = (
     "📄 You can also send a book or document (PDF, EPUB, DOCX or TXT, up to 20 MB), or a Google Drive or "
     "Dropbox link to one (shared as \"Anyone with the link\"): I'll summarize the whole thing or chapter by "
     "chapter.\n\n"
+    "🔗 Send several links in one message (up to 10): parts of one video get one summary, other videos one each.\n\n"
     "Under every summary: 💬 Ask to ask about it (or just reply to it), 📄 Download for a file to take to "
     "another chat."
 )

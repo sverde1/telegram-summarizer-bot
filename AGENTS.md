@@ -29,6 +29,7 @@ with no GPU.
 | `summarizer/followup.py` | 💬 Ask: the material for a question (transcript, book text or its summaries, within `ASK_MAX_CHARS`), the AI call, `AskResult`. |
 | `tgbot/markdown.py` | 📄 Download: the Markdown file of a delivered summary (summary + transcript; a book's full text). |
 | `summarizer/netjail.py` | The network jail: bwrap with its own network (slirp4netns) and fixed nftables rules, internet only; the startup self-check. |
+| `summarizer/group.py` | Several links in one message: transcripts side by side, parts of one video detected (markers, same title, AI for ambiguous), one "series" summary; `GroupResult`. |
 | `summarizer/cpu.py` | The CPU slot: Whisper, OCR, frame sweeps and Kokoro take turns (FIFO, cancellable); waits are tracked and left out of timings. |
 | `summarizer/results.py` | `JobResult`, the base of every result (cache and pacing fields, `head()`, `work_seconds()`, `llm_label()`). |
 | `access.py` | Who may use the bot (admins from `.env`, others from the `users` table). |
@@ -103,6 +104,12 @@ How the tests are isolated (`tests/conftest.py`):
   `Job.cancel_event`), never a global; thread pools inside a job come from `proc.pool` (plain pool threads
   never see the cancel; `tests/test_layout.py` checks); every job has its own work directory; one job at a
   time per video or document (`pipeline.one_at_a_time`).
+- Several links in one message are **one** job (`JobKind.GROUP`, `summarizer/group.py`): one queue slot,
+  cancel and retry; its links' request rows (created at intake, `requests.group_id`) count toward the daily
+  limit, the group row doesn't. Parts of one video are a pseudo-video (`platform="series"`, keyed by the sorted
+  parts): its `videos` row holds the parts' transcripts under "=== Part N" headings, so caching, 💬, 📄 and
+  pacing reuse the video paths. Grouping text (titles, descriptions, transcripts) is untrusted: the AI's
+  series answer is validated, and only one creator's videos can ever be merged.
 - Sandboxes that need the network go through `summarizer/netjail.py` (own network via slirp4netns, a fixed
   nftables rule set in `netjail.RULES`: the internet only), never `--share-net`. The order is load-bearing:
   slirp and nft act while bwrap waits on `--block-fd`, through the user namespace that owns the network
