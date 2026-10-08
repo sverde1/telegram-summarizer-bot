@@ -118,9 +118,32 @@ def part_numbers(texts: list[str]) -> list[int] | None:
     return None
 
 
-def _creator(r: pipeline.Result) -> str:
-    """Who made a video, as an id (old cached metadata has only the uploader's name)."""
-    return f"{r.platform}:{r.meta.get('uploader_id') or r.meta.get('uploader') or ''}"
+def _creators(results: list[pipeline.Result], only: set[int] | None = None) -> list[list[int]]:
+    """The results grouped by who made them (only one creator's videos can be parts of one video).
+
+    Two videos are by the same creator when their uploader ids match, or their uploader names do: metadata
+    cached before the id was stored has only the name, and that video must still find its other parts.
+    """
+    pool = [i for i in range(len(results)) if only is None or i in only]
+    parent = {i: i for i in pool}
+
+    def root(i: int) -> int:
+        """Union-find: the group a result belongs to."""
+        while parent[i] != i:
+            i = parent[i]
+        return i
+
+    for a in pool:
+        for b in pool:
+            ma, mb = results[a].meta, results[b].meta
+            same_id = ma.get("uploader_id") and ma.get("uploader_id") == mb.get("uploader_id")
+            same_name = ma.get("uploader") and ma.get("uploader") == mb.get("uploader")
+            if a < b and results[a].platform == results[b].platform and (same_id or same_name):
+                parent[root(b)] = root(a)
+    groups: dict[int, list[int]] = {}
+    for i in pool:
+        groups.setdefault(root(i), []).append(i)
+    return [g for g in groups.values() if len(g) >= 2]
 
 
 def _plain_title(title: str) -> str:
@@ -142,13 +165,8 @@ def find_series(results: list[pipeline.Result], numbers: list[int | None] | None
         numbers: Each link's number in the user's numbered list, if any.
     """
     numbers = numbers or [None] * len(results)
-    by_creator: dict[str, list[int]] = {}
-    for i, r in enumerate(results):
-        by_creator.setdefault(_creator(r), []).append(i)
     series = []
-    for creator, idx in by_creator.items():
-        if len(idx) < 2 or creator.endswith(":"):
-            continue
+    for idx in _creators(results):
         for field_ in ("title", "description"):
             marked = [i for i in idx if _WORD.search(results[i].meta.get(field_) or "")]
             for subset in (idx, marked):
@@ -168,8 +186,11 @@ def find_series(results: list[pipeline.Result], numbers: list[int | None] | None
                     by_title.setdefault(title, []).append(i)
             for same in by_title.values():
                 if len(same) >= 2:
-                    series.append(sorted(same, key=lambda i: (numbers[i] if numbers[i] is not None else 10 ** 9,
-                                                             results[i].meta.get("timestamp") or 0, i)))
+                    # Upload times only count when every part has one (older cached metadata doesn't).
+                    timed = all(results[i].meta.get("timestamp") for i in same)
+                    series.append(sorted(same, key=lambda i: (
+                        numbers[i] if numbers[i] is not None else 10 ** 9,
+                        results[i].meta.get("timestamp") if timed else 0, i)))
     return series
 
 
@@ -178,12 +199,8 @@ AMBIGUOUS_WITHIN = 48 * 3600  # one creator's unmarked videos uploaded this clos
 
 def ambiguous_sets(results: list[pipeline.Result], taken: set[int]) -> list[list[int]]:
     """One creator's videos not yet in a series, uploaded within AMBIGUOUS_WITHIN: maybe parts (the AI decides)."""
-    by_creator: dict[str, list[int]] = {}
-    for i, r in enumerate(results):
-        if i not in taken and not _creator(r).endswith(":"):
-            by_creator.setdefault(_creator(r), []).append(i)
     sets = []
-    for idx in by_creator.values():
+    for idx in _creators(results, set(range(len(results))) - taken):
         stamps = [results[i].meta.get("timestamp") or 0 for i in idx]
         if len(idx) >= 2 and all(stamps) and max(stamps) - min(stamps) <= AMBIGUOUS_WITHIN:
             sets.append(idx)

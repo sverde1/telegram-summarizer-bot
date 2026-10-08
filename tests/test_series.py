@@ -152,3 +152,12 @@ def test_the_ai_decides_ambiguous_ones_and_bad_answers_are_ignored(monkeypatch):
     assert group.ai_series(rs, [0, 1, 2], None, None) == []
     monkeypatch.setattr(summarize, "ask", lambda *a: (_ for _ in ()).throw(summarize.SummaryError("down")))
     assert group.ai_series(rs, [0, 1, 2], None, None) == []  # a failed call: separate summaries
+
+
+def test_a_part_with_older_cached_metadata_still_joins_its_series():
+    caption = "Trump's 'Stupid War' Was a Genius Plan #fyp"
+    rs = [_result(TT[i], title=caption) for i in range(4)]
+    for r, ts in zip(rs[1:], (2, 3, 4)):
+        r.meta["timestamp"] = ts
+    del rs[0].meta["uploader_id"], rs[0].meta["timestamp"]  # cached before ids were stored: only the name
+    assert group.find_series(rs) == [[0, 1, 2, 3]]  # all four, in the message's order (one has no time)
