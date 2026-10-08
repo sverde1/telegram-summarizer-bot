@@ -7,7 +7,7 @@ import json
 import logging
 import time
 
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import ContextTypes
 
@@ -706,16 +706,17 @@ async def on_md_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await ctx.bot.send_document(q.message.chat.id, io.BytesIO(data), filename=name, write_timeout=120)
 
 
-ASK_PROMPT = ("💬 Ask anything about this summary, e.g. \"make it longer\" or \"what did they say about "
-              "prices?\"")
+ASK_PROMPT = ("💬 Ask anything about this summary: reply to this message, or just type your question in the next "
+              "5 minutes. E.g. \"make it longer\" or \"what did they say about prices?\"")
 
 
 async def on_ask_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles 💬 Ask (`ask:<summary request id>`): asks for the question.
 
-    The prompt forces a reply (so the question can be traced to its summary, even after a restart) and the
-    user's next plain text counts as the question for a while even if they close the reply bar
-    (state.asking; see intake.on_message).
+    A reply to the prompt (or to the summary) is the question, also after a restart, and so is the user's next
+    plain text for a while (state.asking; see intake.on_message). The prompt deliberately doesn't force a reply:
+    Telegram keeps a ForceReply as the whole chat's reply mode, reopening the reply bar every time the chat is
+    opened. It removes any such mode instead (one left by earlier versions of this prompt).
     """
     if not (checked := await button(update)):
         return
@@ -729,8 +730,7 @@ async def on_ask_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer(texts.TOO_OLD, show_alert=True)
         return
     await q.answer()
-    prompt = await ctx.bot.send_message(q.message.chat.id, ASK_PROMPT,
-                                        reply_markup=ForceReply(input_field_placeholder="Your question"))
+    prompt = await ctx.bot.send_message(q.message.chat.id, ASK_PROMPT, reply_markup=ReplyKeyboardRemove())
     db.save_messages(q.message.chat.id, [prompt.message_id], req["id"])
     state.asking[uid] = (req["id"], time.monotonic())
 

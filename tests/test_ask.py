@@ -69,7 +69,8 @@ async def test_tap_reply_and_get_the_answer_as_a_reply(app, telegram, ai):
     rid, _ = await _summary(app, telegram)
     await send(app, callback_update(ANA, f"ask:{rid}"))
     prompt = telegram.sent("sendMessage")[-1]
-    assert prompt["text"] == handlers.ASK_PROMPT and "force_reply" in str(prompt["reply_markup"])
+    # No forced reply (Telegram would keep reopening the reply bar); it clears one left by older prompts.
+    assert prompt["text"] == handlers.ASK_PROMPT and "remove_keyboard" in str(prompt["reply_markup"])
     question = msg_update(ANA, "Make it longer", reply_to=_prompt_id(telegram))
     await send(app, question)
     await _work(app)
