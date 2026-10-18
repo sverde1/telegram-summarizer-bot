@@ -117,7 +117,7 @@ async def test_other_replies_and_texts_are_not_questions(app, telegram, ai):
     await send(app, msg_update(ANA, "hello", reply_to=99999))  # a bot message that isn't a summary
     await send(app, msg_update(ANA, "hello"))  # no 💬 tapped
     assert all(r["kind"] == "summary" for r in db.recent_requests(ANA))
-    assert telegram.texts()[-3:] == ["Send me a YouTube or TikTok link, or a book or document."] * 3
+    assert telegram.texts()[-3:] == ["Send me a YouTube, TikTok or London Real link, or a book or document."] * 3
 
 
 async def test_only_the_owner_or_an_admin_may_ask(app, telegram, ai):

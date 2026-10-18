@@ -2,7 +2,7 @@
 
 
 HELP = (
-    "Send me a YouTube or TikTok link and I'll reply with the title, an answer to any clickbait, "
+    "Send me a YouTube, TikTok or London Real link and I'll reply with the title, an answer to any clickbait, "
     "and a summary.\n\n"
     "/again [url] - summarize again, ignoring the cache (no link: your latest video)\n"
     "/transcript [url] - send the raw transcript as a file (no link: your latest video)\n"

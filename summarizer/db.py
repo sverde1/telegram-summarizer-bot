@@ -159,6 +159,13 @@ CREATE TABLE IF NOT EXISTS messages (
     request_id  INTEGER NOT NULL,              -- the summary request a reply to it asks about
     PRIMARY KEY (chat_id, message_id)
 );
+CREATE TABLE IF NOT EXISTS video_pages (
+    platform    TEXT NOT NULL,                 -- a video, and a page that plays it (e.g. a London Real episode):
+    video_id    TEXT NOT NULL,                 -- its summaries show that page's link too
+    page_url    TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (platform, video_id, page_url)
+);
 CREATE INDEX IF NOT EXISTS delivered_parent ON delivered (parent_id);
 CREATE INDEX IF NOT EXISTS requests_user ON requests (user_id, created_at);
 CREATE INDEX IF NOT EXISTS requests_video ON requests (platform, video_id);
@@ -942,3 +949,17 @@ def close_group(group_id: int) -> None:
             c.execute("""UPDATE requests SET status=?, error=?, finished_at=? WHERE group_id=?
                          AND status IN ('queued', 'processing', 'waiting')""",
                       (row["status"], row["error"], time.time(), group_id))
+
+
+def add_video_page(platform: str, video_id: str, page_url: str) -> None:
+    """Remembers that a page (e.g. a London Real episode) plays this video."""
+    with _db() as c:
+        c.execute("INSERT OR IGNORE INTO video_pages VALUES (?,?,?,?)", (platform, video_id, page_url, time.time()))
+
+
+def video_pages(platform: str, video_id: str) -> list[str]:
+    """The pages known to play a video, oldest first."""
+    with _db() as c:
+        return [r["page_url"] for r in c.execute(
+            "SELECT page_url FROM video_pages WHERE platform=? AND video_id=? ORDER BY created_at",
+            (platform, video_id))]

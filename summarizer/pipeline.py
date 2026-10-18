@@ -50,6 +50,10 @@ class Result(JobResult):
     summary: dict | None  # {title, is_clickbait, clickbait_answer, summary}
     frames_used: bool = False
     notes: list[str] = field(default_factory=list)
+    # A video page this request came through (e.g. a London Real episode), and every page known to play the
+    # video (earlier requests'). The footer shows the others only to users who may learn of earlier requests.
+    page_url: str = ""
+    page_urls: list[str] = field(default_factory=list)
 
     def head(self) -> str:
         """The status line naming the video, photo post or sent recording."""
@@ -342,9 +346,15 @@ def run(url: str, progress: Callable[..., None], *, use_cache: bool = True,
         UnsupportedURL: The link isn't a YouTube or TikTok video.
         PipelineError: The video can't be processed (the message is shown to the user).
     """
-    return _run(classify(url), progress, use_cache=use_cache, transcript_only=transcript_only,
-                request_id=request_id, backend=backend, model=model, again_limit_user=again_limit_user,
-                hide_cache_from=hide_cache_from)
+    video = classify(url)
+    result = _run(video, progress, use_cache=use_cache, transcript_only=transcript_only,
+                  request_id=request_id, backend=backend, model=model, again_limit_user=again_limit_user,
+                  hide_cache_from=hide_cache_from)
+    if video.page_url:  # remembered, so later summaries of this video show the page too
+        db.add_video_page(video.platform, video.video_id, video.page_url)
+    result.page_url = video.page_url
+    result.page_urls = db.video_pages(video.platform, video.video_id)
+    return result
 
 
 def status_head(platform: str, url: str, meta: dict, photo: bool = False) -> str:

@@ -1,8 +1,9 @@
 """Turning results into Telegram messages: summaries, documents, footers, and the time/size formats."""
 import html
+import urllib.parse
 import math
 
-from summarizer import documents, ocr, pipeline, stats, summarize, units
+from summarizer import documents, ocr, pages, pipeline, stats, summarize, units
 
 
 TG_LIMIT = 4096  # Telegram's maximum message length in characters
@@ -122,6 +123,13 @@ def _pack(pieces: list[str]) -> list[str]:
     return chunks
 
 
+def _pages_shown(r: pipeline.Result, reveal_cache: bool) -> list[str]:
+    """The video pages the footer links to: the one this request came through, and the ones earlier requests
+    came through only for users who may learn about earlier requests (admins, or who sent this video before)."""
+    others = [p for p in r.page_urls if p != r.page_url] if reveal_cache else []
+    return ([r.page_url] if r.page_url else []) + others
+
+
 def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True,
            units_: tuple[str, str] = ("metric", "c")) -> list[str]:
     """Builds the reply in the Title / Clickbait answer / Summary layout, split to fit Telegram.
@@ -147,7 +155,9 @@ def render(r: pipeline.Result, waited: float = 0, reveal_cache: bool = True,
         answer = _cap(units.convert(s["clickbait_answer"], *units_), FIELD_LIMITS["clickbait_answer"])
     else:
         answer = "✅ Not clickbait - the title matches the content."
-    footer = _cap(details(r, waited, reveal_cache), 1000) + "\n" + r.url
+    page_lines = "".join(f"🔗 {pages.name(urllib.parse.urlsplit(p).hostname or '')}: {p}\n"
+                         for p in _pages_shown(r, reveal_cache))
+    footer = _cap(details(r, waited, reveal_cache), 1000) + "\n" + page_lines + r.url
     # A recording someone sent has no published title or thumbnail: nothing to call clickbait.
     clickbait = [] if r.platform == "file" else ["<b>Clickbait answer:</b>", *_text(answer), ""]
     pieces = ["<b>Title:</b>", *_text(title), "", *clickbait,

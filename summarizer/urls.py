@@ -11,6 +11,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
+from . import pages
+
 URL_RE = re.compile(r"https?://\S+")
 
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be",
@@ -30,7 +32,8 @@ _TT_T_PATH = re.compile(r"/t/[A-Za-z0-9_-]+/?")        # tiktok.com/t/<code>
 MAX_REDIRECTS = 5
 RESOLVE_TIMEOUT = 10  # seconds; the short-link lookup happens while the user waits
 
-NOT_SUPPORTED = "Only YouTube and TikTok links are supported."
+NOT_SUPPORTED = "Only YouTube, TikTok and London Real links are supported."
+NOT_AN_EPISODE = "That London Real link doesn't point to an episode."
 NOT_A_YOUTUBE_VIDEO = "That YouTube link doesn't point to a video."
 NOT_A_TIKTOK_POST = "That TikTok link doesn't point to a video or photo post."
 SHORT_LINK_FAILED = "Couldn't open that TikTok short link. Try the full link from the TikTok app's Share menu."
@@ -44,6 +47,7 @@ class Video:
     video_id: str
     url: str       # canonical URL (TikTok: always the /video/ form, which yt-dlp understands)
     kind: str = "video"  # video | photo (TikTok carousel; also detected later from the probe)
+    page_url: str = ""  # a video page's link it was found through (see pages), e.g. a London Real episode
 
 
 class UnsupportedURL(ValueError):
@@ -73,7 +77,7 @@ def _parse(url: str) -> _Parsed:
         raise UnsupportedURL(NOT_SUPPORTED)
     host = (parts.hostname or "").rstrip(".").lower()  # "youtube.com." is the same host
     if (parts.scheme not in ("http", "https") or parts.username is not None or parts.password is not None
-            or port not in (None, 80, 443) or host not in YOUTUBE_HOSTS | TIKTOK_HOSTS):
+            or port not in (None, 80, 443) or not (host in YOUTUBE_HOSTS | TIKTOK_HOSTS or pages.is_page(host))):
         raise UnsupportedURL(NOT_SUPPORTED)
     return _Parsed(host, parts.path, parts.query)
 
@@ -147,7 +151,10 @@ def check(url: str) -> None:
         UnsupportedURL: With a message for the user saying what's wrong.
     """
     p = _parse(url)
-    if p.host in YOUTUBE_HOSTS:
+    if pages.is_page(p.host):
+        if not pages.is_episode(p.host, p.path):
+            raise UnsupportedURL(NOT_AN_EPISODE)
+    elif p.host in YOUTUBE_HOSTS:
         if not _youtube_id(p):
             raise UnsupportedURL(NOT_A_YOUTUBE_VIDEO)
     elif not (_tiktok_video(p) or _is_short_link(p)):
@@ -231,6 +238,13 @@ def classify(url: str) -> Video:
     """
     check(url)
     p = _parse(url)
+    if pages.is_page(p.host):  # an episode page: the YouTube video it plays
+        try:
+            watch = pages.resolve(p.host, p.path)
+        except pages.PageError as e:
+            raise UnsupportedURL(str(e)) from e
+        video = classify(watch)
+        return Video(video.platform, video.video_id, video.url, video.kind, pages.page_url(p.host, p.path))
     if p.host in YOUTUBE_HOSTS:
         vid = _youtube_id(p)
         return Video("youtube", vid, f"https://www.youtube.com/watch?v={vid}")

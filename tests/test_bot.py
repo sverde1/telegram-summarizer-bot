@@ -158,13 +158,13 @@ async def test_bad_link_is_refused_before_queueing(app, telegram):
     access.set_state(FRIEND, "allowed")
     await send(app, msg_update(FRIEND, "http://192.168.1.1/?vm.tiktok.com/x"))
     assert state.queue.qsize() == 0 and db.recent_requests(FRIEND) == []
-    assert telegram.texts()[-1] == "⚠️ Only YouTube and TikTok links are supported."
+    assert telegram.texts()[-1] == "⚠️ Only YouTube, TikTok and London Real links are supported."
 
 
 async def test_again_without_a_link_redoes_the_latest_video(app, telegram):
     access.set_state(60, "allowed")
     await send(app, msg_update(60, "/again"))
-    assert telegram.texts()[-1] == "Send me a YouTube or TikTok link, or a book or document."  # nothing yet
+    assert telegram.texts()[-1] == "Send me a YouTube, TikTok or London Real link, or a book or document."  # nothing yet
     rid = db.add_request(60, "https://youtu.be/NQYo5_KMm6g?is=x", "summary")
     db.update_request(rid, platform="youtube", video_id="NQYo5_KMm6g", status="failed")
     db.add_request(60, "📄 b.pdf", "book")  # a later document isn't a video

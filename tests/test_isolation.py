@@ -42,4 +42,4 @@ def test_ffmpeg_is_allowed(tiny_video):
 
 async def test_fake_telegram_round_trip(app, telegram):
     await send(app, msg_update(ADMIN_ID, "/help"))
-    assert any("YouTube or TikTok link" in t for t in telegram.texts())
+    assert any("YouTube, TikTok or London Real link" in t for t in telegram.texts())

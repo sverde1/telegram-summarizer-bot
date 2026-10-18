@@ -517,7 +517,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await lifecycle.sync_commands(ctx.bot, uid)
     if action == "allow":
         try:
-            await ctx.bot.send_message(uid, "✅ You now have access. Send me a YouTube or TikTok link.\n\n"
+            await ctx.bot.send_message(uid, "✅ You now have access. Send me a YouTube, TikTok or London Real link.\n\n"
                                        + texts.HELP)
         except (BadRequest, Forbidden) as e:
             log.warning("couldn't notify user %s: %s", uid, e)

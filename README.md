@@ -1,6 +1,6 @@
 # Telegram video and book summarizer
 
-A private Telegram bot: send it a YouTube or TikTok link and it replies with
+A private Telegram bot: send it a YouTube, TikTok or London Real link and it replies with
 
 ```
 Title:
@@ -197,7 +197,7 @@ on your API account, separately from ChatGPT or Claude plans.
 
 1. Send your bot any message. With no admin configured it replies with your Telegram user id.
 2. Stop the bot (Ctrl+C), set `ADMIN_USER_IDS=<your id>` in `.env`, and start it again.
-3. Send it a YouTube or TikTok link.
+3. Send it a YouTube, TikTok or London Real link.
 
 The bot uses long polling. If the token was used with a webhook before (e.g. n8n), remove it first:
 `curl "https://api.telegram.org/bot<token>/deleteWebhook"`.
@@ -415,6 +415,16 @@ links, with bullets read as sentences. The whole summary is read, however long.
   20 per 24 h, `/limit voice`); reused ones are free.
 - Read in the language of `SUMMARY_LANGUAGE` (English, Spanish, French, Italian, Portuguese or Hindi; others
   get no button).
+
+### London Real links
+
+London Real episode pages (`https://londonreal.tv/<episode>/`) play a YouTube video. The bot fetches the
+page, finds the video it declares (its structured data, else the main player; a promo embedded below is
+ignored) and summarizes it like any YouTube link, so it shares the cache with the plain YouTube link. The
+footer shows both links; when the plain YouTube link is sent later, the London Real link is shown too, but
+only to admins and to users who sent that video before (it would otherwise reveal an earlier request).
+Members-only episodes have no YouTube video on the page and get a short explanation. Only the listed sites
+(`summarizer/pages.py`) are ever fetched, by a URL the bot rebuilds, with every redirect checked.
 
 ### Several links at once
 

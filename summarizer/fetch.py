@@ -32,7 +32,8 @@ class FetchError(Exception):
 
 
 def download(url: str, dest: Path, *, allowed: Callable[[str], bool], max_bytes: int, sha256: str | None = None,
-             refuse_html: bool = False, progress: Callable[[int, int | None], None] | None = None) -> dict:
+             refuse_html: bool = False, progress: Callable[[int, int | None], None] | None = None,
+             timeout: float = TIMEOUT) -> dict:
     """Downloads `url` to `dest` (written atomically), following redirects only to allowed hosts.
 
     Args:
@@ -43,6 +44,7 @@ def download(url: str, dest: Path, *, allowed: Callable[[str], bool], max_bytes:
         sha256: Expected checksum, if known.
         refuse_html: Treat an HTML answer as an error (file hosts answer with a page when access is denied).
         progress: Called with (bytes so far, total or None) about every 2 MB.
+        timeout: Seconds without data before giving up.
 
     Returns:
         {"filename": name from Content-Disposition or "", "size": bytes}.
@@ -71,7 +73,7 @@ def download(url: str, dest: Path, *, allowed: Callable[[str], bool], max_bytes:
     digest, size = hashlib.sha256(), 0
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.build_opener(Checked()).open(request, timeout=TIMEOUT) as r:
+        with urllib.request.build_opener(Checked()).open(request, timeout=timeout) as r:
             headers = r.headers
             if refuse_html and "text/html" in (headers.get("Content-Type") or ""):
                 raise FetchError("html", headers.get("Content-Type") or "")

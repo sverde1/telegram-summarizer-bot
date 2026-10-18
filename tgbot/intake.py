@@ -27,7 +27,7 @@ async def enqueue(update: Update, url: str | None, **opts) -> None:
         **opts: Job options: `use_cache=False` for /again, `transcript_only=True` for /transcript.
     """
     if not url:
-        await update.message.reply_text("Send me a YouTube or TikTok link, or a book or document.")
+        await update.message.reply_text("Send me a YouTube, TikTok or London Real link, or a book or document.")
         return
     try:
         link = links.parse(url)
@@ -202,7 +202,8 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             f"⚠️ I can't read {ext} files. Convert it to PDF or EPUB and send it again.")
         return
     if ext not in DOC_EXTENSIONS:
-        await update.message.reply_text(f"⚠️ I can summarize {DOC_FORMATS} files, and YouTube or TikTok links.")
+        await update.message.reply_text(
+            f"⚠️ I can summarize {DOC_FORMATS} files, and YouTube, TikTok or London Real links.")
         return
     if not d.file_size or d.file_size > TG_DOWNLOAD_LIMIT:
         await update.message.reply_text(texts.TOO_BIG)
@@ -294,7 +295,8 @@ async def _offer_link(update: Update, url: str, link: links.FileLink) -> None:
             f"⚠️ I can't read {ext} files. Convert it to PDF or EPUB and send it again.")
         return
     if link.name and ext not in DOC_EXTENSIONS:
-        await update.message.reply_text(f"⚠️ I can summarize {DOC_FORMATS} files, and YouTube or TikTok links.")
+        await update.message.reply_text(
+            f"⚠️ I can summarize {DOC_FORMATS} files, and YouTube, TikTok or London Real links.")
         return
     upload_id = db.add_link_upload(update.effective_user.id, url, name)
     await update.message.reply_text(f"📄 {name} ({link.service})\nHow should I summarize it?",

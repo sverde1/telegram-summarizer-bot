@@ -30,6 +30,7 @@ with no GPU.
 | `tgbot/markdown.py` | 📄 Download: the Markdown file of a delivered summary (summary + transcript; a book's full text). |
 | `summarizer/netjail.py` | The network jail: bwrap with its own network (slirp4netns) and fixed nftables rules, internet only; the startup self-check. |
 | `summarizer/group.py` | Several links in one message: transcripts side by side, parts of one video detected (markers, same title, AI for ambiguous), one "series" summary; `GroupResult`. |
+| `summarizer/pages.py` | Video pages (London Real): the allowed sites, episode-link check, the YouTube video a page plays. |
 | `summarizer/cpu.py` | The CPU slot: Whisper, OCR, frame sweeps and Kokoro take turns (FIFO, cancellable); waits are tracked and left out of timings. |
 | `summarizer/results.py` | `JobResult`, the base of every result (cache and pacing fields, `head()`, `work_seconds()`, `llm_label()`). |
 | `access.py` | Who may use the bot (admins from `.env`, others from the `users` table). |
@@ -149,6 +150,9 @@ How the tests are isolated (`tests/conftest.py`):
 - Unit conversion is display-only (`units.convert` in `render` / `render_document` / answers / the 📄 file / the 🔊 text); never store
   converted text. Only the converted value is shown, so add a guard and a test for every new unit or
   phrasing that could be read wrongly.
+- Video pages (London Real) only from `pages.SITES`: fetched by a URL rebuilt from host and path through
+  `fetch.download` with that host check, the HTML only regex-scanned for the YouTube id it declares (never
+  parsed, run or logged). Page links from earlier requests show in a footer only when `reveal_cache` allows.
 - Links are accepted only through `urls.check` / `urls.classify` (host allow-list; TikTok short-link
   redirects validated hop by hop). Never fetch a user-supplied URL any other way.
 - The bot answers only in private chats; every message/command handler is filtered to private chats and
