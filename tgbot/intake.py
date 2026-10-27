@@ -168,8 +168,8 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text(texts.MEDIA_TOO_BIG)
         return
     seconds = _seconds(getattr(f, "duration", None))
-    if seconds > config.MAX_DURATION_MIN * 60:
-        await msg.reply_text(f"⚠️ This recording is longer than {config.MAX_DURATION_MIN} min; skipping.")
+    if seconds > config.MAX_WHISPER_MIN * 60:  # recordings always need Whisper
+        await msg.reply_text(f"⚠️ This recording is longer than {config.MAX_WHISPER_MIN} min; skipping.")
         return
     if seconds and not memory.can_ever_fit(memory.whisper_needs(seconds, transcribe.is_loaded())):
         await msg.reply_text("🧠 This recording is too long to transcribe on this machine.")

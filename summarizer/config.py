@@ -52,7 +52,11 @@ WHISPER_COMPUTE_TYPE = _env("WHISPER_COMPUTE_TYPE", "int8" if WHISPER_DEVICE == 
 WHISPER_CPU_THREADS = int(_env("WHISPER_CPU_THREADS", "0"))  # 0 = ctranslate2 default
 
 # Limits
-MAX_DURATION_MIN = int(_env("MAX_DURATION_MIN", "180"))
+# Longest video accepted at all (captions are quick at any length), and the longest one Whisper transcribes:
+# Whisper holds the CPU slot for ~0.25x the audio's length, so everyone else's Whisper and OCR waits meanwhile.
+# Recordings people send always need Whisper.
+MAX_DURATION_MIN = int(_env("MAX_DURATION_MIN", "300"))
+MAX_WHISPER_MIN = int(_env("MAX_WHISPER_MIN", "180"))
 # Per-user and global queue limits, and how often one user may redo (/again) the same video. Admins are exempt.
 # They keep one account (careless or borrowed) from using up the LLM limits or blocking everyone for hours.
 MAX_QUEUED_PER_USER = int(_env("MAX_QUEUED_PER_USER", "3"))  # queued + running

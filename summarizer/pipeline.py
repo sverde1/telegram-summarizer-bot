@@ -545,8 +545,9 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         dur = meta["duration"] or 0
         what = "This recording" if is_file else "Video"
         st.head = status_head(video.platform, video.url, meta, photo=video.kind == "photo")
-        if dur > config.MAX_DURATION_MIN * 60:
-            raise PipelineError(f"{what} is longer than {config.MAX_DURATION_MIN} min; skipping.")
+        limit = config.MAX_WHISPER_MIN if is_file else config.MAX_DURATION_MIN
+        if dur > limit * 60:
+            raise PipelineError(f"{what} is {fmt_duration(dur)} long, over the {limit} min limit; skipping.")
         if not dur and not (video.kind == "photo" or meta.get("is_carousel")):
             # Without a length there's no limit on the download (and the length check above can't work).
             # Carousels are fine: their "duration" is just the background music's, if any.
@@ -792,6 +793,11 @@ def _whisper(video, meta, workdir, st: Status, notes, why: str, rest: float) -> 
         couldn't be downloaded or has no audio stream.
     """
     dur = meta["duration"] or 0
+    if dur > config.MAX_WHISPER_MIN * 60:
+        # Only Whisper is capped this low: a long video with captions costs no CPU time.
+        what = "This recording" if video.platform == "file" else f"{why}, and this video"
+        raise PipelineError(f"{what} is too long to transcribe: {fmt_duration(dur)}, over the "
+                            f"{config.MAX_WHISPER_MIN} min limit for transcription.")
     # Check memory before downloading anything: a job that has to wait shouldn't hold a download meanwhile.
     needed = memory.whisper_needs(dur, transcribe.is_loaded())
     if not memory.can_ever_fit(needed):

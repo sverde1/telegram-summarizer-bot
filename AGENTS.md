@@ -172,7 +172,8 @@ voice-message limit (new ones only:
 limit (`kind='ask'`, queued ones included; never the daily limit; one open question per summary), the OCR limit (`requests.ocr`, set when an OCR run
 starts; cancelled runs count), the OCR page cap with admin approval (`ocr_holds`), the daily limit (global in the `settings` table,
 per-user override in `users.daily_limit`, read from the database on each check), per-user and total queue
-limits, the `/again` cooldown, the pending-request cap and reply throttling, the memory guard, and the
+limits, the `/again` cooldown, the pending-request cap and reply throttling, the memory guard, the
+length caps (`MAX_DURATION_MIN` for any video, `MAX_WHISPER_MIN` for anything Whisper transcribes), and the
 frame-grab cap. Admins are exempt from the daily and queue limits.
 
 **Privacy:** who submitted which video is visible only to admins. Regular users may only learn that a

@@ -31,8 +31,26 @@ def test_again_skips_the_cache(fake_media, llm):
 
 def test_too_long_video_is_refused(monkeypatch, llm):
     monkeypatch.setattr(media, "probe", lambda v, *a, **k: meta(duration=10 ** 6))
-    with pytest.raises(pipeline.PipelineError, match="longer than"):
+    with pytest.raises(pipeline.PipelineError, match="over the 300 min limit"):
         pipeline.run(URL, lambda *a: None)
+
+
+def test_long_video_with_captions_is_summarized(fake_media, monkeypatch, llm):
+    """Over the Whisper cap but within MAX_DURATION_MIN: captions cost no CPU time, so it goes through."""
+    monkeypatch.setattr(media, "probe", lambda v, *a, **k: meta(duration=4 * 3600))
+    # Talk throughout (a sparse transcript would make it a visual video and grab frames).
+    monkeypatch.setattr(media, "fetch_captions", lambda v, m, w: ([(0.0, "word " * 30000)], "en"))
+    assert pipeline.run(URL, lambda *a: None).summary["summary"] == "A summary."
+
+
+def test_long_video_without_captions_is_not_transcribed(fake_media, monkeypatch, llm):
+    monkeypatch.setattr(media, "probe", lambda v, *a, **k: meta(duration=4 * 3600))
+    monkeypatch.setattr(media, "fetch_captions", lambda v, m, w: None)
+    monkeypatch.setattr(media, "download_audio", lambda *a: pytest.fail("audio downloaded"))
+    with pytest.raises(pipeline.PipelineError, match="No captions, and this video is too long to transcribe: "
+                                                     "4:00:00, over the 180 min limit"):
+        pipeline.run(URL, lambda *a: None)
+    assert not llm
 
 
 def test_frames_requested_by_the_llm_go_into_turn_two(fake_media, monkeypatch, tmp_path):
