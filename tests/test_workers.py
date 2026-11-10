@@ -5,7 +5,7 @@ import threading
 import pytest
 
 import access
-from summarizer import cpu, db, pipeline
+from summarizer import cpu, db, pipeline, summarize
 
 from conftest import callback_update, msg_update, send
 from tgbot import jobs, state
@@ -158,3 +158,47 @@ async def test_try_again_after_a_cancel_or_a_restart(app, telegram, pipe):
     state.reset()
     await send(app, callback_update(ANA, f"retry:{rid2}"))
     assert state.queue.qsize() == 1 and state.jobs[rid2].url == CAPTIONED
+
+
+async def test_try_again_after_the_ai_usage_limit(app, telegram, pipe, monkeypatch):
+    run = pipeline.run
+    limited = [True]
+
+    def limit_once(url, progress, **kw):
+        """Fails with the AI's usage limit until the limit is lifted."""
+        if limited[0]:
+            raise pipeline.PipelineError(summarize.AI_LIMIT, detail="ChatGPT usage limit: see https://chatgpt.com")
+        return run(url, progress, **kw)
+
+    monkeypatch.setattr(pipeline, "run", limit_once)
+    workers = [asyncio.create_task(jobs.worker(app))]
+    try:
+        await send(app, msg_update(ANA, CAPTIONED))
+        rid = db.recent_requests(ANA)[0]["id"]
+        await _until(lambda: db.get_request(rid)["status"] == "failed")
+        assert f"retry:{rid}" in _markup(telegram, ANA)
+        last = [d for m, d in telegram.calls if m == "editMessageText" and d.get("chat_id") == ANA][-1]
+        assert "is_disabled" in str(last.get("link_preview_options"))  # the admin's details hold a link
+        limited[0] = False
+        await send(app, callback_update(ANA, f"retry:{rid}"))
+        await _until(lambda: db.get_request(rid)["status"] == "done")
+        assert len(db.recent_requests(ANA)) == 1  # the same request, counted once
+    finally:
+        for w in workers:
+            w.cancel()
+
+
+async def test_other_failures_get_no_try_again(app, telegram, pipe, monkeypatch):
+    def too_long(url, progress, **kw):
+        """Fails for a reason that won't pass."""
+        raise pipeline.PipelineError("Video is too long.")
+
+    monkeypatch.setattr(pipeline, "run", too_long)
+    workers = [asyncio.create_task(jobs.worker(app))]
+    try:
+        await send(app, msg_update(ANA, CAPTIONED))
+        await _until(lambda: db.recent_requests(ANA)[0]["status"] == "failed")
+        assert "retry:" not in _markup(telegram, ANA)
+    finally:
+        for w in workers:
+            w.cancel()

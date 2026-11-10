@@ -736,7 +736,9 @@ async def on_ask_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_retry_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles 🔁 Try again (`retry:<request id>`): queues a cancelled or stopped job again, as it was.
+    """Handles 🔁 Try again (`retry:<request id>`): queues a cancelled, stopped or failed job again, as it was.
+
+    Failed jobs get the button only when the failure can pass (jobs.RETRYABLE: the AI's usage limit).
 
     The job comes from the request row (requests.job), so this works after a restart too. It continues the
     same request, which already counted toward the user's limits; only the queue limits apply.
@@ -748,7 +750,7 @@ async def on_retry_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     if req is None or not owns(uid, req["user_id"]) or not req.get("job"):
         await q.answer("This isn't available.")
         return
-    if req["status"] != "cancelled" or req["id"] in state.jobs:
+    if req["status"] not in ("cancelled", "failed") or req["id"] in state.jobs:
         await q.answer("Already on its way.")
         return
     if refusal := limits.refusal(req["user_id"], new_request=False):

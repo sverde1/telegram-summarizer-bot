@@ -46,8 +46,12 @@ def describe(job: state.Job) -> str:
     return job.url[:300]  # a link before its lookup, or a file's label ("🎤 Voice message", "📄 book.pdf")
 
 
+# Failures that are about the AI right now, not the request: the same job can work later, so they get 🔁.
+RETRYABLE = (summarize.AI_LIMIT, summarize.AI_FAILED)
+
+
 def retry_button(request_id: int) -> InlineKeyboardMarkup:
-    """The 🔁 Try again button under a cancelled or stopped job (handlers.on_retry_button)."""
+    """The 🔁 Try again button under a cancelled, stopped or RETRYABLE job (handlers.on_retry_button)."""
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔁 Try again", callback_data=f"retry:{request_id}")]])
 
 
@@ -314,7 +318,8 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: state
             db.update_request(job.request_id, status="failed", error=(detail or str(e))[:500])
             if detail:
                 log.warning("job %s failed: %s (%s)", job.request_id, e, detail)
-            await fail(app, job, str(e), detail if access.is_admin(job.user_id) else None)
+            await fail(app, job, str(e), detail if access.is_admin(job.user_id) else None,
+                       markup=retry_button(job.request_id) if str(e) in RETRYABLE else None)
             if isinstance(e, pipeline.Blocked):
                 await _notify_admins_of_block(app, e)
         else:  # report, don't crash the worker
@@ -500,8 +505,10 @@ async def fail(app: Application, job: state.Job, msg: str, detail: str | None = 
         text += f"\n\nDetails: {detail[:800]}"
     try:
         try:
-            await app.bot.edit_message_text(text, job.chat_id, job.status_id, reply_markup=markup)
+            # No link previews: an admin's details can hold a link (e.g. ChatGPT's "upgrade" page).
+            await app.bot.edit_message_text(text, job.chat_id, job.status_id, reply_markup=markup,
+                                            disable_web_page_preview=True)
         except BadRequest:
-            await app.bot.send_message(job.chat_id, text, reply_markup=markup)
+            await app.bot.send_message(job.chat_id, text, reply_markup=markup, disable_web_page_preview=True)
     except TelegramError as e:
         log.warning("couldn't report the failure of job %s: %s", job.request_id, e)
