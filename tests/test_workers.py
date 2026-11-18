@@ -188,6 +188,33 @@ async def test_try_again_after_the_ai_usage_limit(app, telegram, pipe, monkeypat
             w.cancel()
 
 
+async def test_try_again_after_a_platform_block(app, telegram, pipe, monkeypatch):
+    run = pipeline.run
+    blocked = [True]
+
+    def block_once(url, progress, **kw):
+        """Fails with YouTube's bot check until the block lifts."""
+        if blocked[0]:
+            raise pipeline.Blocked("🚫 YouTube is currently blocking downloads…", detail="Sign in to confirm",
+                                   platform="youtube")
+        return run(url, progress, **kw)
+
+    monkeypatch.setattr(pipeline, "run", block_once)
+    workers = [asyncio.create_task(jobs.worker(app))]
+    try:
+        await send(app, msg_update(ANA, CAPTIONED))
+        rid = db.recent_requests(ANA)[0]["id"]
+        await _until(lambda: db.get_request(rid)["status"] == "failed")
+        assert f"retry:{rid}" in _markup(telegram, ANA)
+        blocked[0] = False
+        await send(app, callback_update(ANA, f"retry:{rid}"))
+        await _until(lambda: db.get_request(rid)["status"] == "done")
+        assert len(db.recent_requests(ANA)) == 1  # the same request, counted once
+    finally:
+        for w in workers:
+            w.cancel()
+
+
 async def test_other_failures_get_no_try_again(app, telegram, pipe, monkeypatch):
     def too_long(url, progress, **kw):
         """Fails for a reason that won't pass."""

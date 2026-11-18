@@ -50,8 +50,22 @@ def describe(job: state.Job) -> str:
 RETRYABLE = (summarize.AI_LIMIT, summarize.AI_FAILED)
 
 
+def retryable(e: Exception) -> bool:
+    """Whether a failed job may pass if tried again later, so its error message gets 🔁 Try again.
+
+    Args:
+        e: The job's expected failure (PipelineError / UnsupportedURL).
+
+    Returns:
+        True for the AI's limit or a passing AI failure (RETRYABLE), and for a platform blocking the
+        server (pipeline.Blocked: such blocks lift within hours, and the message names the platform, so it
+        can't be in RETRYABLE).
+    """
+    return isinstance(e, pipeline.Blocked) or str(e) in RETRYABLE
+
+
 def retry_button(request_id: int) -> InlineKeyboardMarkup:
-    """The 🔁 Try again button under a cancelled, stopped or RETRYABLE job (handlers.on_retry_button)."""
+    """The 🔁 Try again button under a cancelled, stopped or retryable job (handlers.on_retry_button)."""
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔁 Try again", callback_data=f"retry:{request_id}")]])
 
 
@@ -319,7 +333,7 @@ async def _run_job(app: Application, loop: asyncio.AbstractEventLoop, job: state
             if detail:
                 log.warning("job %s failed: %s (%s)", job.request_id, e, detail)
             await fail(app, job, str(e), detail if access.is_admin(job.user_id) else None,
-                       markup=retry_button(job.request_id) if str(e) in RETRYABLE else None)
+                       markup=retry_button(job.request_id) if retryable(e) else None)
             if isinstance(e, pipeline.Blocked):
                 await _notify_admins_of_block(app, e)
         else:  # report, don't crash the worker

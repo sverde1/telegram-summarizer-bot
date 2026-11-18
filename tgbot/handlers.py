@@ -738,7 +738,8 @@ async def on_ask_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_retry_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles 🔁 Try again (`retry:<request id>`): queues a cancelled, stopped or failed job again, as it was.
 
-    Failed jobs get the button only when the failure can pass (jobs.RETRYABLE: the AI's usage limit).
+    Failed jobs get the button only when the failure can pass (jobs.retryable: the AI's usage limit, a
+    platform blocking the server).
 
     The job comes from the request row (requests.job), so this works after a restart too. It continues the
     same request, which already counted toward the user's limits; only the queue limits apply.
