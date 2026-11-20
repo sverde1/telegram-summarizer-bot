@@ -100,6 +100,8 @@ How the tests are isolated (`tests/conftest.py`):
   across chapters: APIs would resend everything, Claude Code would reuse a session id).
 - Continue Codex conversations by the exact session id from the first turn, never `--last`; jobs
   from different users must not mix.
+  A turn that goes silent (`CODEX_STALL_SEC`, `proc.run(idle_timeout=)`) is ended and run once more; a
+  stalled turn 2 first gets its session file back as it was, so the frames prompt isn't sent twice.
 - Jobs run side by side (`config.WORKERS` workers). Heavy CPU steps go through `cpu.slot` and time
   themselves without the wait (`cpu.waited`); a job is cancelled through its own event (`proc.job_cancel`,
   `Job.cancel_event`), never a global; thread pools inside a job come from `proc.pool` (plain pool threads

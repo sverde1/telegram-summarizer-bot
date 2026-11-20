@@ -22,12 +22,13 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 import uuid
 from pathlib import Path
 
-from . import config, netjail, proc
+from . import config, netjail, proc, stats
 
 log = logging.getLogger(__name__)
 
@@ -485,6 +486,36 @@ def llm_label(backend: str | None = None, model: str = "") -> str:
     return f"{BACKEND_NAMES[backend]} ({model})" if model else BACKEND_NAMES[backend]
 
 
+def llm_load(chars: int, n_images: int) -> float:
+    """Relative size of an LLM request, used to normalise measured LLM time.
+
+    Args:
+        chars: Transcript length in characters.
+        n_images: Number of images attached.
+
+    Returns:
+        1.0 for an empty request, growing with transcript length and images.
+    """
+    # 40000 chars (~10k tokens) roughly doubles the time of a minimal request; each image adds ~10%.
+    # Guesses that only need to be proportionate: stats.record() divides measured time by this factor.
+    return 1 + chars / 40000 + n_images * 0.1
+
+
+def eta_llm(chars: int, n_images: int, backend: str | None = None) -> float:
+    """Estimated seconds for one LLM turn.
+
+    Args:
+        chars: Transcript length in characters.
+        n_images: Number of images attached.
+        backend: LLM backend; defaults to config.LLM_BACKEND.
+
+    Returns:
+        Measured base time for the backend scaled by the request size.
+    """
+    # 25 s is the starting guess until the first real call on this machine has been measured.
+    return stats.get(f"llm:{backend or config.LLM_BACKEND}", 25) * llm_load(chars, n_images)
+
+
 class Conversation:
     """One LLM conversation about one video.
 
@@ -676,6 +707,28 @@ def _codex_error(stdout: str) -> str:
     return "; ".join(dict.fromkeys(m for m in found if m))
 
 
+def _thread_id(stdout: str) -> str | None:
+    """The session id in Codex's JSONL events (thread.started), if it got that far."""
+    for line in stdout.splitlines():
+        if '"thread.started"' in line:
+            try:
+                return json.loads(line).get("thread_id")
+            except json.JSONDecodeError:
+                pass
+    return None
+
+
+def _codex_stall_limit(chars: int, n_images: int) -> float | None:
+    """Seconds without output after which a Codex turn counts as hung; None when the watch is off.
+
+    Codex prints nothing between starting a turn and its answer, so a big request (a book chunk) is quiet for
+    as long as the model works: the limit grows with the request, at three times its usual duration.
+    """
+    if config.CODEX_STALL_SEC <= 0:
+        return None
+    return max(float(config.CODEX_STALL_SEC), 3 * eta_llm(chars, n_images, "codex"))
+
+
 class CodexConversation(Conversation):
     """Codex CLI on the ChatGPT subscription, run inside the bwrap sandbox."""
 
@@ -723,18 +776,8 @@ class CodexConversation(Conversation):
                 # Resume by this job's exact session id, never --last: with several users the "last"
                 # session could belong to someone else's video.
                 cmd = ["codex", "exec", "resume", *common, self.session, "-"]
-            # 15 min cap: long transcripts at high effort can take minutes, but a hung run must not block
-            # the one-job-at-a-time queue forever.
-            try:
-                p = proc.run(_bwrap(job) + cmd, input=prompt, timeout=900)
-            except proc.ProcTimeout:
-                raise SummaryError(AI_TIMEOUT, "Codex timed out")
-            for line in p.stdout.splitlines():  # JSONL events; thread.started carries the session id
-                if '"thread.started"' in line:
-                    try:
-                        self.session = json.loads(line).get("thread_id") or self.session
-                    except json.JSONDecodeError:
-                        pass
+            p = self._run(_bwrap(job) + cmd, prompt, _codex_stall_limit(len(prompt), len(images)), first)
+            self.session = _thread_id(p.stdout) or self.session
             out = job / "out" / "result.json"
             if p.returncode != 0 or not out.exists():
                 # Codex reports the actual failure as a JSON event on stdout; stderr often has only its
@@ -749,6 +792,59 @@ class CodexConversation(Conversation):
             if first and self.session:
                 self.model = self._session_model()
             return _parse(out.read_text(), schema)
+
+    def _run(self, cmd: list[str], prompt: str, idle: float | None, first: bool) -> subprocess.CompletedProcess:
+        """Runs one Codex turn; a turn that goes silent (a hung request at OpenAI) is ended and run once more.
+
+        Codex's own stream-idle retry waits 5 min and can't be shortened (its built-in provider can't be
+        configured), so the bot watches Codex's output itself.
+
+        Args:
+            cmd: The sandboxed Codex command.
+            prompt: Its input.
+            idle: Seconds without output that count as a stall; None = no watch.
+            first: Turn 1 (`codex exec`), else turn 2 (`codex exec resume`).
+
+        Raises:
+            SummaryError: The turn timed out, or stalled twice.
+        """
+        # 15 min cap for both attempts together: long transcripts at high effort can take minutes, but a hung
+        # run must not hold a worker forever.
+        deadline = time.monotonic() + 900
+        # The stalled resume already appended its prompt to the session; resuming that would send it twice.
+        saved = None if first else self._session_bytes()
+        for attempt in (1, 2):
+            try:
+                return proc.run(cmd, input=prompt, timeout=max(1.0, deadline - time.monotonic()), idle_timeout=idle)
+            except proc.ProcStalled as e:
+                log.warning("codex: turn %d printed nothing for %.0f s (attempt %d)", 1 if first else 2, idle,
+                            attempt)
+                if first:
+                    self._delete_session(_thread_id(e.stdout))
+                elif saved is not None:
+                    self._session_path().write_bytes(saved)
+                if attempt == 2:
+                    raise SummaryError(AI_FAILED, f"Codex stalled twice (no output for {idle:.0f} s)")
+            except proc.ProcTimeout:
+                raise SummaryError(AI_TIMEOUT, "Codex timed out")
+        raise AssertionError("unreachable")
+
+    def _session_path(self) -> Path | None:
+        """This conversation's session file, if it exists."""
+        if not self.session:
+            return None
+        return next((config.CODEX_HOME / "sessions").rglob(f"*{self.session}*.jsonl"), None)
+
+    def _session_bytes(self) -> bytes | None:
+        """The session file's content before turn 2, to restore if that turn stalls."""
+        path = self._session_path()
+        return path.read_bytes() if path else None
+
+    def _delete_session(self, session: str | None) -> None:
+        """Deletes a stalled turn 1's session file (nothing resumes it)."""
+        if session:
+            for f in (config.CODEX_HOME / "sessions").rglob(f"*{session}*.jsonl"):
+                f.unlink(missing_ok=True)
 
     def _session_model(self) -> str:
         """Returns the model that answered turn 1.

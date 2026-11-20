@@ -104,36 +104,6 @@ def fmt_duration(sec: float) -> str:
 # ---------- ETA estimates (seconds) ----------
 # Rough models, deliberately simple: the measured per-backend speed in stats.json corrects them over time.
 
-def llm_load(chars: int, n_images: int) -> float:
-    """Relative size of an LLM request, used to normalise measured LLM time.
-
-    Args:
-        chars: Transcript length in characters.
-        n_images: Number of images attached.
-
-    Returns:
-        1.0 for an empty request, growing with transcript length and images.
-    """
-    # 40000 chars (~10k tokens) roughly doubles the time of a minimal request; each image adds ~10%.
-    # Guesses that only need to be proportionate: stats.record() divides measured time by this factor.
-    return 1 + chars / 40000 + n_images * 0.1
-
-
-def eta_llm(chars: int, n_images: int, backend: str | None = None) -> float:
-    """Estimated seconds for one LLM turn.
-
-    Args:
-        chars: Transcript length in characters.
-        n_images: Number of images attached.
-        backend: LLM backend; defaults to config.LLM_BACKEND.
-
-    Returns:
-        Measured base time for the backend scaled by the request size.
-    """
-    # 25 s is the starting guess until the first real call on this machine has been measured.
-    return stats.get(f"llm:{backend or config.LLM_BACKEND}", 25) * llm_load(chars, n_images)
-
-
 def _eta_audio(duration: float) -> float:
     """Estimated seconds to download a video's audio track.
 
@@ -219,7 +189,7 @@ def _full_steps(r: Result, transcript_only: bool, backend: str) -> list[tuple[st
     if not r.meta.get("is_carousel") and not any(n in TRANSCRIPT_STEPS for n, _ in steps):
         steps.insert(1, _transcript_step(r.transcript_source, r.meta.get("duration") or 0))
     if not transcript_only and not any(n == "summary" for n, _ in steps):
-        steps.append(("summary", eta_llm(len(r.transcript), 1, backend)))
+        steps.append(("summary", summarize.eta_llm(len(r.transcript), 1, backend)))
     return steps
 
 
@@ -569,7 +539,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
 
         if is_carousel:
             # Photo post: the slides are the content; the audio is usually just a music track.
-            st.show("🖼 Photo post: downloading the slides…", 10 + eta_llm(0, 10, backend))
+            st.show("🖼 Photo post: downloading the slides…", 10 + summarize.eta_llm(0, 10, backend))
             t = time.monotonic()
             slides = media.download_carousel(video, workdir)
             if not slides:
@@ -591,7 +561,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
                 # bot off the worker (Result.hold), so nobody else's job waits for this pause.
                 label, eta = _transcript_step(source, dur)
                 pause = min(eta * REPLAY_SHARE, REPLAY_MAX)
-                st.show(replay_stage(label, llm), pause + eta_llm(len(cached["transcript"]), 1, backend))
+                st.show(replay_stage(label, llm), pause + summarize.eta_llm(len(cached["transcript"]), 1, backend))
                 st.frozen = True
                 paced = (label, pause)
                 st.ok("✅ Transcript ready")
@@ -633,7 +603,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
         first_images = ([(thumb, "thumbnail")] if thumb else []) + images  # slides or frames, if any
         conv = summarize.conversation(backend, model)
         try:
-            st.show(f"🧠 Summarizing with {llm}…", eta_llm(len(transcript), len(first_images), backend))
+            st.show(f"🧠 Summarizing with {llm}…", summarize.eta_llm(len(transcript), len(first_images), backend))
             t_llm = time.monotonic()
             answer = conv.start(meta, video.platform, transcript, source, lang, first_images)
             proc.check_cancelled()  # an API call can't be interrupted; at least don't go on after it
@@ -644,7 +614,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
             took("summary", t_llm)
             # Store the time per unit of request size, so future ETAs scale to each request.
             stats.record(f"llm:{backend}",
-                         (time.monotonic() - t_llm) / llm_load(len(transcript), len(first_images)))
+                         (time.monotonic() - t_llm) / summarize.llm_load(len(transcript), len(first_images)))
             summary = {k: answer[k] for k in summarize.SCHEMA["required"]}
             log.info("needs_frames=%s moments=%s", answer.get("needs_frames"), answer.get("frame_moments"))
             # Not when it already has slides or frames.
@@ -655,7 +625,7 @@ def _process(video, progress, cached: dict | None, transcript_only: bool, t0: fl
                 took(f"{len(frames_)} frames", t)
                 if frames_:
                     st.show(f"🧠 {llm} is updating the summary with {len(frames_)} frames…",
-                            eta_llm(0, len(frames_), backend))
+                            summarize.eta_llm(0, len(frames_), backend))
                     try:
                         t = time.monotonic()
                         # Same conversation: the transcript is already in context and in the provider's
@@ -757,7 +727,7 @@ def _frames(video, meta, cues, moments: list[dict], workdir, st: Status, notes, 
     # things shown briefly between the moments it named).
     sweep = not times or frames.is_short(meta)
     st.show(f"🎞 Grabbing frames: {why or reasons or 'LLM wants to see the video'}…",
-            _eta_frames(dur) + eta_llm(0, config.MAX_FRAMES))
+            _eta_frames(dur) + summarize.eta_llm(0, config.MAX_FRAMES))
     try:
         vid = media.download_video(video, workdir)
         # Phrase matches ("this book", "as you can see") back up the LLM's choice of moments.
@@ -891,7 +861,7 @@ def _transcript(video, meta, workdir, st: Status, notes, transcript_only: bool) 
         (cues, source, language); ([], "none", ...) when no transcript could be made.
     """
     dur = meta["duration"] or 0
-    rest = 0 if transcript_only else eta_llm(_chars_for(dur), 1)
+    rest = 0 if transcript_only else summarize.eta_llm(_chars_for(dur), 1)
     if video.platform == "youtube":
         # Captions take about a second; Whisper on this CPU takes ~0.3x the video's length.
         st.show("📝 Checking for YouTube captions…")

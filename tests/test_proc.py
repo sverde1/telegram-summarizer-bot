@@ -132,3 +132,49 @@ def test_outside_a_job_nothing_cancels_a_program():
     proc.cancel_event().set()  # the test's own "job" is cancelled
     p = contextvars.Context().run(lambda: proc.run([PY, "-c", "print('ok')"], timeout=10))
     assert p.stdout.strip() == "ok" and not contextvars.Context().run(proc.cancel_event).is_set()
+
+
+def test_a_program_that_stops_printing_is_killed_as_stalled(tmp_path):
+    pidfile = tmp_path / "child.pid"
+    script = (f"import os, sys, time; open({str(pidfile)!r}, 'w').write(str(os.getpid())); "
+              "print('started', flush=True); time.sleep(60)")
+    start = time.monotonic()
+    with pytest.raises(proc.ProcStalled) as e:
+        proc.run([PY, "-c", script], timeout=30, idle_timeout=1)
+    assert 1 <= time.monotonic() - start < 4
+    assert e.value.stdout == "started\n" and isinstance(e.value, proc.ProcTimeout)
+    time.sleep(0.2)
+    assert not _pid_alive(int(pidfile.read_text()))
+
+
+def test_a_program_that_keeps_printing_is_not_stalled():
+    script = "import time\nfor i in range(8):\n    print(i, flush=True); time.sleep(0.2)"
+    p = proc.run([PY, "-c", script], timeout=30, idle_timeout=0.6)
+    assert p.returncode == 0 and p.stdout.split() == [str(i) for i in range(8)]
+
+
+def test_watched_run_passes_big_input_and_both_outputs():
+    big = "x" * 3_000_000  # far more than a pipe buffer
+    p = proc.run([PY, "-c", "import sys; d = sys.stdin.read(); print(len(d)); print('e', file=sys.stderr)"],
+                 timeout=30, input=big, idle_timeout=5)
+    assert (p.stdout.strip(), p.stderr.strip()) == ("3000000", "e")
+    p = proc.run([PY, "-c", "import sys; sys.stdout.buffer.write(bytes([0, 255]))"], timeout=10, text=False,
+                 idle_timeout=5)
+    assert p.stdout == b"\x00\xff"
+
+
+def test_watched_run_still_honours_the_deadline_and_a_cancel():
+    chatty = "import time\nwhile True:\n    print('.', flush=True); time.sleep(0.1)"
+    with pytest.raises(proc.ProcTimeout) as e:
+        proc.run([PY, "-c", chatty], timeout=1, idle_timeout=5)
+    assert not isinstance(e.value, proc.ProcStalled)
+    event = threading.Event()
+    token = proc.job_cancel.set(event)
+    try:
+        threading.Timer(0.5, event.set).start()
+        start = time.monotonic()
+        with pytest.raises(proc.ProcCancelled):
+            proc.run([PY, "-c", chatty], timeout=30, idle_timeout=5)
+        assert time.monotonic() - start < 3
+    finally:
+        proc.job_cancel.reset(token)

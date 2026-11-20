@@ -1,5 +1,6 @@
 """Prompts, parsing, backends and the Codex command line."""
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -100,3 +101,70 @@ def test_codex_errors_come_from_its_json_events():
 def test_the_prompt_ignores_ads_in_descriptions():
     assert "affiliate or shop links" in summarize.SYSTEM and "mention a sponsorship only in the caveats" in \
         summarize.SYSTEM
+
+
+def _stalling_codex(codex_home, stalls: set[int], seen: list):
+    """A fake proc.run playing Codex whose calls numbered in `stalls` hang (ProcStalled) after appending to the
+    session file, as a real stalled turn does; the others answer. `seen` gets (call, session file, idle)."""
+    calls = []
+    shutil.rmtree(Path(config.CODEX_HOME) / "sessions", ignore_errors=True)  # the Codex home outlives one test
+
+    def fake_run(cmd, *, timeout, input=None, idle_timeout=None, **kwargs):
+        """Writes the session file and the answer like Codex, or stalls."""
+        calls.append(cmd)
+        n = len(calls)
+        session = Path(config.CODEX_HOME) / "sessions" / "2026" / "rollout-x-S-1.jsonl"
+        session.parent.mkdir(parents=True, exist_ok=True)
+        seen.append((n, session.read_text() if session.exists() else None, idle_timeout))
+        with session.open("a") as f:
+            f.write(f"call {n}\n")
+        if n in stalls:
+            raise summarize.proc.ProcStalled("codex printed nothing",
+                                             stdout='{"type":"thread.started","thread_id":"S-1"}\n')
+        out_dir = cmd[cmd.index("/job/out") - 1]
+        resumed = "resume" in cmd
+        (Path(out_dir) / "result.json").write_text(json.dumps(
+            SUMMARY | ({} if resumed else {"needs_frames": False, "frame_moments": []})))
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"type":"thread.started","thread_id":"S-1"}\n', stderr="")
+
+    return fake_run
+
+
+def _start(conv):
+    """Turn 1 of a small video summary."""
+    return conv.start({"title": "t", "uploader": "u", "upload_date": "", "duration": 1, "description": ""},
+                      "youtube", "text", "captions", "en", [])
+
+
+def test_a_stalled_codex_turn_two_is_resumed_from_the_session_as_it_was(codex_home, monkeypatch):
+    seen = []
+    monkeypatch.setattr(summarize.proc, "run", _stalling_codex(codex_home, {2}, seen))
+    conv = summarize.conversation("codex")
+    _start(conv)
+    assert conv.add_frames([])["summary"] == SUMMARY["summary"]
+    # The retry (call 3) sees the session as turn 1 left it, without the stalled attempt's frames prompt.
+    assert [s for _, s, _ in seen] == [None, "call 1\n", "call 1\n"]
+    assert all(idle >= config.CODEX_STALL_SEC for _, _, idle in seen)
+
+
+def test_a_stalled_codex_turn_one_runs_again_fresh(codex_home, monkeypatch):
+    seen = []
+    monkeypatch.setattr(summarize.proc, "run", _stalling_codex(codex_home, {1}, seen))
+    conv = summarize.conversation("codex")
+    assert _start(conv)["summary"] == SUMMARY["summary"]
+    assert [s for _, s, _ in seen] == [None, None]  # the stalled attempt's session was deleted
+
+
+def test_codex_stalling_twice_fails_with_try_again(codex_home, monkeypatch):
+    monkeypatch.setattr(summarize.proc, "run", _stalling_codex(codex_home, {1, 2}, []))
+    with pytest.raises(summarize.SummaryError) as e:
+        _start(summarize.conversation("codex"))
+    assert str(e.value) == summarize.AI_FAILED and "stalled twice" in e.value.detail
+
+
+def test_codex_stall_limit_grows_with_the_request_and_can_be_off(monkeypatch):
+    monkeypatch.setattr(config, "CODEX_STALL_SEC", 150)
+    assert summarize._codex_stall_limit(1000, 0) == 150
+    assert summarize._codex_stall_limit(config.BOOK_CHUNK_CHARS, 0) > 150  # a book chunk is quiet for longer
+    monkeypatch.setattr(config, "CODEX_STALL_SEC", 0)
+    assert summarize._codex_stall_limit(1000, 0) is None

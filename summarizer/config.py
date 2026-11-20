@@ -35,6 +35,10 @@ SUMMARY_LANGUAGE = _env("SUMMARY_LANGUAGE", "English")
 # codex: ChatGPT subscription. Empty model = Codex's default.
 CODEX_MODEL = _env("CODEX_MODEL")
 CODEX_EFFORT = _env("CODEX_EFFORT", "medium")
+# A Codex turn that prints nothing this long (seconds) is hung at OpenAI: it's ended and run once more. Codex's own
+# retry waits 5 min. 150 s is above the longest normal turn seen (120 s); big requests get more (3x their usual
+# time). 0 = no watch.
+CODEX_STALL_SEC = int(_env("CODEX_STALL_SEC", "150"))
 # claude-code: Claude subscription. api: Anthropic API key.
 CLAUDE_CODE_MODEL = _env("CLAUDE_CODE_MODEL", "claude-opus-5-5")
 CLAUDE_MODEL = _env("CLAUDE_MODEL", "claude-opus-5-5")

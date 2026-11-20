@@ -254,6 +254,7 @@ The database migrates itself on start.
 | `LLM_BACKEND` | `codex` | Default provider: `codex`, `claude-code`, `api` (Claude) or `openai-api`. |
 | `CODEX_MODEL` | – (`.env.example`: `gpt-6-sol`) | Default Codex model (empty = Codex's own default). |
 | `CODEX_EFFORT` / `CLAUDE_EFFORT` | `medium` | Reasoning effort. |
+| `CODEX_STALL_SEC` | `150` | A Codex call that prints nothing this long (seconds) is hung at OpenAI: it's ended and retried once. Big requests (book chunks) get three times their usual duration if that's longer. `0` turns it off. |
 | `CLAUDE_CODE_MODEL` / `CLAUDE_MODEL` | `claude-opus-5-5` | Default model for Claude Code / the API. |
 | `ANTHROPIC_API_KEY` | – | Enables the Claude API provider. |
 | `OPENAI_API_KEY` | – | Enables the OpenAI API provider. |

@@ -69,6 +69,19 @@ class ProcTimeout(ProcError):
     """The program ran past its time limit and was killed."""
 
 
+class ProcStalled(ProcTimeout):
+    """The program printed nothing for its idle limit and was killed (a hung network call, e.g. Codex).
+
+    Attributes:
+        stdout: What it printed before (text), e.g. to find the session it started.
+    """
+
+    def __init__(self, message: str, stdout: str = ""):
+        """Keeps the output printed before the stall."""
+        super().__init__(message)
+        self.stdout = stdout
+
+
 class ProcCancelled(ProcError):
     """The job was cancelled while the program ran, so it was killed. Never swallow this: it must reach the
     worker, which stops the job."""
@@ -101,7 +114,7 @@ def _kill(p: subprocess.Popen) -> None:
 
 
 def run(cmd: list[str], *, timeout: float, input: str | bytes | None = None, text: bool = True,
-        env: dict | None = None, cwd=None) -> subprocess.CompletedProcess:
+        env: dict | None = None, cwd=None, idle_timeout: float | None = None) -> subprocess.CompletedProcess:
     """Runs a program to completion and captures its output.
 
     Args:
@@ -111,15 +124,20 @@ def run(cmd: list[str], *, timeout: float, input: str | bytes | None = None, tex
         text: Decode output as text (False: bytes, e.g. raw audio samples).
         env: Environment for the program; None = config.clean_env() (everything except the bot's secrets).
         cwd: Working directory.
+        idle_timeout: Seconds without any output (stdout or stderr) before the program counts as hung and
+            is killed; None = no such limit.
 
     Returns:
         The finished process (returncode, stdout, stderr); a non-zero exit is not an error here.
 
     Raises:
+        ProcStalled: No output for idle_timeout seconds (a ProcTimeout too).
         ProcTimeout: The time limit passed.
         ProcCancelled: The current job was cancelled.
         OSError: The program couldn't be started (e.g. not installed).
     """
+    if idle_timeout:
+        return _run_watched(cmd, timeout, input, text, env, cwd, idle_timeout)
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text,
                          env=config.clean_env() if env is None else env, cwd=cwd,
@@ -139,3 +157,81 @@ def run(cmd: list[str], *, timeout: float, input: str | bytes | None = None, tex
         if time.monotonic() > deadline:
             _kill(p)
             raise ProcTimeout(f"{os.path.basename(cmd[0])} took longer than {timeout:.0f} s")
+
+
+def _run_watched(cmd: list[str], timeout: float, input: str | bytes | None, text: bool, env: dict | None, cwd,
+                 idle_timeout: float) -> subprocess.CompletedProcess:
+    """run() that also notices when the program stops printing; see run() for the arguments.
+
+    communicate() can't tell when output last arrived, so threads move the bytes: one reader per pipe (noting
+    the time of each chunk) and one writer for stdin (the input can be bigger than the pipe buffer). They only
+    move bytes, so they don't need the job's cancel: the polling loop here checks it and kills the group,
+    which ends their pipes.
+    """
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env=config.clean_env() if env is None else env, cwd=cwd, start_new_session=True)
+    out: list[bytes] = []
+    err: list[bytes] = []
+    last = [time.monotonic()]
+
+    def pump(stream, chunks: list[bytes]) -> None:
+        """Collects one pipe until it closes, noting when output arrives."""
+        for data in iter(lambda: stream.read1(65536), b""):
+            chunks.append(data)
+            last[0] = time.monotonic()
+
+    def feed() -> None:
+        """Writes the input and closes stdin, so the program sees its end."""
+        try:
+            p.stdin.write(input.encode() if isinstance(input, str) else input)
+            p.stdin.close()
+        except OSError:
+            pass  # the program exited (or was killed) without reading it all
+
+    threads = [threading.Thread(target=pump, args=(p.stdout, out), daemon=True),
+               threading.Thread(target=pump, args=(p.stderr, err), daemon=True)]
+    if input is not None:
+        threads.append(threading.Thread(target=feed, daemon=True))
+    for t in threads:
+        t.start()
+
+    def decode(chunks: list[bytes]) -> str | bytes:
+        """The collected output, as text when asked for."""
+        data = b"".join(chunks)
+        return data.decode(errors="replace") if text else data
+
+    def stop() -> None:
+        """Kills the whole process group and waits for the pipes to close."""
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            log.warning("process %s didn't exit after SIGKILL", p.pid)
+        for t in threads:
+            t.join(timeout=5)
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            p.wait(timeout=_POLL)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if _stopped():
+            stop()
+            raise ProcCancelled("cancelled")
+        now = time.monotonic()
+        if now > deadline:
+            stop()
+            raise ProcTimeout(f"{os.path.basename(cmd[0])} took longer than {timeout:.0f} s")
+        if now - last[0] > idle_timeout:
+            stop()
+            raise ProcStalled(f"{os.path.basename(cmd[0])} printed nothing for {idle_timeout:.0f} s",
+                              stdout=b"".join(out).decode(errors="replace"))
+    for t in threads:
+        t.join(timeout=5)  # the pipes close with the program (unless a child it left behind still holds them)
+    return subprocess.CompletedProcess(cmd, p.returncode, decode(out), decode(err))
